@@ -1,0 +1,347 @@
+<section class="lm-section" id="streams" data-title="Streams: pipelines and laziness" data-num="5">
+  <p class="lm-eyebrow">Section 5</p>
+  <h2 class="mb-4">Streams: pipelines and laziness</h2>
+
+  <p>A stream is not a collection. It holds no elements; it is a <em>description of a computation</em> over a source — a <code>List</code>, an array, a range of numbers, lines of a file — expressed as a chain of operations. Nothing happens when you build the chain. The work starts only when a <strong>terminal operation</strong> asks for a result, and then elements flow through the whole chain <em>one at a time</em>, each operation pulling from the one before it. That single fact — vertical, element-by-element, on demand — explains every behaviour in this section, including the ones that look like magic and the ones that look like bugs.</p>
+
+  <p>The vocabulary: a <strong>source</strong> (<code>stock.stream()</code>), zero or more <strong>intermediate operations</strong> that return a new stream (<code>filter</code>, <code>map</code>, <code>sorted</code>, <code>limit</code>…), and exactly one <strong>terminal operation</strong> that produces a value or a side effect and consumes the stream (<code>toList</code>, <code>count</code>, <code>findFirst</code>, <code>forEach</code>…).</p>
+
+  <h3 class="mt-8 mb-3">Worked example: proving laziness</h3>
+
+  <p>The <code>println</code> calls inside the lambdas are there only to make the order of execution visible. Read the trace against the pipeline that produced it.</p>
+
+  <pre data-code data-lang="java" data-file="StreamLazy.java" data-verify="StreamLazy" data-hi="9,10,11,18,23">
+import java.util.List;
+import java.util.Optional;
+
+public class StreamLazy {
+    public static void main(String[] args) {
+        List<String> skus = List.of("BOLT-7", "NUT-3", "GIRD-1", "CAM-9");
+
+        System.out.println("-- no terminal operation: nothing runs --");
+        skus.stream()
+            .filter(s -> { System.out.println("  filter " + s); return !s.startsWith("B"); })
+            .map(s -> { System.out.println("  map    " + s); return s.toLowerCase(); });
+        System.out.println("(pipeline built, zero elements processed)");
+
+        System.out.println("-- findFirst: one element at a time, and it stops early --");
+        Optional<String> first = skus.stream()
+            .filter(s -> { System.out.println("  filter " + s); return !s.startsWith("B"); })
+            .map(s -> { System.out.println("  map    " + s); return s.toLowerCase(); })
+            .findFirst();
+        System.out.println("result: " + first.orElse("none"));
+
+        System.out.println("-- sorted is a barrier: every element arrives before any leaves --");
+        List<String> out = skus.stream()
+            .filter(s -> { System.out.println("  filter " + s); return !s.startsWith("N"); })
+            .sorted()
+            .map(s -> { System.out.println("  map    " + s); return s.toLowerCase(); })
+            .limit(2)
+            .toList();
+        System.out.println("result: " + out);
+    }
+}
+  </pre>
+
+  <pre data-output data-for="StreamLazy">
+-- no terminal operation: nothing runs --
+(pipeline built, zero elements processed)
+-- findFirst: one element at a time, and it stops early --
+  filter BOLT-7
+  filter NUT-3
+  map    NUT-3
+result: nut-3
+-- sorted is a barrier: every element arrives before any leaves --
+  filter BOLT-7
+  filter NUT-3
+  filter GIRD-1
+  filter CAM-9
+  map    BOLT-7
+  map    CAM-9
+result: [bolt-7, cam-9]
+  </pre>
+
+  <p>Three lessons, one per block:</p>
+  <ul class="max-w-prose">
+    <li><strong>No terminal, no work.</strong> The first pipeline has <code>filter</code> and <code>map</code> but nothing printed. A stream you forget to terminate is a no-op, not an error — and a common bug.</li>
+    <li><strong>Elements flow vertically, not in stages.</strong> <code>BOLT-7</code> went through <code>filter</code> and was rejected <em>before</em> <code>NUT-3</code> was even looked at. <code>NUT-3</code> passed, was mapped, and reached <code>findFirst</code>, which had what it needed and stopped. <code>GIRD-1</code> and <code>CAM-9</code> were never touched. That is <strong>short-circuiting</strong>.</li>
+    <li><strong>Stateful operations break the flow.</strong> <code>sorted</code> cannot emit its first element until it has seen its last — the smallest might be at the end. So every element is filtered first, <em>then</em> the sorted ones start moving: <code>BOLT-7</code>, <code>CAM-9</code> are mapped, and <code>limit(2)</code> stops the third before <code>map</code> ever sees it.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch the pull</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of lazy stream evaluation">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">One element at a time</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="lazy-eval"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Pipeline state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Result</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="lazy-eval">
+    {
+      "lang": "java",
+      "code": "List<String> skus = List.of(\"BOLT-7\", \"NUT-3\", \"GIRD-1\", \"CAM-9\");\nOptional<String> first = skus.stream()\n    .filter(s -> !s.startsWith(\"B\"))\n    .map(String::toLowerCase)\n    .findFirst();",
+      "steps": [
+        { "line": 2, "vars": { "source": "4 elements, none pulled", "operations": "(none yet)" }, "out": "",
+          "note": "stream() creates a pipeline object that points at the list. No element has been read." },
+        { "line": [3, 4], "vars": { "source": "4 elements, none pulled", "operations": "filter → map", "elements processed": "0" }, "out": "",
+          "note": "Each intermediate operation returns a new stream that remembers its lambda and its upstream. Still nothing has executed — these are just links in a chain." },
+        { "line": 5, "vars": { "operations": "filter → map → findFirst", "findFirst asks map for": "1 element", "map asks filter for": "1 element", "filter asks source for": "1 element" }, "out": "",
+          "note": "findFirst is terminal. It asks its upstream for one element; the request travels back up the chain to the source. Streams are pull-based." },
+        { "line": 3, "vars": { "element": "BOLT-7", "filter": "starts with B → rejected", "map": "not reached" }, "out": "",
+          "note": "The first element is pulled and tested. It fails, so filter asks the source for another. map never sees it: a rejected element does not continue down the chain." },
+        { "line": 3, "vars": { "element": "NUT-3", "filter": "passes" }, "out": "",
+          "note": "The second element passes the filter and is handed DOWN to map immediately — before GIRD-1 is read. This is what vertical processing means." },
+        { "line": 4, "vars": { "element": "NUT-3", "map": "→ \"nut-3\"" }, "out": "",
+          "note": "map transforms it and hands the result to findFirst." },
+        { "line": 5, "vars": { "result": "Optional[nut-3]", "never read": "GIRD-1, CAM-9", "elements processed": "2 of 4" }, "out": "Optional[nut-3]",
+          "note": "findFirst has one element, which is all it needs, so it reports done and the pipeline stops pulling. Half the list was never examined. Replace findFirst with toList and all four would flow through." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example: a real report</h3>
+
+  <p>The laziness demonstration above is contrived. This is what stream code looks like in practice — a stock-value report, with the seven operations you will use most, each commented with the rule it illustrates.</p>
+
+  <pre data-code data-lang="java" data-file="StreamPipeline.java" data-verify="StreamPipeline" data-hi="23,24,25,26,27,28">
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.IntStream;
+
+public class StreamPipeline {
+
+    enum Category { FASTENER, STRUCTURAL, TOOLING }
+    record Product(String sku, Category category, int priceInCents, int onHand) {
+        int stockValueInCents() { return priceInCents * onHand; }
+    }
+    record OrderLine(String sku, int qty) {}
+    record Order(String id, List<OrderLine> lines) {}
+
+    public static void main(String[] args) {
+        List<Product> stock = List.of(
+            new Product("BOLT-7", Category.FASTENER,   80,      500),
+            new Product("NUT-3",  Category.FASTENER,   25,      2_000),
+            new Product("GIRD-1", Category.STRUCTURAL, 120_000, 2),
+            new Product("ROD-4",  Category.STRUCTURAL, 9_500,   12),
+            new Product("CAM-9",  Category.TOOLING,    4_250,   3));
+
+        // 1. filter -> sorted -> limit -> map -> collect: the three most valuable non-tooling lines
+        List<String> report = stock.stream()
+            .filter(p -> p.category() != Category.TOOLING)
+            .sorted(Comparator.comparingInt(Product::stockValueInCents).reversed())
+            .limit(3)
+            .map(p -> p.sku() + "=" + p.stockValueInCents() / 100 + ".00")
+            .toList();
+        System.out.println("top value:     " + report);
+
+        // 2. primitive streams: no boxing, statistics built in
+        int totalUnits = stock.stream().mapToInt(Product::onHand).sum();
+        double avgPrice = stock.stream().mapToInt(Product::priceInCents).average().orElse(0);
+        System.out.printf("units=%d avgPrice=%.1f%n", totalUnits, avgPrice);
+
+        // 3. flatMap: an order has many lines; flatten them before counting
+        List<Order> orders = List.of(
+            new Order("A1", List.of(new OrderLine("BOLT-7", 40), new OrderLine("NUT-3", 100))),
+            new Order("A2", List.of(new OrderLine("BOLT-7", 10))),
+            new Order("A3", List.of()));
+        int boltsOrdered = orders.stream()
+            .flatMap(o -> o.lines().stream())
+            .filter(l -> l.sku().equals("BOLT-7"))
+            .mapToInt(OrderLine::qty)
+            .sum();
+        System.out.println("bolts ordered: " + boltsOrdered);
+
+        // 4. reduce: the identity must be neutral for the operation (0 is right for max of lengths, wrong for min)
+        int longestSku = stock.stream().map(Product::sku).mapToInt(String::length).reduce(0, Math::max);
+        System.out.println("longest sku:   " + longestSku);
+
+        // 5. anyMatch short-circuits; distinct is stateful (it remembers what it has seen)
+        boolean anyEmpty = orders.stream().anyMatch(o -> o.lines().isEmpty());
+        long categories = stock.stream().map(Product::category).distinct().count();
+        System.out.println("empty order:   " + anyEmpty + ", distinct categories: " + categories);
+
+        // 6. a range as a source
+        String bins = IntStream.rangeClosed(1, 4).mapToObj(i -> "BIN-" + i).reduce((a, b) -> a + "," + b).orElse("");
+        System.out.println("bins:          " + bins);
+
+        // 7. a stream is single-use
+        var once = stock.stream();
+        once.count();
+        try { once.count(); }
+        catch (IllegalStateException e) { System.out.println("second use:    " + e.getMessage()); }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="StreamPipeline">
+top value:     [GIRD-1=2400.00, ROD-4=1140.00, NUT-3=500.00]
+units=2517 avgPrice=26771.0
+bolts ordered: 50
+longest sku:   6
+empty order:   true, distinct categories: 3
+bins:          BIN-1,BIN-2,BIN-3,BIN-4
+second use:    stream has already been operated upon or closed
+  </pre>
+
+  <p>Two of those deserve a closer look. <strong><code>flatMap</code></strong> takes a function that returns a <em>stream</em> per element and splices all those streams into one — the only way to get from a list of orders to a flat sequence of their lines. <strong><code>reduce</code></strong> folds the elements with a binary operator; the two-argument form needs an identity that leaves any value unchanged (<code>0</code> for sum or max-of-non-negatives, <code>1</code> for product, <code>""</code> for concatenation), and the one-argument form returns an <code>Optional</code> because an empty stream has nothing to fold. Pass a non-neutral identity and the result is quietly wrong, which is why block 6 uses the <code>Optional</code> form rather than <code>reduce("", …)</code> and a leading comma.</p>
+
+  <h3 class="mt-8 mb-3">Build the pipeline</h3>
+
+  <p>The report wanted is <em>the SKUs of the three alphabetically-first products that are in stock</em>. Put the six operations in the only order that type-checks <strong>and</strong> gives the right answer.</p>
+
+  <div class="lm-card lm-order-wrap" data-order data-solution="a,b,c,d,e,f">
+    <ol class="lm-order">
+      <li class="lm-order-item" data-id="d" data-shuffle="0">
+        <span class="lm-order-pos">1</span>
+        <span>    .sorted()</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="a" data-shuffle="1">
+        <span class="lm-order-pos">2</span>
+        <span>List&lt;String&gt; skus = stock.stream()</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="f" data-shuffle="2">
+        <span class="lm-order-pos">3</span>
+        <span>    .toList();</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="c" data-shuffle="3">
+        <span class="lm-order-pos">4</span>
+        <span>    .map(Product::sku)</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="e" data-shuffle="4">
+        <span class="lm-order-pos">5</span>
+        <span>    .limit(3)</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="b" data-shuffle="5">
+        <span class="lm-order-pos">6</span>
+        <span>    .filter(p -&gt; p.onHand() &gt; 0)</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+    </ol>
+    <div class="flex gap-2 mt-3">
+      <button type="button" class="lm-btn lm-btn--primary" data-order-check>Check order</button>
+      <button type="button" class="lm-btn" data-order-reset>Reset</button>
+    </div>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">Correct. <code>filter</code> must come before <code>map</code> because it reads <code>onHand()</code>, which only a <code>Product</code> has; after <code>map</code> the elements are <code>String</code>s. <code>sorted()</code> with no comparator needs <code>Comparable</code> elements — <code>String</code> is, <code>Product</code> is not, so it must follow <code>map</code>. <code>limit(3)</code> after <code>sorted</code> gives the three smallest; <em>before</em> it, you would sort whichever three happened to come first. And <code>sorted</code> is a barrier: it drains everything upstream before <code>limit</code> can short-circuit anything, so put <code>filter</code> ahead of it to give it less to drain.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Stateless, stateful, short-circuiting</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Stream operations by category</caption>
+      <thead><tr><th scope="col">Category</th><th scope="col">Operations</th><th scope="col">Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td>Stateless intermediate</td><td><code>filter</code>, <code>map</code>, <code>mapToInt</code>, <code>flatMap</code>, <code>peek</code></td><td>Each element handled alone; can stream forever; cheap.</td></tr>
+        <tr><td>Stateful intermediate</td><td><code>sorted</code>, <code>distinct</code></td><td><code>sorted</code> buffers everything; <code>distinct</code> keeps a set of what it has seen. Both are barriers to laziness and both need memory proportional to the input.</td></tr>
+        <tr><td>Short-circuiting intermediate</td><td><code>limit</code>, <code>takeWhile</code></td><td>Can finish an infinite stream. <code>limit</code> after a stateful op still has to wait for it.</td></tr>
+        <tr><td>Short-circuiting terminal</td><td><code>findFirst</code>, <code>findAny</code>, <code>anyMatch</code>, <code>allMatch</code>, <code>noneMatch</code></td><td>Stop pulling as soon as the answer is known.</td></tr>
+        <tr><td>Full terminal</td><td><code>toList</code>, <code>collect</code>, <code>count</code>, <code>sum</code>, <code>reduce</code>, <code>forEach</code>, <code>max</code></td><td>Consume every element.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A stream is single-use.</strong> Once a terminal operation has run, the stream is spent; a second one throws <code>IllegalStateException: stream has already been operated upon or closed</code>. Store the <em>collection</em> and call <code>stream()</code> again.</li>
+        <li><strong>Side effects in <code>map</code> and <code>filter</code> are a smell.</strong> A lambda that writes to a list outside the pipeline works until someone adds <code>parallel()</code>, and then it corrupts the list. Collect results with the terminal operation; use <code>peek</code> only for debugging.</li>
+        <li><strong><code>map</code> boxes, <code>mapToInt</code> does not.</strong> <code>stock.stream().map(Product::onHand).reduce(0, Integer::sum)</code> allocates an <code>Integer</code> per element and unboxes it again; <code>mapToInt(Product::onHand).sum()</code> works on <code>int</code> throughout. For numeric work, go primitive at the earliest opportunity.</li>
+        <li><strong><code>parallel()</code> is not a free speed-up.</strong> It splits the source across the common fork-join pool, which pays off for large, splittable sources with CPU-heavy, side-effect-free operations — and costs more than it gains for small lists, I/O, or anything with a <code>synchronized</code> inside. Measure before and after; never add it by reflex. Java Advanced covers the machinery.</li>
+        <li><strong>Encounter order is not guaranteed everywhere.</strong> <code>forEach</code> on a parallel stream runs in whatever order threads arrive; <code>forEachOrdered</code> preserves it. <code>findAny</code> may return something other than the first.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-streams-1" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>skus.stream().map(s -> { System.out.println(s); return s.trim(); }).filter(s -> !s.isEmpty());</code> — with four non-empty SKUs in the list, how many lines are printed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-streams-1"><span>Four, one per element <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-streams-1"><span>Eight — once in <code>map</code> and once again when <code>filter</code> runs <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-streams-1"><span>One, because <code>map</code> short-circuits after the first <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-streams-1"><span>None <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> There is no terminal operation. <code>map</code> and <code>filter</code> are intermediate; they build a pipeline and return it, and nobody ever asks the pipeline for an element. The lambdas are never invoked.</p>
+        <p class="mb-0"><strong>A</strong> is what you get after appending <code>.toList()</code> or <code>.count()</code>. <strong>B</strong> misunderstands the chain: each element passes through <code>map</code> once, whatever comes after. <strong>C</strong>: <code>map</code> never short-circuits; only operations like <code>findFirst</code> and <code>limit</code> do.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-streams-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Prices are <code>[90, 10, 50, 20]</code>. What do <code>prices.stream().sorted().limit(2).toList()</code> and <code>prices.stream().limit(2).sorted().toList()</code> return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-streams-2"><span>Both <code>[10, 20]</code> — the operations commute <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-streams-2"><span><code>[10, 20]</code> and <code>[10, 90]</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-streams-2"><span><code>[10, 20]</code> and <code>[90, 10]</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-streams-2"><span>The second throws, because <code>sorted</code> needs the whole stream and <code>limit</code> has cut it <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Order of operations is the order of the pipeline. The first sorts all four, then keeps the two smallest. The second keeps the first two in encounter order — <code>90, 10</code> — and then sorts <em>those</em>, giving <code>[10, 90]</code>.</p>
+        <p class="mb-0"><strong>A</strong> is the intuition that stream operations are declarative set operations; they are not, they are sequential stages. <strong>C</strong> forgets that <code>sorted</code> still runs in the second pipeline, just on fewer elements. <strong>D</strong>: <code>sorted</code> is happy with any finite stream, including one <code>limit</code> truncated.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-streams-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>Stream&lt;Product&gt; s = stock.stream(); long n = s.count(); List&lt;Product&gt; all = s.toList();</code> — what happens on the third statement?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-streams-3"><span>It returns all the products; the stream re-reads the list <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-streams-3"><span>It returns an empty list, since <code>count</code> consumed everything <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-streams-3"><span>It throws <code>IllegalStateException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-streams-3"><span>Compile error — a stream variable may be used only once <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> A terminal operation closes the pipeline; the stream object records that it has been operated upon and rejects any further use with <code>IllegalStateException: stream has already been operated upon or closed</code>. Create a fresh stream from the collection for each query.</p>
+        <p class="mb-0"><strong>A</strong> describes a collection, not a stream — the source is reusable, the pipeline is not. <strong>B</strong> is how an exhausted <code>Iterator</code> behaves, and streams chose to fail loudly instead. <strong>D</strong>: the compiler has no notion of single-use variables; this is purely a runtime check.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="streams"> Mark this section complete
+  </label>
+</section>

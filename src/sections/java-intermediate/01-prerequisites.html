@@ -1,0 +1,50 @@
+<section class="lm-section" id="prerequisites" data-title="Prerequisites" data-num="ii">
+  <p class="lm-eyebrow">Before you begin</p>
+  <h2 class="mb-4">Prerequisites</h2>
+
+  <p>This module assumes <em>Java Fundamentals</em>, or the equivalent: you can already write a class, a loop and a <code>try</code> block in Java without looking anything up. Each item below is something it builds on directly, with the Fundamentals section that taught it:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Prerequisite skills, where they were taught, and what depends on them here</caption>
+      <thead>
+        <tr><th scope="col">You should already be able to…</th><th scope="col">Taught in</th><th scope="col">Because this module…</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Implement <code>equals</code> and <code>hashCode</code> as a matched pair</td><td>Fundamentals §10</td><td>shows what records generate for you, and why a mutable key breaks a <code>HashMap</code></td></tr>
+        <tr><td>Declare and consume a <code>List&lt;Product&gt;</code>, and say what erasure means</td><td>Fundamentals §13</td><td>goes straight to wildcards, bounds and the limits erasure imposes</td></tr>
+        <tr><td>Explain dynamic dispatch and the overload-resolution phases</td><td>Fundamentals §7, §8</td><td>leans on both to explain how lambdas find their target type and how <code>default</code> methods resolve</td></tr>
+        <tr><td>Write a <code>try</code>-with-resources block and say what it suppresses</td><td>Fundamentals §11</td><td>uses it around every file stream and every <code>Files.lines</code> call</td></tr>
+        <tr><td>Choose between <code>ArrayList</code>, <code>HashMap</code>, <code>TreeMap</code> and <code>LinkedHashSet</code> for an access pattern</td><td>Fundamentals §12</td><td>opens those classes up and looks at the arrays and nodes inside</td></tr>
+        <tr><td>Read a stack trace back to the line that caused it</td><td>Fundamentals §11</td><td>relies on you to diagnose a <code>NoSuchElementException</code> from <code>Optional</code> or an <code>UnsupportedOperationException</code> from an immutable list</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">What you need installed</div>
+      <p class="mb-2">A JDK <strong>21 or newer</strong>. This is not negotiable in the way it was for Fundamentals: records (16), sealed types (17), pattern matching for <code>switch</code> and record patterns (21) are all used as ordinary language here, and an older compiler rejects the examples outright. No IDE is required.</p>
+      <pre data-code data-lang="bash" data-nobar>
+java -version    # expect: openjdk version "21.x" or newer
+javac -version   # must match; a mismatched pair causes "class file has wrong version"
+      </pre>
+      <p class="mb-0 text-sm">If you see <code>UnsupportedClassVersionError</code> when running, your <code>java</code> is older than your <code>javac</code>. Check <code>PATH</code> and <code>JAVA_HOME</code> point at the same installation.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">If you skipped Fundamentals</div>
+      <p class="mb-2">Four ideas carry most of the weight here. If any of these sentences is not obviously true to you, read the Fundamentals section first — it is a twenty-minute detour that saves an hour of confusion.</p>
+      <ul class="mb-0">
+        <li><strong>The equals/hashCode contract.</strong> Two objects that are <code>equals</code> must return the same <code>hashCode</code>, or every hash-based collection silently misfiles them. Records (§8) exist largely so you stop writing this by hand; <code>HashMap</code> internals (§11) show what goes wrong when the hash changes after insertion.</li>
+        <li><strong>Erasure.</strong> <code>List&lt;String&gt;</code> and <code>List&lt;Integer&gt;</code> are the same class at runtime. §1 starts from that fact and derives everything generics can and cannot do.</li>
+        <li><strong>Dynamic dispatch versus static resolution.</strong> The JVM picks an <em>override</em> from the runtime class; the compiler picks an <em>overload</em> from the declared types. Lambdas (§4) and default methods (§3) each sit on one side of that line.</li>
+        <li><strong>Try-with-resources.</strong> A resource acquired in the header is closed in reverse order, always. A <code>Stream</code> from <code>Files.lines</code> (§13) is such a resource, and forgetting that leaks a file handle.</li>
+      </ul>
+    </div>
+  </div>
+</section>

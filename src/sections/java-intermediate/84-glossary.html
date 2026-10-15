@@ -1,0 +1,152 @@
+<section class="lm-section" id="glossary" data-title="Glossary" data-num="G">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Glossary</h2>
+  <p>Thirty terms, each linked back to the section that introduces it. The same entries drive the flashcard deck below — one list, two ways to use it.</p>
+
+  <div data-flash>
+
+    <div class="lm-card" data-print="hide">
+      <div class="lm-card-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M7 3h14v14"/></svg>
+        Flashcards
+      </div>
+      <div class="lm-flash">
+        <button type="button" class="lm-flash-card" aria-pressed="false" aria-label="Flashcard — activate to flip between term and definition">
+          <span class="lm-flash-face"><span class="text-h3" data-flash-front></span><span class="text-caption text-ink-subtle">click, or press Space, to flip</span></span>
+          <span class="lm-flash-face lm-flash-face--back"><span data-flash-back></span></span>
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <button type="button" class="lm-btn" data-flash-prev>Previous</button>
+        <button type="button" class="lm-btn lm-btn--primary" data-flash-next>Next</button>
+        <button type="button" class="lm-btn" data-flash-known>I knew it</button>
+        <button type="button" class="lm-btn" data-flash-shuffle>Shuffle</button>
+        <span class="text-caption text-ink-subtle" data-flash-count></span>
+      </div>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    </div>
+
+    <dl class="mt-6">
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g1">
+        <dt class="font-semibold" data-term>Bounded type parameter</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>&lt;T extends Product&gt;</code>: a type variable that may only be instantiated with a subtype of the bound, which is what lets the method call <code>Product</code>'s methods on a <code>T</code>. An intersection bound <code>T extends Product &amp; Stockable</code> requires both. <a href="#generics">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g2">
+        <dt class="font-semibold" data-term>Charset</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The mapping between bytes and characters. A file does not record which one it was written with, so reading with the wrong charset throws <code>MalformedInputException</code> or produces <code>Ã©</code> for <code>é</code>. Always pass <code>StandardCharsets.UTF_8</code> explicitly. <a href="#files-io">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g3">
+        <dt class="font-semibold" data-term>Collector</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The recipe <code>collect</code> uses to accumulate a stream into a result: how to create a container, add an element, merge two containers and finish. <code>Collectors</code> supplies every common one — <code>toList</code>, <code>toMap</code>, <code>groupingBy</code>, <code>joining</code>, <code>counting</code>. <a href="#collectors">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g4">
+        <dt class="font-semibold" data-term>Compact constructor</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A record constructor written without a parameter list — <code>Line { sku = sku.strip(); }</code> — whose body runs before the compiler's automatic field assignment. The place to validate and normalise; assigning <code>this.x</code> inside it is a compile error. <a href="#records">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g5">
+        <dt class="font-semibold" data-term>Comparator</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An ordering supplied from outside the class, built with <code>comparing</code>, <code>thenComparing</code>, <code>reversed</code> and <code>nullsFirst</code>. Should return 0 only for elements that are <code>equals</code>, because <code>TreeSet</code> uses nothing else to detect duplicates. <a href="#comparators">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g6">
+        <dt class="font-semibold" data-term>Default method</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An interface method with a body that implementers inherit unless they override it. Resolved by three rules: a class wins over an interface, a more specific interface wins over a less specific one, otherwise the class must override. Cannot override an <code>Object</code> method. <a href="#interfaces-enums">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g7">
+        <dt class="font-semibold" data-term>Defensive copy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Copying a mutable argument on the way into a class (<code>new ArrayList&lt;&gt;(list)</code>, <code>List.copyOf</code>) and copying or wrapping on the way out, so no caller can reach the internal state. Rule two of an immutable class. <a href="#comparators">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g8">
+        <dt class="font-semibold" data-term>Downstream collector</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The second collector handed to <code>groupingBy</code> or <code>partitioningBy</code>, applied to the elements inside each bucket: <code>groupingBy(Product::category, summingLong(Product::value))</code>. <code>mapping</code>, <code>filtering</code> and <code>collectingAndThen</code> adapt it. <a href="#collectors">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g9">
+        <dt class="font-semibold" data-term>DST gap</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The hour that does not exist when clocks go forward — 01:00–01:59 in London on 29 March 2026. A <code>ZonedDateTime</code> placed in it is shifted forward by the gap's length; a day crossing it has 23 hours. The overlap in October is the hour that happens twice. <a href="#java-time">§12</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g10">
+        <dt class="font-semibold" data-term>Duration versus Period</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A <code>Duration</code> is elapsed seconds — a stopwatch — and moves the instant. A <code>Period</code> is calendar fields (years, months, days) and moves the wall clock. <code>plusHours(24)</code> and <code>plusDays(1)</code> differ by an hour across a DST change. <a href="#java-time">§12</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g11">
+        <dt class="font-semibold" data-term>Effectively final</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A local variable that is assigned exactly once and never changed, whether or not it is declared <code>final</code>. Only such locals may be captured by a lambda or inner class, because capture copies the value and a later write would leave two copies that disagree. <a href="#nested">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g12">
+        <dt class="font-semibold" data-term>Erasure</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The compiler checks generic type arguments and then drops them: bytecode holds a plain <code>List</code> and a <code>checkcast</code> at every read. Why <code>new T()</code>, <code>new T[n]</code>, <code>instanceof List&lt;String&gt;</code>, <code>List&lt;int&gt;</code> and overloads differing only by type argument are all impossible. <a href="#generics">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g13">
+        <dt class="font-semibold" data-term>Exhaustiveness</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The compiler's proof that a switch expression handles every possible value of its selector. Checkable only for enums and sealed types, where the complete set is known; a <code>default</code> satisfies it but hides any subtype added later. <a href="#sealed-patterns">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g14">
+        <dt class="font-semibold" data-term>Fail-fast iterator</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An iterator that remembers the collection's <code>modCount</code> at creation and throws <code>ConcurrentModificationException</code> on the next <code>next()</code> after any structural change it did not make. No threads needed. Remove safely with <code>Iterator.remove</code> or <code>removeIf</code>. <a href="#collection-internals">§11</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g15">
+        <dt class="font-semibold" data-term>Functional interface</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An interface with exactly one abstract method (defaults and statics do not count), which is what a lambda or method reference implements. <code>Function</code>, <code>Predicate</code>, <code>Supplier</code>, <code>Consumer</code>, <code>Comparator</code>, <code>Runnable</code>. <code>@FunctionalInterface</code> makes the compiler enforce it. <a href="#lambdas">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g16">
+        <dt class="font-semibold" data-term>Guard</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A <code>when</code> clause on a switch case — <code>case FixedOff(int c) when c &gt;= gross</code> — that restricts the pattern to values satisfying a condition. A guarded case covers only some values of its type, so an unguarded case for that type is still required. <a href="#sealed-patterns">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g17">
+        <dt class="font-semibold" data-term>Inner class</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A nested class declared without <code>static</code>. Every instance holds a hidden <code>this$0</code> reference to the enclosing instance, so it can only be created through one (<code>order.new Cursor()</code>) and keeps the outer object alive. If it does not use the outer instance, make it <code>static</code>. <a href="#nested">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g18">
+        <dt class="font-semibold" data-term>Instant</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A point on the timeline, measured in nanoseconds from 1970-01-01T00:00Z, with no zone and no ambiguity. The type to store and log for anything that has happened; convert to a <code>ZonedDateTime</code> only to display. <a href="#java-time">§12</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g19">
+        <dt class="font-semibold" data-term>Lazy evaluation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Nothing in a stream pipeline runs until a terminal operation pulls, and then elements flow one at a time through every stage. Buys short-circuiting and the ability to process sources larger than memory; a pipeline with no terminal is a silent no-op. <a href="#streams">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g20">
+        <dt class="font-semibold" data-term>Load factor</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The fill ratio at which a <code>HashMap</code> doubles its table and rehashes every entry: 0.75 by default, so a 16-bin map resizes on its 13th entry. Iteration order changes at each resize; a bin reaching 8 entries in a table of 64 or more becomes a tree. <a href="#collection-internals">§11</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g21">
+        <dt class="font-semibold" data-term>Method reference</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Shorthand for a lambda whose body is one call forwarding its parameters: static (<code>Integer::parseInt</code>), bound (<code>sample::sku</code> — receiver fixed when created), unbound (<code>Product::sku</code> — receiver is the first parameter), constructor (<code>Product::new</code>). <a href="#lambdas">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g22">
+        <dt class="font-semibold" data-term>Optional</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A container holding one value or nothing, used as a <em>return type</em> to say "may be absent". Consume it with <code>map</code>, <code>flatMap</code>, <code>filter</code>, then <code>orElse</code>, <code>orElseGet</code> or <code>orElseThrow</code>. Never a field, a parameter or a collection element; never <code>get()</code>. <a href="#optional">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g23">
+        <dt class="font-semibold" data-term>PECS</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><em>Producer Extends, Consumer Super.</em> A parameter the method only reads from is <code>List&lt;? extends T&gt;</code>; one it only writes to is <code>List&lt;? super T&gt;</code>; one it does both with has no wildcard. The signature of <code>Collections.copy</code>. <a href="#generics">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g24">
+        <dt class="font-semibold" data-term>Record pattern</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>case PercentOff(int pct) -&gt;</code>: a switch or <code>instanceof</code> pattern that tests the type and deconstructs the record's components into variables in one step. Nests — <code>Line(Product(var sku, var p), int qty)</code> — and runs the accessors to bind. <a href="#sealed-patterns">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g25">
+        <dt class="font-semibold" data-term>Sealed type</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A class or interface whose complete set of direct subtypes is declared with <code>permits</code>, each of which must be <code>final</code>, <code>sealed</code> or <code>non-sealed</code>. Gives the compiler the closed set it needs to check a pattern switch for exhaustiveness. <a href="#sealed-patterns">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g26">
+        <dt class="font-semibold" data-term>Short-circuiting operation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A stream operation that can finish without seeing every element: <code>limit</code> and <code>takeWhile</code> among the intermediates, <code>findFirst</code>, <code>anyMatch</code>, <code>allMatch</code> and <code>noneMatch</code> among the terminals. Only laziness makes them possible. <a href="#streams">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g27">
+        <dt class="font-semibold" data-term>Stateful operation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A stream operation that must remember earlier elements: <code>sorted</code> buffers everything before emitting its first element, <code>distinct</code> keeps a set of what it has seen. Barriers to laziness that need memory proportional to the input; put <code>filter</code> before them. <a href="#streams">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g28">
+        <dt class="font-semibold" data-term>Target typing</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A lambda has no type of its own; the compiler takes its parameter types and the interface it implements from the context it appears in — an assignment, a method parameter, a return. The same <code>(a, b) -&gt; a + b</code> is a <code>BinaryOperator&lt;Integer&gt;</code> or a <code>BiFunction&lt;String,String,String&gt;</code>; with <code>var</code> it is an error. <a href="#lambdas">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g29">
+        <dt class="font-semibold" data-term>Unmodifiable view</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>Collections.unmodifiableList(src)</code>: a wrapper that refuses writes through itself but shows whatever the underlying list currently holds. Not immutable — the source can still change. <code>List.copyOf</code> is the snapshot that cannot. <a href="#comparators">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g30">
+        <dt class="font-semibold" data-term>Wildcard</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>?</code> in a type argument, standing for an unknown type: <code>? extends T</code> (some subtype), <code>? super T</code> (some supertype), or unbounded. Loosens invariance for a parameter in one direction, at the price of restrictions inside the method. Belongs in parameters, not return types. <a href="#generics">§1</a></dd>
+      </div>
+    </dl>
+  </div>
+</section>

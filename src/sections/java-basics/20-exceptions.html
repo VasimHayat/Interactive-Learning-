@@ -1,0 +1,196 @@
+<section class="lm-section" id="exceptions" data-title="Exceptions and try-with-resources" data-num="11">
+  <p class="lm-eyebrow">Section 11</p>
+  <h2 class="mb-4">Exceptions and try-with-resources</h2>
+
+  <p>An exception unwinds the stack looking for a handler. If none is found the thread dies and the trace is printed. Java splits exceptions into two kinds, and the split is enforced by the compiler rather than by convention.</p>
+
+  <div class="lm-diagram">
+    <svg viewBox="0 0 700 210" role="img" aria-labelledby="exc-t exc-d">
+      <title id="exc-t">The Throwable hierarchy</title>
+      <desc id="exc-d">Throwable has two direct subclasses. Error covers unrecoverable JVM problems such as OutOfMemoryError and StackOverflowError, and is unchecked. Exception is checked and covers recoverable conditions such as IOException and SQLException, except for its subclass RuntimeException, which is unchecked and covers programming mistakes such as NullPointerException, IllegalArgumentException and IndexOutOfBoundsException.</desc>
+      <g font-family="ui-sans-serif, system-ui, sans-serif" font-size="11.5">
+        <rect x="270" y="6" width="150" height="32" rx="7" fill="var(--lm-surface-2)" stroke="var(--lm-border-strong)"/>
+        <text x="345" y="27" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Throwable</text>
+        <path d="M345 40 v14 h-190 v12" fill="none" stroke="var(--lm-border-strong)" stroke-width="1.3"/>
+        <path d="M345 40 v14 h190 v12" fill="none" stroke="var(--lm-border-strong)" stroke-width="1.3"/>
+
+        <rect x="80" y="68" width="150" height="46" rx="7" fill="var(--lm-bad-weak)" stroke="var(--lm-bad)"/>
+        <text x="155" y="87" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Error</text>
+        <text x="155" y="103" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10">unchecked - do not catch</text>
+        <text x="155" y="134" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">OutOfMemoryError</text>
+        <text x="155" y="148" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">StackOverflowError</text>
+
+        <rect x="460" y="68" width="150" height="46" rx="7" fill="var(--lm-warn-weak)" stroke="var(--lm-warn)"/>
+        <text x="535" y="87" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Exception</text>
+        <text x="535" y="103" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10">CHECKED</text>
+        <text x="535" y="134" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">IOException</text>
+        <text x="535" y="148" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">SQLException</text>
+
+        <path d="M535 114 v18 h-140 v14" fill="none" stroke="var(--lm-border-strong)" stroke-width="1.3" stroke-dasharray="3 3"/>
+        <rect x="260" y="146" width="270" height="46" rx="7" fill="var(--lm-info-weak)" stroke="var(--lm-info)"/>
+        <text x="395" y="165" text-anchor="middle" font-weight="700" fill="var(--lm-text)">RuntimeException</text>
+        <text x="395" y="181" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10">unchecked - NullPointer, IllegalArgument, IndexOutOfBounds</text>
+      </g>
+    </svg>
+  </div>
+
+  <p><strong>Checked</strong> exceptions must be caught or declared with <code>throws</code>; the compiler will not let you ignore them. They model conditions a correct program can still hit — a file is missing, a socket drops. <strong>Unchecked</strong> exceptions (<code>RuntimeException</code> and its subclasses) need no declaration and model bugs — a null you should have guarded, an argument that violates a documented precondition.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Exceptions.java" data-verify="Exceptions" data-hi="24">
+public class Exceptions {
+
+    static class Resource implements AutoCloseable {
+        private final String name;
+        Resource(String name) { this.name = name; System.out.println("open  " + name); }
+        void use() { System.out.println("use   " + name); }
+        @Override public void close() { System.out.println("close " + name); }
+    }
+
+    static int sneaky() {
+        try {
+            return 1;
+        } finally {
+            System.out.println("finally runs before the caller sees the value");
+        }
+    }
+
+    static int stockFor(String sku) {
+        if (sku == null) throw new IllegalArgumentException("sku must not be null");
+        return 42;
+    }
+
+    public static void main(String[] args) {
+        try (Resource a = new Resource("A"); Resource b = new Resource("B")) {
+            a.use();
+            b.use();
+        }
+
+        System.out.println("sneaky() = " + sneaky());
+
+        try {
+            stockFor(null);
+        } catch (IllegalArgumentException e) {
+            System.out.println("caught: " + e.getMessage());
+        } finally {
+            System.out.println("finally always runs");
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Exceptions">
+open  A
+open  B
+use   A
+use   B
+close B
+close A
+finally runs before the caller sees the value
+sneaky() = 1
+caught: sku must not be null
+finally always runs
+  </pre>
+
+  <p>Two details in that output earn their place:</p>
+  <ul>
+    <li><strong>Resources close in reverse order</strong> — <code>B</code> then <code>A</code>. They are released like a stack, which is what you need when a later resource depends on an earlier one (a statement opened from a connection, say). This happens whether the block exits normally or by exception, with no <code>finally</code> written by you.</li>
+    <li><strong><code>finally</code> runs before the caller sees the return value.</strong> The return value is computed and set aside, then the <code>finally</code> block runs, then control returns. If a <code>finally</code> block itself <code>return</code>s, it <em>replaces</em> the pending return and discards any in-flight exception — which is why returning from <code>finally</code> is a bug rather than a technique.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Checked or unchecked?</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Place each situation on the exception type it should use
+    </div>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Situations to place">
+        <button type="button" class="lm-chip" data-chip="io">The config file is not on disk</button>
+        <button type="button" class="lm-chip" data-chip="arg">A caller passed a negative quantity</button>
+        <button type="button" class="lm-chip" data-chip="npe">A field was never initialised</button>
+        <button type="button" class="lm-chip" data-chip="state">Ship was called on an already-shipped order</button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Exception types">
+        <button type="button" class="lm-slot" data-slot="io" data-label="checked IOException"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">checked <code>IOException</code></span></button>
+        <button type="button" class="lm-slot" data-slot="arg" data-label="IllegalArgumentException"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle"><code>IllegalArgumentException</code></span></button>
+        <button type="button" class="lm-slot" data-slot="npe" data-label="NullPointerException"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle"><code>NullPointerException</code></span></button>
+        <button type="button" class="lm-slot" data-slot="state" data-label="IllegalStateException"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle"><code>IllegalStateException</code></span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">The distinction is who is at fault. A missing file is the environment's doing and a correct program must cope — checked. A bad argument, an uninitialised field, and an operation invalid for the current state are all programming errors: the fix is to change the code, not to catch anything. Note the pair <code>IllegalArgument</code> versus <code>IllegalState</code> — the first says "this input is wrong", the second says "this input might be fine later, but not now".</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--danger">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6m0-6 6 6"/></svg>
+    <div>
+      <div class="lm-callout-title">Never swallow an exception</div>
+      <pre data-code data-lang="java" data-nobar data-bad="3">
+try {
+    inventory.reserve(sku, qty);
+} catch (Exception e) { }        // the outage you will spend a day finding
+      </pre>
+      <p class="mb-0">An empty <code>catch</code> destroys the only evidence that anything went wrong. If a failure is genuinely expected and ignorable, say so in a comment and log at debug. Otherwise handle it, or wrap it with context and rethrow: <code>throw new InventoryException("reserving " + sku, e)</code> — passing the original as the <em>cause</em> keeps the underlying trace attached.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Catch the specific type, and order subclasses first.</strong> <code>catch (Exception e)</code> before <code>catch (IOException e)</code> is a compile error — the second is unreachable.</li>
+        <li><strong>The old <code>finally { in.close(); }</code> pattern loses exceptions.</strong> If the body threw and <code>close()</code> also throws, the close exception replaces the real one. Try-with-resources instead <em>suppresses</em> the secondary exception and attaches it, retrievable via <code>getSuppressed()</code>.</li>
+        <li><strong>Java 14+ gives helpful NPE messages.</strong> Instead of a bare line number you get <code>Cannot invoke "Product.sku()" because "&lt;local3&gt;" is null</code> — read it, it names the exact expression.</li>
+        <li><strong>Exceptions are not control flow.</strong> Building a stack trace is expensive; using one to exit a loop is slow and obscures intent.</li>
+        <li><strong>Do not catch <code>Error</code>.</strong> <code>OutOfMemoryError</code> and <code>StackOverflowError</code> mean the JVM is in no state to continue.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-ex-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In the worked example, <code>Resource A</code> is opened, then <code>B</code>'s constructor throws. What is closed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-ex-1"><span>Neither — the block never entered, so nothing is closed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-ex-1"><span>Only <code>A</code> — resources already acquired are closed, in reverse order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-ex-1"><span>Both — <code>close()</code> is called on every declared resource <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-ex-1"><span>Only <code>B</code> — the one that failed <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Try-with-resources tracks what it has successfully acquired. <code>A</code> exists, so it is closed; <code>B</code> never came into being, so there is nothing to close. This is precisely the case hand-written <code>finally</code> blocks get wrong.</p>
+        <p class="mb-0"><strong>A</strong> would leak <code>A</code>. <strong>C</strong> would call <code>close()</code> on a reference that was never assigned — an NPE. <strong>D</strong> inverts it.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-ex-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A REST handler wraps its whole body in <code>catch (Exception e) { return 200; }</code> to stop 500s appearing in the dashboard. What is the real consequence?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-ex-2"><span>None — clients get a clean response and the error is contained <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-ex-2"><span>It only hides checked exceptions; runtime ones still propagate <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-ex-2"><span>Failed writes now report success — data loss that no alert will ever fire on <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-ex-2"><span>It is fine as long as the exception is logged first <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The dashboard turns green because the failures stopped being <em>reported</em>, not because they stopped happening. A caller told "200 OK" will not retry, so a reservation that never persisted is simply gone. The metric got healthier and the system got worse.</p>
+        <p class="mb-0"><strong>A</strong> mistakes suppressing the signal for handling the problem. <strong>B</strong> is factually wrong — <code>RuntimeException</code> is a subclass of <code>Exception</code>, so this catches everything except <code>Error</code>. <strong>D</strong> is closer, and logging is strictly better than not, but the response code is still a lie; the status must reflect what actually happened.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="exceptions"> Mark this section complete
+  </label>
+</section>

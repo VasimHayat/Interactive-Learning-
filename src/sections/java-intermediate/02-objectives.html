@@ -1,0 +1,29 @@
+<section class="lm-section" id="objectives" data-title="Learning objectives" data-num="iii">
+  <p class="lm-eyebrow">The contract</p>
+  <h2 class="mb-4">Learning objectives</h2>
+
+  <p>By the end of this module you will be able to do each of the following without reaching for a reference. The final quiz tests exactly these twelve.</p>
+
+  <ol class="max-w-prose">
+    <li><strong>Choose</strong> the wildcard (<code>? extends</code>, <code>? super</code>, unbounded, or none) for a given API from the PECS rule, and explain what erasure prevents.</li>
+    <li><strong>Distinguish</strong> static nested, inner, local and anonymous classes, and state what each can capture and why the captured variable must be effectively final.</li>
+    <li><strong>Resolve</strong> which <code>default</code> method wins when a class inherits two, and design an enum with per-constant behaviour.</li>
+    <li><strong>Convert</strong> any lambda to a method reference (and back), name its functional interface, and predict what <code>this</code> means inside each.</li>
+    <li><strong>Trace</strong> a stream pipeline element by element — laziness, short-circuiting and stateful operations — and say which operations force a full pass.</li>
+    <li><strong>Build</strong> a <code>groupingBy</code> with a downstream collector, and choose between <code>toMap</code> merge strategies.</li>
+    <li><strong>Use</strong> <code>Optional</code> as a return type without <code>get()</code>, and name the three places it should never appear.</li>
+    <li><strong>Write</strong> a record with a validating compact constructor, and explain why its immutability is shallow.</li>
+    <li><strong>Model</strong> a closed hierarchy with <code>sealed</code> and consume it with an exhaustive pattern <code>switch</code> that needs no <code>default</code>.</li>
+    <li><strong>Explain</strong> what <code>HashMap</code> does on resize, why a mutable key breaks it, and the difference between an unmodifiable view and an immutable copy.</li>
+    <li><strong>Compute</strong> with <code>java.time</code> correctly across a DST change, and choose <code>Duration</code> versus <code>Period</code>.</li>
+    <li><strong>Read and write</strong> files with <code>java.nio.file</code> using an explicit charset and a stream that is always closed.</li>
+  </ol>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Deliberately out of scope</div>
+      <p class="mb-0">Threads and the Java memory model, locks and concurrent collections, executors, <code>CompletableFuture</code>, virtual threads, garbage collection and JVM tuning, class loading, reflection and annotation processing, the module system and JNI all belong to <em>Java Advanced</em>. Parallel streams are mentioned in §5 only to say when <em>not</em> to use them; the reasons why belong to the memory-model material there. Everything in this module is single-threaded on purpose, so that the behaviour you observe is the behaviour of the language, not of a scheduler.</p>
+    </div>
+  </div>
+</section>

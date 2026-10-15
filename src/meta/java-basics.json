@@ -1,0 +1,11 @@
+{
+  "title": "Java Fundamentals",
+  "subtitle": "How Java actually runs your code — types, objects, collections and exceptions — built around one order-and-inventory system you carry from the first example to the last.",
+  "level": "Basic",
+  "tech": "Java 21 LTS",
+  "time": "6–8 hours",
+  "updated": "August 2026",
+  "accent": "amber",
+  "order": 1,
+  "next": "Java Intermediate"
+}

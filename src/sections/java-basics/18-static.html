@@ -1,0 +1,187 @@
+<section class="lm-section" id="static" data-title="static and initialization order" data-num="9">
+  <p class="lm-eyebrow">Section 9</p>
+  <h2 class="mb-4"><code>static</code> and initialization order</h2>
+
+  <p><code>static</code> means "belongs to the class, not to any instance". A static field exists once no matter how many objects you create; a static method has no <code>this</code> and cannot touch instance state. That single concept explains counters, constants, factory methods, and <code>main</code> itself.</p>
+
+  <p>The part worth memorising is <em>when</em> each piece of initialization runs, because the order is fixed, non-obvious, and shows up in interviews and in real "why is this field null?" bugs.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="InitOrder.java" data-verify="InitOrder">
+public class InitOrder {
+
+    static class Base {
+        static { System.out.println("1. Base   static block"); }
+        {        System.out.println("3. Base   instance initializer"); }
+        Base()  { System.out.println("4. Base   constructor"); }
+    }
+
+    static class Derived extends Base {
+        static { System.out.println("2. Derived static block"); }
+        {        System.out.println("5. Derived instance initializer"); }
+        Derived() { System.out.println("6. Derived constructor"); }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("-- before any instance exists --");
+        new Derived();
+        System.out.println("-- second instance --");
+        new Derived();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="InitOrder">
+-- before any instance exists --
+1. Base   static block
+2. Derived static block
+3. Base   instance initializer
+4. Base   constructor
+5. Derived instance initializer
+6. Derived constructor
+-- second instance --
+3. Base   instance initializer
+4. Base   constructor
+5. Derived instance initializer
+6. Derived constructor
+  </pre>
+
+  <p>Four things that output tells you:</p>
+  <ul>
+    <li><strong>Static initialization is lazy.</strong> The static blocks did not run at program start — they ran at the first <code>new Derived()</code>, after the first <code>println</code>. A class is initialized on first active use, not when the JVM boots.</li>
+    <li><strong>The superclass goes first, at both levels.</strong> Base's static block before Derived's; Base's instance work before Derived's.</li>
+    <li><strong>Instance initializers run before the constructor body</strong> — and after the implicit <code>super()</code> call.</li>
+    <li><strong>Statics run exactly once.</strong> The second instance printed only steps 3–6.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Step through it</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of initialization order">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Initialization order</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="init"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">JVM state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="init">
+    {
+      "lang": "java",
+      "code": "System.out.println(\"-- before any instance exists --\");\nnew Derived();\nSystem.out.println(\"-- second instance --\");\nnew Derived();",
+      "steps": [
+        { "line": 1, "vars": { "Base": "not loaded", "Derived": "not loaded" }, "out": "-- before any instance exists --",
+          "note": "Neither class has been initialized yet. Nothing triggered it: declaring a variable of a type is not an active use." },
+        { "line": 2, "vars": { "Base": "INITIALIZING", "Derived": "waiting" }, "out": "-- before any instance exists --\n1. Base   static block",
+          "note": "new Derived() is an active use. The JVM must initialize Derived, which requires its superclass to be initialized first, so Base's static block runs." },
+        { "line": 2, "vars": { "Base": "initialized", "Derived": "INITIALIZING" }, "out": "-- before any instance exists --\n1. Base   static block\n2. Derived static block",
+          "note": "Now Derived's own static block runs. Both classes are initialized once and for all; this will never happen again." },
+        { "line": 2, "vars": { "Base": "initialized", "Derived": "initialized", "allocating": "Derived instance" }, "out": "-- before any instance exists --\n1. Base   static block\n2. Derived static block\n3. Base   instance initializer",
+          "note": "Now the object itself. Derived's constructor begins with an implicit super() call, so Base's instance initializer runs before anything of Derived's." },
+        { "line": 2, "vars": { "Base": "initialized", "Derived": "initialized", "allocating": "Derived instance" }, "out": "-- before any instance exists --\n1. Base   static block\n2. Derived static block\n3. Base   instance initializer\n4. Base   constructor\n5. Derived instance initializer\n6. Derived constructor",
+          "note": "Base's constructor body, then Derived's instance initializer, then Derived's constructor body. Initializers always precede the constructor body at the same level." },
+        { "line": 4, "vars": { "Base": "initialized", "Derived": "initialized", "instances": "2" }, "out": "…\n-- second instance --\n3. Base   instance initializer\n4. Base   constructor\n5. Derived instance initializer\n6. Derived constructor",
+          "note": "The second instance repeats only steps 3 to 6. The static blocks are gone for good — that is what 'once per class' means." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Order of initialization, as a rule</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Initialization steps in order, with when each runs</caption>
+      <thead><tr><th scope="col">#</th><th scope="col">Step</th><th scope="col">Runs</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Superclass static fields and static blocks</td><td rowspan="2">Once, on first active use of the class</td></tr>
+        <tr><td>2</td><td>This class's static fields and static blocks</td></tr>
+        <tr><td>3</td><td>Superclass instance fields and instance initializers</td><td rowspan="4">Every <code>new</code></td></tr>
+        <tr><td>4</td><td>Superclass constructor body</td></tr>
+        <tr><td>5</td><td>This class's instance fields and instance initializers</td></tr>
+        <tr><td>6</td><td>This class's constructor body</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">Within a level, fields and initializer blocks run in the order they appear in the source. A field declared <em>below</em> an initializer that reads it will still hold its default value at that point.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Where this bites</div>
+      <ul class="mb-0">
+        <li><strong>A constructor calling an overridable method.</strong> Step 4 runs the superclass constructor, which may call an overridden method — and that override belongs to a subclass whose fields are not initialised until step 5. The override sees <code>null</code> and <code>0</code>. Make such methods <code>final</code> or <code>private</code>.</li>
+        <li><strong><code>static</code> mutable state is shared by everything.</strong> A <code>static SimpleDateFormat</code> or a <code>static</code> collection is a data race waiting for a second thread, and a memory leak that never gets collected because the class holds it for the JVM's lifetime.</li>
+        <li><strong><code>static final</code> primitives and Strings are inlined at compile time.</strong> A constant is copied into every calling class's bytecode, so changing it and recompiling only that one class leaves the old value baked into the others.</li>
+        <li><strong>You cannot use <code>this</code> in a static context.</strong> "Non-static variable cannot be referenced from a static context" almost always means you tried to touch instance state from <code>main</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-st-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>What does this print?</span></p>
+      <pre data-code data-lang="java" data-nobar>
+class Config {
+    private final String name = describe();
+    private final String type = "PRODUCT";
+    private String describe() { return "type is " + type; }
+    public static void main(String[] a) { System.out.println(new Config().name); }
+}
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-st-1"><span><code>type is PRODUCT</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-st-1"><span><code>type is null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-st-1"><span>It throws <code>NullPointerException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-st-1"><span>It does not compile — <code>type</code> is used before it is declared <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Instance fields initialise top to bottom. When <code>name</code> is computed, <code>type</code> has not been assigned yet and still holds its default of <code>null</code>. Concatenating <code>null</code> into a string yields the four characters <code>null</code> rather than failing.</p>
+        <p class="mb-0"><strong>A</strong> assumes declaration order does not matter — swapping the two lines really would produce it. <strong>C</strong> is the intuitive guess but string concatenation is null-safe; you would only get an NPE if <code>describe</code> called a method <em>on</em> <code>type</code>. <strong>D</strong> describes the illegal-forward-reference rule, which applies to direct reads in an initialiser, not to reads inside a method the initialiser calls — which is exactly why this compiles and misbehaves.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-st-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>InventoryService</code> keeps <code>private static int totalPicks</code>, incremented in an instance method. Two services are constructed and each picks 3 items. What is <code>totalPicks</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-st-2"><span>3 — each instance has its own copy <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-st-2"><span>0 — static fields cannot be changed from an instance method <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-st-2"><span>6 — there is one field shared by every instance <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-st-2"><span>Undefined — it depends on construction order <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> A static field belongs to the class. Both instances increment the same storage, so the counts add up to 6.</p>
+        <p class="mb-0"><strong>A</strong> describes an instance field — drop <code>static</code> and it would be 3 each. <strong>B</strong> inverts the real rule: an instance method may freely read and write statics; it is the other direction, static code touching instance state, that is forbidden. <strong>D</strong> is wrong single-threaded — though with two <em>threads</em> and no synchronisation the count really would become unreliable, since <code>++</code> is not atomic. That is a genuine hazard of mutable static state, covered in Java Intermediate.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="static"> Mark this section complete
+  </label>
+</section>

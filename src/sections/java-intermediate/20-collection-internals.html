@@ -1,0 +1,272 @@
+<section class="lm-section" id="collection-internals" data-title="Inside the collections" data-num="11">
+  <p class="lm-eyebrow">Section 11</p>
+  <h2 class="mb-4">Inside the collections</h2>
+
+  <p>Fundamentals §12 told you <em>which</em> collection to pick and what each operation costs. This section opens them up, because the costs are not laws of nature: they hold only while certain conditions do. <code>HashMap.get</code> is O(1) only if the hash function spreads keys and the key never changes. <code>ArrayList.add</code> is O(1) only on average, with occasional O(n) pauses. Knowing the mechanism is what lets you predict when the guarantee is about to break, and the warehouse's stock map, keyed by SKU and consulted on every pick, is exactly where that prediction matters.</p>
+
+  <h3 class="mt-8 mb-3">HashMap, one <code>put</code> at a time</h3>
+
+  <p>A <code>HashMap</code> is an array of <strong>bins</strong> (the <em>table</em>), each holding zero or more entries. Putting a key means finding its bin, then checking the entries already there:</p>
+
+  <pre data-code data-lang="java" data-nobar>
+int h = key.hashCode();                 // 1. the key's own 32-bit hash
+h = h ^ (h >>> 16);                     // 2. "spread": fold the high bits into the low ones
+int index = (table.length - 1) & h;     // 3. the bin: a mask, not a modulo, because length is a power of 2
+// 4. walk the bin: an entry with the same hash AND key.equals(existing) means replace, else append
+  </pre>
+
+  <ul>
+    <li>Step 3 only uses the low bits of <code>h</code>, which is why step 2 exists: a <code>hashCode</code> whose variation is all in the high bits (think of keys that are multiples of 65536) would otherwise collide into one bin.</li>
+    <li>Each bin is a linked list of entries. Once a bin holds <strong>8</strong> entries and the table has at least 64 bins, the list is converted to a <strong>red-black tree</strong> so that lookups in that bin become O(log n) instead of O(n). This is the JDK defending itself against a bad <code>hashCode</code>; it needs the keys to be <code>Comparable</code> to do a good job.</li>
+    <li>The full hash is stored in each entry, so the walk compares <code>int</code>s first and calls <code>equals</code> only on a hash match. A cheap <code>hashCode</code> and an exact <code>equals</code> is the pair the structure is built for.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Load factor and resizing</h3>
+
+  <p>Bins fill up as entries arrive, and long bins make every operation slower. So the map tracks a <strong>threshold</strong>, <code>capacity × loadFactor</code>, and when the entry count exceeds it the table <strong>doubles</strong> and every entry is re-inserted. The default load factor of 0.75 is the trade-off the JDK authors settled on: on average under one entry per bin, with the table only a third empty. Watch what that costs as a map grows.</p>
+
+  <div class="lm-card" data-sandbox="hashmap-resize">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10M15 10v10"/></svg>
+      Grow a <code>HashMap</code> and watch it resize
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Entries put so far <span class="lm-readout" data-sb-nout>20</span></span>
+        <input type="range" data-sb-n min="0" max="200" value="20" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Load factor</span>
+        <select data-sb-lf><option value="0.5">0.5</option><option value="0.75" selected>0.75 (default)</option><option value="1">1.0</option></select>
+      </label>
+      <label class="lm-field">
+        <span>Initial capacity</span>
+        <select data-sb-cap><option value="16" selected>16 (default)</option><option value="64">64</option><option value="256">256</option></select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>Three consequences follow from the resize rule. The amortised cost of <code>put</code> is still O(1), because doublings are geometric: a map that reached 200 entries did about 200 + 100 + 50 + … ≈ 400 re-insertions in total, not 200 × 200. A map whose size you know in advance should be created with that capacity (divided by the load factor), which skips every resize. And <strong>iteration order changes on resize</strong>: entries move to new bins when the mask gains a bit, so code that "worked" because a <code>HashMap</code> happened to iterate in insertion order breaks the day it grows past 12 entries.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>The mutable-key failure, three idioms that replace get-check-put, the ordered maps, and the fail-fast iterator, all in one program.</p>
+
+  <pre data-code data-lang="java" data-file="MapInternals.java" data-verify="MapInternals" data-bad="23" data-hi="30,31,32,36,52">
+import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+public class MapInternals {
+
+    static final class Bin {                        // a mutable key: the mistake this section is about
+        String code;
+        Bin(String code) { this.code = code; }
+        @Override public boolean equals(Object o) { return o instanceof Bin b && b.code.equals(code); }
+        @Override public int hashCode() { return code.hashCode(); }
+    }
+
+    public static void main(String[] args) {
+        Map<Bin, Integer> stock = new HashMap<>();
+        Bin key = new Bin("A-01");
+        stock.put(key, 40);
+        key.code = "A-02";                           // the hash changes; the entry stays in the old bucket
+        System.out.println("size=" + stock.size()
+                + "  containsKey(A-01)=" + stock.containsKey(new Bin("A-01"))
+                + "  containsKey(A-02)=" + stock.containsKey(new Bin("A-02"))
+                + "  containsKey(key)=" + stock.containsKey(key));
+
+        Map<String, List<String>> byCategory = new TreeMap<>();
+        byCategory.computeIfAbsent("FASTENER", k -> new ArrayList<>()).add("BOLT-7");
+        byCategory.computeIfAbsent("FASTENER", k -> new ArrayList<>()).add("NUT-3");
+        byCategory.computeIfAbsent("STRUCTURAL", k -> new ArrayList<>()).add("GIRD-1");
+        System.out.println("multimap  " + byCategory);
+
+        Map<String, Integer> picks = new TreeMap<>();
+        for (String sku : List.of("BOLT-7", "NUT-3", "BOLT-7", "BOLT-7")) picks.merge(sku, 1, Integer::sum);
+        System.out.println("counts    " + picks + "  CAM-9 -> " + picks.getOrDefault("CAM-9", 0));
+
+        Map<String, Integer> linked = new LinkedHashMap<>();
+        Map<String, Integer> sorted = new TreeMap<>();
+        for (String sku : List.of("ROD-4", "BOLT-7", "NUT-3")) { linked.put(sku, 1); sorted.put(sku, 1); }
+        System.out.println("linked    " + linked.keySet() + "  insertion order");
+        System.out.println("tree      " + sorted.keySet() + "  sorted order");
+
+        TreeMap<Integer, String> bands = new TreeMap<>(Map.of(0, "small", 100, "medium", 1_000, "large"));
+        System.out.println("250c is " + bands.floorEntry(250).getValue() + ", bands under 1000: " + bands.headMap(1_000).keySet());
+
+        Map<String, Integer> lru = new LinkedHashMap<>(16, 0.75f, true) {   // true = access order
+            @Override protected boolean removeEldestEntry(Map.Entry<String, Integer> e) { return size() > 2; }
+        };
+        lru.put("BOLT-7", 1); lru.put("NUT-3", 1);
+        lru.get("BOLT-7");                           // touching it makes NUT-3 the eldest
+        lru.put("CAM-9", 1);
+        System.out.println("lru       " + lru.keySet() + "  NUT-3 evicted: least recently used");
+
+        List<String> toShip = new ArrayList<>(List.of("BOLT-7", "NUT-3", "CAM-9", "ROD-4"));
+        try {
+            for (String s : toShip) if (s.startsWith("B")) toShip.remove(s);
+        } catch (ConcurrentModificationException e) {
+            System.out.println("for-each remove -> ConcurrentModificationException, list now " + toShip);
+        }
+        toShip.removeIf(s -> s.startsWith("N"));
+        for (Iterator<String> it = toShip.iterator(); it.hasNext();) if (it.next().startsWith("C")) it.remove();
+        System.out.println("removeIf + Iterator.remove -> " + toShip);
+    }
+}
+  </pre>
+
+  <pre data-output data-for="MapInternals">
+size=1  containsKey(A-01)=false  containsKey(A-02)=false  containsKey(key)=false
+multimap  {FASTENER=[BOLT-7, NUT-3], STRUCTURAL=[GIRD-1]}
+counts    {BOLT-7=3, NUT-3=1}  CAM-9 -> 0
+linked    [ROD-4, BOLT-7, NUT-3]  insertion order
+tree      [BOLT-7, NUT-3, ROD-4]  sorted order
+250c is medium, bands under 1000: [0, 100]
+lru       [BOLT-7, CAM-9]  NUT-3 evicted: least recently used
+for-each remove -> ConcurrentModificationException, list now [NUT-3, CAM-9, ROD-4]
+removeIf + Iterator.remove -> [ROD-4]
+  </pre>
+
+  <p>The first line is the one to stare at. The map holds one entry and cannot find it by <em>any</em> key, including the very object that was used to put it. The entry sits in the bin chosen for the hash of <code>"A-01"</code>; a lookup for <code>"A-02"</code> goes to a different bin, and a lookup for <code>"A-01"</code> reaches the right bin but then fails the <code>equals</code> check against a key that now says <code>"A-02"</code>. Nothing throws. The entry is simply unreachable until a resize happens to move it, at which point it may become reachable under the new key, which is worse, because now the behaviour depends on how many other entries exist. The cure is the one §10 gave: keys are immutable, full stop. Records and strings are good keys; anything with a setter is not.</p>
+
+  <p><code>computeIfAbsent</code> (lines 30 to 32) is the idiom for a map of collections: one call creates the list on first sight of the key and returns the existing one afterwards. <code>merge</code> (line 36) is the idiom for counting and summing. Both replace a three-line <code>get</code>, null check, <code>put</code> dance that is easy to get wrong and, on concurrent maps, impossible to make atomic by hand.</p>
+
+  <h3 class="mt-8 mb-3">The other structures</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Internals of the other collections">
+      <button type="button" class="lm-tab" role="tab" id="tab-collection-internals-al" aria-controls="panel-collection-internals-al" aria-selected="true" tabindex="0">ArrayList</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collection-internals-ad" aria-controls="panel-collection-internals-ad" aria-selected="false" tabindex="-1">ArrayDeque</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collection-internals-tm" aria-controls="panel-collection-internals-tm" aria-selected="false" tabindex="-1">TreeMap</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collection-internals-lhm" aria-controls="panel-collection-internals-lhm" aria-selected="false" tabindex="-1">LinkedHashMap</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collection-internals-al" aria-labelledby="tab-collection-internals-al" tabindex="0">
+      <p>A plain <code>Object[]</code> plus a <code>size</code>. <code>get(i)</code> is an array read. <code>add</code> writes at <code>size</code> and increments it; when the array is full, a new one of <strong>1.5×</strong> the length is allocated and the old contents copied with <code>System.arraycopy</code>. That copy is O(n), but it happens only every 1.5× growth, so the cost per <code>add</code> averages out to O(1): <em>amortised</em> constant time.</p>
+      <ul class="mb-0">
+        <li><code>new ArrayList&lt;&gt;(expected)</code> skips the growth copies. <code>ensureCapacity(n)</code> does the same later; <code>trimToSize()</code> gives back the slack after a bulk load.</li>
+        <li><code>add(0, x)</code> and <code>remove(0)</code> shift everything: O(n). A queue built on <code>ArrayList</code> is a quadratic accident waiting to happen; use <code>ArrayDeque</code>.</li>
+        <li>Removing never shrinks the array. A list that once held a million elements and now holds ten still owns a million slots until you <code>trimToSize()</code> or replace it.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collection-internals-ad" aria-labelledby="tab-collection-internals-ad" tabindex="0" hidden>
+      <p>A <strong>ring buffer</strong>: an array with a <code>head</code> and <code>tail</code> index that wrap around the end. Adding at either end moves one index; nothing shifts. When the ring is full it doubles and the elements are copied into the new array in order.</p>
+      <ul class="mb-0">
+        <li>O(1) at both ends makes it the right stack <em>and</em> the right queue. <code>Stack</code> is a synchronized legacy class; <code>LinkedList</code> pays a node allocation per element and scatters them across the heap.</li>
+        <li>No index access by design: <code>get(i)</code> does not exist, which is the API telling you what the structure is for.</li>
+        <li>Rejects <code>null</code> elements, because <code>poll()</code> returns <code>null</code> to mean "empty".</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collection-internals-tm" aria-labelledby="tab-collection-internals-tm" tabindex="0" hidden>
+      <p>A <strong>red-black tree</strong>: a binary search tree that rebalances itself on every insert and delete so that its height stays within 2 log₂ n. Every operation walks from the root, comparing with <code>compareTo</code> or the comparator at each node: O(log n) and never worse, regardless of insertion order.</p>
+      <ul class="mb-0">
+        <li>No hashing, no <code>equals</code>, no resizing. Keys must be mutually comparable or the first <code>put</code> throws <code>ClassCastException</code>.</li>
+        <li>Pays for its order with navigation: <code>firstKey</code>, <code>floorEntry(k)</code> (the greatest key ≤ k, used for the price bands above), <code>ceilingKey</code>, <code>headMap</code>, <code>tailMap</code>, <code>subMap</code>. The sub-map views are live: writes to them go into the tree.</li>
+        <li>About 3–5× slower than <code>HashMap</code> for plain lookups and heavier per entry. Pick it for the navigation, not for the sort; a one-off sorted report is cheaper as <code>HashMap</code> plus a sort.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collection-internals-lhm" aria-labelledby="tab-collection-internals-lhm" tabindex="0" hidden>
+      <p>A <code>HashMap</code> whose entries are <em>also</em> threaded onto a doubly linked list. Lookups use the hash table; iteration follows the list, so the order is predictable: <strong>insertion order</strong> by default, or <strong>access order</strong> when constructed with the three-argument constructor's <code>true</code>, in which every <code>get</code> moves the entry to the tail.</p>
+      <ul class="mb-0">
+        <li>Access order plus an overridden <code>removeEldestEntry</code> is a complete LRU cache in six lines, as the worked example shows.</li>
+        <li>Costs one extra pair of references per entry and slightly slower writes. Iteration is usually <em>faster</em> than <code>HashMap</code>'s, which has to skip empty bins.</li>
+        <li>Resizing does not change iteration order, which removes the <code>HashMap</code> surprise described above. Tests that assert on a map's printed form should use this or <code>TreeMap</code>, never <code>HashMap</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Fail-fast iterators</h3>
+
+  <p>Every collection in <code>java.util</code> keeps a <code>modCount</code> that each structural change increments. An iterator remembers the count it saw at creation and compares on every <code>next()</code>; a mismatch throws <code>ConcurrentModificationException</code>. The name is misleading: no threads are involved, as the worked example shows with a single-threaded loop. The check exists because an iterator over a resized table or a shifted array would otherwise return garbage or skip elements, and a loud failure is preferable.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Ways to modify a collection during iteration</caption>
+      <thead><tr><th scope="col">Technique</th><th scope="col">Safe?</th><th scope="col">Why</th></tr></thead>
+      <tbody>
+        <tr><td>for-each + <code>list.remove(x)</code></td><td>No</td><td>The hidden iterator's count no longer matches. Often throws on the <em>next</em> iteration, not the removal itself; removing the second-to-last element throws nothing, because <code>hasNext()</code> returns false first</td></tr>
+        <tr><td><code>Iterator.remove()</code></td><td>Yes</td><td>The iterator performs the removal and updates its own expected count</td></tr>
+        <tr><td><code>removeIf(predicate)</code></td><td>Yes</td><td>One pass, implemented by the collection itself; also the fastest option on <code>ArrayList</code></td></tr>
+        <tr><td>Indexed loop <em>downwards</em> with <code>remove(i)</code></td><td>Yes</td><td>Removal shifts only the elements already visited</td></tr>
+        <tr><td>Iterate a copy, modify the original</td><td>Yes</td><td>Two collections, two counts; costs a copy</td></tr>
+        <tr><td><code>ConcurrentHashMap</code> / <code>CopyOnWriteArrayList</code></td><td>Yes</td><td><em>Weakly consistent</em> iterators: they never throw and reflect some or all changes made since creation. The subject of Java Advanced</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Where the O(1) quietly stops being true</div>
+      <ul class="mb-0">
+        <li><strong>A constant <code>hashCode</code> is legal and catastrophic.</strong> Every key lands in one bin; the map becomes a linked list (or, past 8 entries with a 64-bin table, a tree of keys that must also be <code>Comparable</code> to be ordered well). Lookups go from O(1) to O(n) and nothing warns you.</li>
+        <li><strong><code>computeIfAbsent</code> must not modify the map inside its function.</strong> Doing so throws <code>ConcurrentModificationException</code> since Java 9, because the map is mid-insertion. Compute, then put, if the computation needs other entries.</li>
+        <li><strong><code>Map.of</code> and <code>Set.of</code> randomise iteration order per JVM run.</strong> Deliberately. If a test passes on your machine and fails in CI with the same code, this is a likely reason; it is also the reason none of the verified programs in this module print a <code>HashSet</code>.</li>
+        <li><strong><code>Collections.unmodifiableMap</code> on a <code>LinkedHashMap</code> keeps the order; <code>Map.copyOf</code> does not.</strong> The copy is a plain immutable map with the randomised order above. Use the view, or a <code>TreeMap</code>, when order must survive.</li>
+        <li><strong><code>ArrayList.remove(int)</code> and <code>remove(Object)</code> are different overloads</strong>, and a <code>List&lt;Integer&gt;</code> hits the index version with <code>list.remove(3)</code>. Fundamentals §2 warned about it; it is worth repeating because it corrupts data silently.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-collection-internals-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A <code>HashMap</code> was created with default settings and has just received its 13th entry. What happened?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-collection-internals-1"><span>Nothing special; the table resizes at 16 entries <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-collection-internals-1"><span>The table doubled from 16 to 32 bins and all 13 entries were re-inserted; iteration order may have changed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-collection-internals-1"><span>The table grew by 50%, like an <code>ArrayList</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-collection-internals-1"><span>The longest bin was converted to a tree <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Default capacity 16, load factor 0.75, threshold 12. The 13th entry pushes the size past the threshold, the table doubles, every entry is rehashed into the larger table, and because the index mask gained a bit, entries can move to different bins and iterate in a different order.</p>
+        <p class="mb-0"><strong>A</strong> confuses the threshold with the capacity. <strong>C</strong> is the <code>ArrayList</code> rule; hash tables double so that the mask stays a power of two. <strong>D</strong> happens only when a single bin reaches 8 entries, which 13 well-spread keys will not do.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-collection-internals-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A <code>Bin</code> object is used as a <code>HashMap</code> key, then one of the fields its <code>hashCode</code> depends on is changed. What is true afterwards?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-collection-internals-2"><span>The map detects the change and throws <code>ConcurrentModificationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-collection-internals-2"><span>The map moves the entry to the bin for the new hash on the next access <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-collection-internals-2"><span>The entry still counts in <code>size()</code> but no key, old or new, can find it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-collection-internals-2"><span>Lookups with the original key object still work, because the map stores the reference <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The entry was filed under the old hash's bin. A lookup for the new value goes to a different bin; a lookup for the old value reaches the right bin but fails <code>equals</code> against a key that now holds the new value. The map has no way to know a key changed, so it cannot react.</p>
+        <p class="mb-0"><strong>A</strong>: <code>modCount</code> tracks structural changes to the map, not to keys. <strong>B</strong>: nothing is re-filed except during a resize, and then the entry lands under its <em>current</em> hash, which can make it reappear unpredictably. <strong>D</strong>: the map does store the reference, and the worked example shows <code>containsKey(key)</code> returning <code>false</code> anyway, because the lookup recomputes the hash from the mutated object first.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-collection-internals-3" data-answer="a,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these remove matching elements from an <code>ArrayList</code> without risking <code>ConcurrentModificationException</code>? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>list.removeIf(s -> s.startsWith("N"))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>for (String s : list) if (s.startsWith("N")) list.remove(s);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>for (var it = list.iterator(); it.hasNext();) if (it.next().startsWith("N")) it.remove();</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>for (int i = list.size() - 1; i >= 0; i--) if (list.get(i).startsWith("N")) list.remove(i);</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, C and D.</strong> <code>removeIf</code> is implemented by the list itself in a single pass. <code>Iterator.remove</code> keeps the iterator's expected count in step. A downward indexed loop never uses an iterator and only shifts elements it has already passed.</p>
+        <p class="mb-0"><strong>B</strong> is the classic: the for-each hides an iterator, the <code>remove</code> bumps <code>modCount</code> behind its back, and the next <code>next()</code> throws. Worse, if the match is the second-to-last element it does <em>not</em> throw, because <code>hasNext()</code> sees <code>cursor == size</code> and stops, silently skipping the last element. An ascending indexed loop has the sibling bug of skipping the element that slides into the removed slot.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="collection-internals"> Mark this section complete
+  </label>
+</section>

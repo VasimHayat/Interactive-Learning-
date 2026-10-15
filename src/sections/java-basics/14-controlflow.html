@@ -1,0 +1,215 @@
+<section class="lm-section" id="controlflow" data-title="Control flow" data-num="5">
+  <p class="lm-eyebrow">Section 5</p>
+  <h2 class="mb-4">Control flow</h2>
+
+  <p>The shapes here will be familiar from any C-family language. What is worth your attention is the enhanced <code>for</code> loop, the difference between <code>break</code> and <code>continue</code> when both appear in one loop, and the switch <em>expression</em> — a Java 14+ form that removes the fall-through bug the old statement was famous for.</p>
+
+  <h3 class="mt-8 mb-3">The five loop forms</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Loop forms and when to use each</caption>
+      <thead><tr><th scope="col">Form</th><th scope="col">Use when</th></tr></thead>
+      <tbody>
+        <tr><td><code>for (int i = 0; i &lt; n; i++)</code></td><td>you need the index, or you are stepping by something other than 1</td></tr>
+        <tr><td><code>for (T item : collection)</code></td><td>you just need each element — the default choice, and the one that cannot go out of bounds</td></tr>
+        <tr><td><code>while (cond)</code></td><td>the number of iterations is unknown up front</td></tr>
+        <tr><td><code>do { … } while (cond)</code></td><td>the body must run at least once (menus, retry loops)</td></tr>
+        <tr><td><code>Iterator&lt;T&gt; it = …; while (it.hasNext())</code></td><td>you need to <code>remove()</code> while iterating — see the gotcha below</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>A picking routine that skips out-of-stock lines and stops once it has enough. Both <code>continue</code> and <code>break</code> appear, and the order in which they are tested changes the result.</p>
+
+  <pre data-code data-lang="java" data-file="ControlFlow.java" data-verify="ControlFlow" data-hi="10,14">
+public class ControlFlow {
+    public static void main(String[] args) {
+        String[] skus   = { "BOLT-7", "NUT-3", "CAM-9", "ROD-4", "PIN-2" };
+        int[]    onHand = {       12,       0,       7,       0,      31 };
+        int      needed = 2;
+        int      picked = 0;
+
+        for (int i = 0; i < skus.length; i++) {
+            if (onHand[i] == 0) {
+                System.out.println("skip  " + skus[i] + " (out of stock)");
+                continue;
+            }
+            if (picked == needed) {
+                System.out.println("stop  - picked enough");
+                break;
+            }
+            System.out.println("pick  " + skus[i]);
+            picked++;
+        }
+        System.out.println("picked = " + picked);
+
+        for (String sku : new String[] { "BOLT-7", "CAM-9", "ZZZ-1" }) {
+            String bin = switch (sku.substring(0, 3)) {
+                case "BOL" -> "A1";
+                case "CAM" -> "B2";
+                default    -> "UNSORTED";
+            };
+            System.out.println(sku + " -> bin " + bin);
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ControlFlow">
+pick  BOLT-7
+skip  NUT-3 (out of stock)
+pick  CAM-9
+skip  ROD-4 (out of stock)
+stop  - picked enough
+picked = 2
+BOLT-7 -> bin A1
+CAM-9 -> bin B2
+ZZZ-1 -> bin UNSORTED
+  </pre>
+
+  <p>Notice <code>ROD-4</code>: it is skipped rather than triggering the stop, because the <code>continue</code> on line 11 fires before control ever reaches the <code>break</code> test. Swap the two <code>if</code> blocks and the loop stops one iteration earlier and prints something different. <strong><code>continue</code> jumps to the next iteration; <code>break</code> leaves the loop entirely</strong> — and when both are present, the order you test them in is part of the logic.</p>
+
+  <h3 class="mt-8 mb-3">Watch it iterate</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of the picking loop">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Picking loop</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="loop"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Locals</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="loop">
+    {
+      "lang": "java",
+      "code": "for (int i = 0; i < skus.length; i++) {\n    if (onHand[i] == 0) {\n        System.out.println(\"skip  \" + skus[i]);\n        continue;\n    }\n    if (picked == needed) {\n        System.out.println(\"stop  - picked enough\");\n        break;\n    }\n    System.out.println(\"pick  \" + skus[i]);\n    picked++;\n}\nSystem.out.println(\"picked = \" + picked);",
+      "steps": [
+        { "line": 1, "vars": { "i": "0", "picked": "0", "needed": "2" }, "out": "",
+          "note": "i is initialised to 0 and the condition 0 < 5 holds, so the body runs." },
+        { "line": 2, "vars": { "i": "0", "picked": "0", "needed": "2", "skus[i]": "BOLT-7", "onHand[i]": "12" }, "out": "",
+          "note": "onHand[0] is 12, not zero. The continue branch is skipped." },
+        { "line": 6, "vars": { "i": "0", "picked": "0", "needed": "2" }, "out": "",
+          "note": "picked (0) does not equal needed (2), so the break branch is skipped too." },
+        { "line": 10, "vars": { "i": "0", "picked": "1", "needed": "2" }, "out": "pick  BOLT-7",
+          "note": "The line is picked and the counter is incremented. i++ then runs and the condition is retested." },
+        { "line": 2, "vars": { "i": "1", "picked": "1", "needed": "2", "skus[i]": "NUT-3", "onHand[i]": "0" }, "out": "pick  BOLT-7",
+          "note": "Second iteration. onHand[1] is 0, so this line is out of stock." },
+        { "line": 4, "vars": { "i": "1", "picked": "1", "needed": "2" }, "out": "pick  BOLT-7\nskip  NUT-3",
+          "note": "continue jumps straight to i++ — the break test below is never reached this iteration. That is the subtlety." },
+        { "line": 10, "vars": { "i": "2", "picked": "2", "needed": "2", "skus[i]": "CAM-9", "onHand[i]": "7" }, "out": "pick  BOLT-7\nskip  NUT-3\npick  CAM-9",
+          "note": "Third iteration picks CAM-9. picked is now 2, which equals needed — but the test happens at the TOP of the next iteration, not here." },
+        { "line": 4, "vars": { "i": "3", "picked": "2", "needed": "2", "skus[i]": "ROD-4", "onHand[i]": "0" }, "out": "pick  BOLT-7\nskip  NUT-3\npick  CAM-9\nskip  ROD-4",
+          "note": "Fourth iteration. ROD-4 is out of stock, so continue fires FIRST and the loop still does not stop, even though picked == needed." },
+        { "line": 7, "vars": { "i": "4", "picked": "2", "needed": "2", "skus[i]": "PIN-2", "onHand[i]": "31" }, "out": "pick  BOLT-7\nskip  NUT-3\npick  CAM-9\nskip  ROD-4\nstop  - picked enough",
+          "note": "Fifth iteration. PIN-2 is in stock so continue does not fire; now the break test is finally reached and picked == needed." },
+        { "line": 13, "vars": { "picked": "2" }, "out": "pick  BOLT-7\nskip  NUT-3\npick  CAM-9\nskip  ROD-4\nstop  - picked enough\npicked = 2",
+          "note": "break exits the loop entirely. i is out of scope now — it was declared in the for header." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Switch: statement versus expression</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Switch forms">
+      <button type="button" class="lm-tab" role="tab" id="tab-sw-old" aria-controls="panel-sw-old" aria-selected="true" tabindex="0">Old statement</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-sw-new" aria-controls="panel-sw-new" aria-selected="false" tabindex="-1">Expression (Java 14+)</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sw-old" aria-labelledby="tab-sw-old" tabindex="0">
+      <pre data-code data-lang="java" data-nobar data-bad="4">
+String bin;
+switch (prefix) {
+    case "BOL": bin = "A1";
+    case "CAM": bin = "B2"; break;
+    default:    bin = "UNSORTED";
+}
+      </pre>
+      <p class="mb-0">The missing <code>break</code> on the <code>"BOL"</code> case means it falls through and <code>bin</code> ends up <code>"B2"</code>. The compiler is happy. Every case needing an explicit <code>break</code>, with fall-through as the default, is a design that produces this bug reliably.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sw-new" aria-labelledby="tab-sw-new" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+String bin = switch (prefix) {
+    case "BOL" -> "A1";
+    case "CAM" -> "B2";
+    default    -> "UNSORTED";
+};
+      </pre>
+      <p class="mb-0">Arrow cases do not fall through, the whole thing is an expression that yields a value, and <code>bin</code> can be <code>final</code>. When switching over an <code>enum</code> the compiler also checks exhaustiveness, so adding a new constant turns every unhandled switch into a compile error rather than a silent <code>default</code>. Prefer this form.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--danger">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6m0-6 6 6"/></svg>
+    <div>
+      <div class="lm-callout-title">Removing while iterating throws</div>
+      <pre data-code data-lang="java" data-nobar data-bad="2">
+for (OrderLine line : order.lines()) {
+    if (line.qty() == 0) order.lines().remove(line);   // ConcurrentModificationException
+}
+      </pre>
+      <p class="mb-0">The enhanced <code>for</code> is an <code>Iterator</code> underneath, and the iterator notices the collection changed beneath it. Despite the name, no concurrency is involved — a single thread does this to itself. Use <code>Iterator.remove()</code>, or <code>list.removeIf(line -&gt; line.qty() == 0)</code>, which is clearer and does the same thing safely.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-cf-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In the worked example, what changes if the <code>break</code> block is moved <em>above</em> the <code>continue</code> block?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-cf-1"><span>Nothing — both still run for every element <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-cf-1"><span>The loop stops at <code>ROD-4</code> instead of <code>PIN-2</code>, so <code>skip  ROD-4</code> is never printed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-cf-1"><span><code>picked</code> ends at 3 instead of 2 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-cf-1"><span>It no longer compiles, because <code>break</code> must be last <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> On the fourth iteration <code>picked</code> already equals <code>needed</code>. If the break test comes first it fires immediately, so the loop exits at <code>ROD-4</code> and the out-of-stock message for it is never reached.</p>
+        <p class="mb-0"><strong>A</strong> misses that <code>continue</code> skips the rest of the body. <strong>C</strong> is impossible — <code>picked</code> is only incremented after both guards pass, and stopping earlier cannot increase it. <strong>D</strong> invents a rule; <code>break</code> may appear anywhere in a loop body.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-cf-2" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which of these safely remove zero-quantity lines while walking the list? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>lines.removeIf(l -&gt; l.qty() == 0);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>for (var l : lines) if (l.qty() == 0) lines.remove(l);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>var it = lines.iterator(); while (it.hasNext()) if (it.next().qty() == 0) it.remove();</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>for (int i = 0; i &lt; lines.size(); i++) if (lines.get(i).qty() == 0) lines.remove(i);</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> <code>removeIf</code> is purpose-built and the clearest option. <code>Iterator.remove()</code> is the low-level equivalent — it updates the iterator's own bookkeeping so no modification is detected.</p>
+        <p class="mb-0"><strong>B</strong> throws <code>ConcurrentModificationException</code> — the enhanced <code>for</code> hides an iterator that the direct <code>remove</code> invalidates. <strong>D</strong> does not throw, which makes it worse: removing at index <code>i</code> shifts everything left, the loop then increments <code>i</code>, and the element that moved into that slot is never examined. Two adjacent zero-quantity lines and it silently keeps one. Iterating backwards would fix it, but <code>removeIf</code> is better.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="controlflow"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,290 @@
+<section class="lm-section" id="nested" data-title="Nested, inner, local and anonymous classes" data-num="2">
+  <p class="lm-eyebrow">Section 2</p>
+  <h2 class="mb-4">Nested, inner, local and anonymous classes</h2>
+
+  <p>Java lets you declare a class inside another class, inside a method, or inside an expression. The four forms look similar and are not: they differ in what they can see, what they secretly hold a reference to, and when they are the right tool. Lambdas (§4) are the fifth member of the family, and most of what makes them simple is that they drop the baggage described here.</p>
+
+  <p>The question to ask of any nested class is: <strong>does it need an instance of the enclosing class to exist?</strong> If not, it is <code>static</code> and is merely a class that lives in a namespace. If so, it is <em>inner</em>, and every one of its instances carries a hidden pointer to the outer instance that created it.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Nested.java" data-verify="Nested" data-hi="7,19,31,56">
+import java.util.ArrayList;
+import java.util.List;
+
+public class Nested {
+
+    // 1. STATIC NESTED: a class placed inside another for namespacing. No outer instance.
+    static class Line {
+        final String sku; final int qty;
+        Line(String sku, int qty) { this.sku = sku; this.qty = qty; }
+        @Override public String toString() { return sku + "x" + qty; }
+    }
+
+    private final List<Line> lines = new ArrayList<>();
+    private final String orderId;
+
+    Nested(String orderId) { this.orderId = orderId; }
+
+    // 2. INNER: every instance carries a hidden reference to the enclosing Nested (Nested.this)
+    class Cursor {
+        private int pos = 0;                                       // the cursor's own state
+        boolean hasNext() { return pos < lines.size(); }           // `lines` means Nested.this.lines
+        Line next() { return lines.get(pos++); }
+        String owner() { return Nested.this.orderId; }             // the qualified form, written out
+    }
+
+    Cursor cursor() { return new Cursor(); }                       // `this` becomes the new Cursor's outer
+
+    int totalQty() {
+        int base = 100;                                            // a local that a local class will capture
+
+        // 3. LOCAL: declared inside a method; sees the method's effectively-final locals
+        class Counter {
+            int sum = base;                                        // `base` is COPIED into the Counter at construction
+            void add(Line l) { sum += l.qty; }
+        }
+        Counter c = new Counter();
+        for (Line l : lines) c.add(l);
+        // base = 0;   // uncomment: "local variables referenced from an inner class must be final or effectively final"
+        return c.sum - base;
+    }
+
+    public static void main(String[] args) {
+        Nested order = new Nested("ORD-1");
+        order.lines.add(new Line("BOLT-7", 3));
+        order.lines.add(new Line("NUT-3", 10));
+
+        Line standalone = new Nested.Line("CAM-9", 1);             // static nested: no outer instance needed
+        System.out.println("static nested = " + standalone);
+
+        Nested.Cursor cur = order.cursor();                        // inner: created THROUGH an instance
+        Nested.Cursor other = order.new Cursor();                  // the explicit (and rarely seen) form
+        System.out.println("inner owner   = " + cur.owner() + " / " + other.owner());
+        StringBuilder walked = new StringBuilder();
+        while (cur.hasNext()) walked.append(cur.next()).append(' ');
+        System.out.println("walked        = " + walked.toString().trim());
+
+        System.out.println("local class   = " + order.totalQty());
+
+        // 4. ANONYMOUS: a one-off implementation declared at the point of use
+        Runnable report = new Runnable() {
+            @Override public void run() {
+                // `this` here is the anonymous Runnable itself, never the enclosing class
+                System.out.println("anonymous     = this is a " + this.getClass().getSuperclass().getSimpleName()
+                        + ", simple name '" + this.getClass().getSimpleName() + "'");
+            }
+        };
+        report.run();
+
+        // A lambda has no `this` of its own; it captures the enclosing instance's, if there is one
+        Runnable lambda = () -> System.out.println("lambda        = " + order.lines.size() + " lines captured");
+        lambda.run();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Nested">
+static nested = CAM-9x1
+inner owner   = ORD-1 / ORD-1
+walked        = BOLT-7x3 NUT-3x10
+local class   = 13
+anonymous     = this is a Object, simple name ''
+lambda        = 2 lines captured
+  </pre>
+
+  <p><code>Line</code> is static: it is a value type that happens to be scoped under <code>Nested</code>, and <code>new Nested.Line(…)</code> needs no order to exist. <code>Cursor</code> is inner: <code>lines</code> inside it is really <code>Nested.this.lines</code>, resolved through a hidden field the compiler added, which is why it can only be created from an instance — <code>order.cursor()</code>, or the explicit <code>order.new Cursor()</code>. <code>Counter</code> is local to one method and copies the local <code>base</code> into itself. The anonymous <code>Runnable</code> is a class with no name (<code>getSimpleName()</code> is empty) whose superclass is <code>Object</code>, because <code>Runnable</code> is an interface.</p>
+
+  <h3 class="mt-8 mb-3">The four forms side by side</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Kinds of nested class">
+      <button type="button" class="lm-tab" role="tab" id="tab-nested-static" aria-controls="panel-nested-static" aria-selected="true" tabindex="0">Static nested</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-nested-inner" aria-controls="panel-nested-inner" aria-selected="false" tabindex="-1">Inner</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-nested-local" aria-controls="panel-nested-local" aria-selected="false" tabindex="-1">Local</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-nested-anon" aria-controls="panel-nested-anon" aria-selected="false" tabindex="-1">Anonymous</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-nested-static" aria-labelledby="tab-nested-static" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+public class Order {
+    public static class Line { … }      // Order.Line — a top-level class in all but name
+}
+Order.Line l = new Order.Line("BOLT-7", 3);
+      </pre>
+      <ul class="mb-0">
+        <li><strong>Sees:</strong> the outer class's <code>static</code> members, including private ones. No outer instance.</li>
+        <li><strong>Holds:</strong> nothing extra. Same memory footprint as a top-level class.</li>
+        <li><strong>Use for:</strong> helper types that belong with their owner — a builder, a node, a value type like <code>Map.Entry</code>. <strong>Default to this form.</strong></li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-nested-inner" aria-labelledby="tab-nested-inner" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+public class Order {
+    private final List<Line> lines = …;
+    public class Cursor {               // no `static`: each Cursor has an Order.this
+        Line next() { return lines.get(pos++); }
+    }
+}
+Order.Cursor c = order.new Cursor();    // or, far more usually, a method on Order that does this
+      </pre>
+      <ul class="mb-0">
+        <li><strong>Sees:</strong> everything in the outer instance, as if it were written inside it. Name clashes are resolved with <code>Order.this.field</code>.</li>
+        <li><strong>Holds:</strong> a synthetic <code>final Order this$0</code> field, set by a constructor parameter you never see. The outer object cannot be garbage-collected while the inner one lives.</li>
+        <li><strong>Use for:</strong> iterators, cursors and views that are meaningless without their owner. <code>ArrayList.Itr</code> is an inner class for exactly this reason.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-nested-local" aria-labelledby="tab-nested-local" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+int totalQty() {
+    int base = 100;                     // must be effectively final to be captured
+    class Counter {
+        int sum = base;                 // reads a COPY, taken when the Counter is constructed
+    }
+    return new Counter().sum;
+}
+      </pre>
+      <ul class="mb-0">
+        <li><strong>Sees:</strong> the enclosing instance (if the method is not static) <em>plus</em> the method's locals and parameters — but only those that are never reassigned.</li>
+        <li><strong>Holds:</strong> the outer <code>this</code> (in an instance method) and a private copy of each captured local, as synthetic <code>val$base</code> fields.</li>
+        <li><strong>Use for:</strong> rarely. A local <strong>record</strong> or <strong>enum</strong> (§8) is the modern reason to reach for this form: a throwaway tuple scoped to one method.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-nested-anon" aria-labelledby="tab-nested-anon" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+Comparator<Line> byQty = new Comparator<Line>() {   // declares AND instantiates a subclass
+    @Override public int compare(Line a, Line b) { return Integer.compare(a.qty, b.qty); }
+};
+// since Java 8, for a single-method interface, write a lambda instead:
+Comparator<Line> byQty2 = (a, b) -> Integer.compare(a.qty, b.qty);
+      </pre>
+      <ul class="mb-0">
+        <li><strong>Sees:</strong> the same as a local class. Same capture rules.</li>
+        <li><strong>Holds:</strong> the same hidden fields as a local class. <code>this</code> inside it is the anonymous object, so <code>this.toString()</code> is <em>its</em> <code>toString</code>, not the outer one.</li>
+        <li><strong>Use for:</strong> implementing an interface with <em>more than one</em> abstract method, or subclassing a class, at the point of use. For a single abstract method, a lambda is shorter, clearer, and does not allocate a class.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Watch a local get captured</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of variable capture by a local class">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Why the captured variable must be effectively final</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="inner-capture"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Two places the value lives</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="inner-capture">
+    {
+      "lang": "java",
+      "code": "int totalQty() {\n    int base = 100;\n    class Counter {\n        int sum = base;\n        void add(int q) { sum += q; }\n    }\n    Counter c = new Counter();\n    c.add(3);\n    c.add(10);\n    // base = 0;   <- would not compile\n    return c.sum - base;\n}",
+      "steps": [
+        { "line": 2, "vars": { "stack: base": "100" }, "out": "",
+          "note": "A local variable lives in this method's stack frame. When totalQty returns, the frame is gone — and so is base." },
+        { "line": [3, 4, 5, 6], "vars": { "stack: base": "100", "Counter has fields": "sum, val$base (synthetic)", "Counter has": "Nested this$0 (synthetic)" }, "out": "",
+          "note": "The compiler rewrites Counter. Because the body mentions base, Counter gets a hidden final field val$base; because totalQty is an instance method, it also gets this$0 pointing at the enclosing Nested. Neither appears in your source." },
+        { "line": 7, "vars": { "stack: base": "100", "c.val$base": "100 (copied now)", "c.sum": "100" }, "out": "",
+          "note": "new Counter() is really new Counter(this, base). The VALUE of base is copied into the object at this instant. From here on there are two 100s: one on the stack, one in the heap object." },
+        { "line": 8, "vars": { "stack: base": "100", "c.val$base": "100", "c.sum": "103" }, "out": "",
+          "note": "Ordinary method call on the object. sum is the Counter's own field and changes freely — the restriction is on the captured local, not on the inner class's state." },
+        { "line": 9, "vars": { "stack: base": "100", "c.val$base": "100", "c.sum": "113" }, "out": "",
+          "note": "The Counter can outlive the method — it could be stored in a field or returned — and it would still carry its copy of base. That is what makes capture work at all." },
+        { "line": 10, "vars": { "stack: base": "would be 0", "c.val$base": "still 100", "verdict": "compile error" }, "out": "error: local variables referenced from an inner class must be final or effectively final",
+          "note": "Here is the reason for the rule. If base could change after the copy, the stack's base and the Counter's val$base would silently disagree, and which one you saw would depend on where you read it. Java forbids the situation rather than pick a meaning. (The same rule applies to lambdas, for the same reason.)" },
+        { "line": 11, "vars": { "stack: base": "100", "c.sum": "113", "returns": "13" }, "out": "13",
+          "note": "With base never reassigned, both copies are guaranteed equal and the semantics are unambiguous. If you need a mutable counter in a lambda or local class, make the MUTATION happen inside an object the local points at — an int[1], an AtomicInteger, or a field — not to the local itself." }
+      ]
+    }
+    </script>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Nested-class gotchas</div>
+      <ul class="mb-0">
+        <li><strong>An inner class keeps its outer alive.</strong> Register an inner-class listener with a long-lived registry and the whole enclosing object — and everything it references — cannot be collected until the listener is removed. This is the classic Android and Swing memory leak. If the nested class does not use the outer instance, make it <code>static</code>; the compiler will tell you nothing is broken, and <code>-Xlint</code> stays silent too.</li>
+        <li><strong>Serialising an inner class serialises its outer.</strong> The hidden <code>this$0</code> is a field like any other, so the enclosing object goes to the stream too — and if it is not <code>Serializable</code>, you get a <code>NotSerializableException</code> naming a class you never asked to serialise.</li>
+        <li><strong><code>this</code> means different things in an anonymous class and a lambda.</strong> In the anonymous class it is the anonymous object; in a lambda it is the enclosing instance. Converting one to the other changes the meaning of every <code>this</code> and every unqualified call to an inherited method — IDEs warn, but only if you read the warning.</li>
+        <li><strong>Shadowing is silent.</strong> An inner class field named <code>lines</code> hides the outer <code>lines</code> for the whole inner body. Reach past it with <code>Outer.this.lines</code>. A lambda, by contrast, <em>cannot</em> shadow a local — redeclaring <code>base</code> as a lambda parameter is a compile error — which is one reason lambdas are easier to read.</li>
+        <li><strong>Effectively final is checked per variable, not per use.</strong> A single <code>i++</code> anywhere in the method, even after the capture, makes <code>i</code> uncapturable everywhere. The error points at the capture, not at the increment.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-nested-1" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>This method does not compile. What is the smallest change that fixes it while still counting?</span><br>
+        <code>int count = 0; lines.forEach(l -&gt; { if (l.qty() &gt; 5) count++; }); return count;</code></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-nested-1"><span>Declare <code>count</code> as <code>final int count = 0;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-nested-1"><span>Replace the lambda with an anonymous <code>Consumer&lt;Line&gt;</code>, which may modify locals <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-nested-1"><span>Move <code>count</code> to a <code>static</code> field of the class <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-nested-1"><span>Use a plain <code>for</code> loop — or, keeping the stream style, <code>return (int) lines.stream().filter(l -&gt; l.qty() &gt; 5).count();</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> The lambda captures <code>count</code> by copy, so <code>count++</code> inside it could only ever increment the copy — which is why the compiler rejects it rather than let it silently do nothing. The honest fixes stop mutating a captured local: a loop, or a stream that <em>produces</em> the count as its result.</p>
+        <p class="mb-0"><strong>A</strong> makes the problem worse — a <code>final</code> variable cannot be incremented anywhere. <strong>B</strong> is false: anonymous classes have exactly the same capture rule as lambdas. <strong>C</strong> compiles, and is wrong in a way the compiler cannot see: a static field is shared by every call on every thread, so two concurrent counts corrupt each other. The <code>int[1]</code> or <code>AtomicInteger</code> trick also compiles, but exists mainly to work around the rule in callbacks you cannot restructure.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-nested-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Inside an instance method of <code>Order</code>, you replace <code>new Runnable() { public void run() { log(this.toString()); } }</code> with <code>() -&gt; log(this.toString())</code>. What changes?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-nested-2"><span>Nothing — the two forms are equivalent by definition <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-nested-2"><span><code>this</code> now refers to the <code>Order</code>, so its <code>toString</code> is logged instead of the <code>Runnable</code>'s <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-nested-2"><span>It no longer compiles: a lambda has no <code>this</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-nested-2"><span><code>this</code> becomes <code>null</code> until the lambda runs <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> An anonymous class is a real object with its own <code>this</code>; a lambda is not, so <code>this</code> inside it is lexically the enclosing instance — the <code>Order</code>. The behaviour changes from logging something like <code>Order$1@1b6d3586</code> to logging the order itself.</p>
+        <p class="mb-0"><strong>A</strong> is the common assumption and the reason this refactoring is a known trap. <strong>C</strong> is wrong: <code>this</code> is legal in a lambda inside an instance method; it is illegal only in a <code>static</code> context, where there is no instance at all. <strong>D</strong> invents a rule — <code>this</code> is captured at creation like any other value.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-nested-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>A code review flags <code>class Builder</code> nested inside <code>Order</code> because it is not <code>static</code>, although it never touches an <code>Order</code> field. Which consequences of leaving it non-static are real? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Every <code>Builder</code> holds a reference that keeps some <code>Order</code> alive <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>The compiler emits a warning about the unused outer reference <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Methods on <code>Builder</code> run measurably slower <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>You cannot write <code>new Order.Builder()</code> from a static context without first having an <code>Order</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> A non-static nested class is inner, full stop: it gets a <code>this$0</code> field whether or not the body uses it (<strong>A</strong>), and it can only be instantiated through an existing outer instance (<strong>D</strong>) — which for a builder, whose whole purpose is to exist <em>before</em> the <code>Order</code>, is absurd. The fix is one keyword.</p>
+        <p class="mb-0"><strong>B</strong> is what you would hope for, but <code>javac</code> and <code>-Xlint:all</code> say nothing; only IDE inspections catch it. <strong>C</strong> is not real — the extra field costs memory and retention, not time.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="nested"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,129 @@
+<section class="lm-section" id="generics" data-title="Generics basics" data-num="13">
+  <p class="lm-eyebrow">Section 13</p>
+  <h2 class="mb-4">Generics basics</h2>
+
+  <p>Generics move a whole class of errors from runtime to compile time. <code>List&lt;Product&gt;</code> tells the compiler what goes in, so it can reject anything else and insert the casts on the way out for you. Before Java 5 every collection held <code>Object</code> and every read needed a hand-written cast that might fail.</p>
+
+  <p>The one thing to internalise now is <strong>erasure</strong>: generics exist for the compiler and are erased from the bytecode. At runtime a <code>List&lt;String&gt;</code> is just a <code>List</code>. That is why the guarantees are only as good as your willingness to keep the compiler informed.</p>
+
+  <h3 class="mt-8 mb-3">What a raw type costs you</h3>
+
+  <pre data-code data-lang="java" data-file="RawTypes.java" data-verify="RawTypes" data-verify-throws="ClassCastException" data-bad="7,9">
+import java.util.ArrayList;
+import java.util.List;
+
+public class RawTypes {
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    public static void main(String[] args) {
+        List raw = new ArrayList();     // raw type: the compiler stops helping
+        raw.add("BOLT-7");
+        raw.add(42);                    // accepted without complaint
+
+        for (Object o : raw) System.out.println("element: " + o);
+
+        List<String> skus = raw;        // unchecked assignment, only a warning
+        System.out.println("first : " + skus.get(0));
+        System.out.println("second: " + skus.get(1));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="RawTypes">
+element: BOLT-7
+element: 42
+first : BOLT-7
+  </pre>
+
+  <pre data-output data-label="Then it throws" data-variant="error">
+Exception in thread "main" java.lang.ClassCastException:
+        class java.lang.Integer cannot be cast to class java.lang.String
+        at RawTypes.main(RawTypes.java:15)
+  </pre>
+
+  <p>The failure lands on line 15 — a <code>println</code> that looks entirely innocent — while the actual mistake was on line 9, possibly in a different class written months earlier. <code>skus.get(1)</code> is declared to return <code>String</code>, so the compiler inserted a cast there; the cast is the first moment anyone checks. <strong>This distance between cause and symptom is what generics exist to remove.</strong> Declare <code>List&lt;String&gt;</code> from the start and line 9 fails to compile.</p>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Treat unchecked warnings as errors</div>
+      <p class="mb-0">Every step above was legal Java and every step produced a warning. Compile with <code>-Xlint:all -Werror</code> and this code stops building. Reach for <code>@SuppressWarnings("unchecked")</code> only on the narrowest possible scope, and only when you have personally proved the cast is safe.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Writing a generic type</h3>
+
+  <pre data-code data-lang="java" data-file="Repository.java" data-nobar>
+interface Repository<T> {                 // T is a type parameter
+    void save(T item);
+    T findBySku(String sku);
+}
+
+class ProductRepository implements Repository<Product> {
+    @Override public void save(Product item) { /* … */ }
+    @Override public Product findBySku(String sku) { /* … */ return null; }
+}
+
+// A generic METHOD declares its own parameter, before the return type:
+static <T extends Comparable<T>> T max(List<T> items) {
+    T best = items.get(0);
+    for (T item : items) if (item.compareTo(best) > 0) best = item;
+    return best;
+}
+  </pre>
+
+  <p><code>&lt;T extends Comparable&lt;T&gt;&gt;</code> is a <strong>bounded</strong> parameter: it accepts any type that can be compared to itself, which is what lets the body call <code>compareTo</code>. By convention <code>T</code> is a type, <code>E</code> an element, <code>K</code> and <code>V</code> a key and value. Wildcards (<code>? extends</code>, <code>? super</code>) and the PECS rule belong to Java Intermediate.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Consequences of erasure</div>
+      <ul class="mb-0">
+        <li><strong>No primitives.</strong> <code>List&lt;int&gt;</code> does not compile — use <code>List&lt;Integer&gt;</code> and accept the boxing, or a primitive-specialised library if it is hot.</li>
+        <li><strong><code>new T()</code> is impossible.</strong> The type is gone by runtime. Pass a factory or a <code>Class&lt;T&gt;</code> if you must construct one.</li>
+        <li><strong><code>o instanceof List&lt;String&gt;</code> does not compile.</strong> Only <code>instanceof List&lt;?&gt;</code> — there is nothing left to test against.</li>
+        <li><strong>Overloads that differ only by type argument clash.</strong> <code>f(List&lt;String&gt;)</code> and <code>f(List&lt;Integer&gt;)</code> erase to the same signature.</li>
+        <li><strong>Generic arrays are not allowed.</strong> <code>new T[10]</code> is a compile error; arrays know their element type at runtime and generics do not, so the two cannot be reconciled. Use an <code>ArrayList</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-gen-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In the worked example, why does the exception point at line 15 rather than at line 9, where the wrong element was added?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-gen-1"><span>The JVM validates collection contents lazily on first iteration <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-gen-1"><span>Type arguments are erased, so nothing checks on <code>add</code>; the compiler inserts a cast at the <code>get</code>, and that cast is the first check <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-gen-1"><span><code>ArrayList</code> defers storing elements until they are read <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-gen-1"><span>Line 9 did throw, but the exception was swallowed by the enhanced <code>for</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> At runtime the list is a plain <code>List</code> holding <code>Object</code>s, so <code>add(42)</code> is a perfectly ordinary operation. Because <code>skus.get(1)</code> is <em>declared</em> to yield a <code>String</code>, <code>javac</code> emits a <code>checkcast</code> at the call site — and that is where reality and the declaration finally meet.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>C</strong> describe validation and laziness that <code>ArrayList</code> does not have; it stores references immediately and checks nothing. <strong>D</strong> is wrong — the loop reads elements as <code>Object</code>, which needs no cast, so it prints <code>42</code> quite happily.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-gen-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which of these compiles?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-gen-2"><span><code>List&lt;int&gt; sizes = new ArrayList&lt;&gt;();</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-gen-2"><span><code>if (o instanceof List&lt;String&gt;) { }</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-gen-2"><span><code>Map&lt;String, List&lt;Product&gt;&gt; byBin = new HashMap&lt;&gt;();</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-gen-2"><span><code>static &lt;T&gt; T[] pair(T a, T b) { return new T[] { a, b }; }</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Nested type arguments are fine, and the diamond <code>&lt;&gt;</code> infers them from the declaration.</p>
+        <p class="mb-0"><strong>A</strong> fails because a type argument must be a reference type — <code>Integer</code>, not <code>int</code>. <strong>B</strong> fails because the type argument is erased, so there is nothing to test; <code>instanceof List&lt;?&gt;</code> is the legal form. <strong>D</strong> fails on <code>new T[]</code> — an array stores its element type at runtime, which erasure has already thrown away, so the array could not enforce anything.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="generics"> Mark this section complete
+  </label>
+</section>

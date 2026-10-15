@@ -1,0 +1,246 @@
+<section class="lm-section" id="strings" data-title="Strings, immutability, the pool" data-num="3">
+  <p class="lm-eyebrow">Section 3</p>
+  <h2 class="mb-4">Strings, immutability, and the pool</h2>
+
+  <p><code>String</code> is a normal class, not a primitive — but it gets three privileges no other class has: a literal syntax, the <code>+</code> operator, and a JVM-managed pool of shared instances. Understanding all three is the difference between writing correct string code and writing string code that works by accident.</p>
+
+  <p>The foundation is <strong>immutability</strong>. A <code>String</code>'s contents can never change after construction. Every method that looks like it modifies a string — <code>toUpperCase</code>, <code>trim</code>, <code>replace</code>, <code>concat</code> — returns a <em>new</em> string and leaves the original untouched.</p>
+
+  <h3 class="mt-8 mb-3">The mental model</h3>
+
+  <div class="lm-diagram">
+    <svg viewBox="0 0 700 250" role="img" aria-labelledby="pool-t pool-d">
+      <title id="pool-t">The string pool versus ordinary heap allocation</title>
+      <desc id="pool-d">The heap contains a fenced-off region called the string pool. Two variables declared from the identical literal "BOLT-7" both reference the single pooled instance. A third variable created with new String("BOLT-7") references a separate object outside the pool, which holds equal characters but is a different object. Calling intern() on that object returns the pooled instance again.</desc>
+      <g font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">
+        <rect x="8" y="8" width="150" height="234" rx="10" fill="var(--lm-surface-2)" stroke="var(--lm-border-strong)"/>
+        <text x="20" y="28" fill="var(--lm-text-subtle)" font-size="10.5" font-weight="700" letter-spacing="0.07em">STACK — locals</text>
+
+        <rect x="22" y="42" width="122" height="26" rx="5" fill="var(--lm-surface)" stroke="var(--lm-border)"/>
+        <text x="32" y="59" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11">a</text>
+        <rect x="22" y="76" width="122" height="26" rx="5" fill="var(--lm-surface)" stroke="var(--lm-border)"/>
+        <text x="32" y="93" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11">b</text>
+        <rect x="22" y="130" width="122" height="26" rx="5" fill="var(--lm-surface)" stroke="var(--lm-border)"/>
+        <text x="32" y="147" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11">c</text>
+        <rect x="22" y="188" width="122" height="26" rx="5" fill="var(--lm-surface)" stroke="var(--lm-border)"/>
+        <text x="32" y="205" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11">d</text>
+
+        <rect x="250" y="8" width="440" height="234" rx="10" fill="none" stroke="var(--lm-border-strong)" stroke-dasharray="5 4"/>
+        <text x="264" y="28" fill="var(--lm-text-subtle)" font-size="10.5" font-weight="700" letter-spacing="0.07em">HEAP</text>
+
+        <rect x="266" y="40" width="270" height="76" rx="8" fill="var(--lm-accent-weak)" stroke="var(--lm-accent)"/>
+        <text x="280" y="60" fill="var(--lm-accent)" font-size="10.5" font-weight="700" letter-spacing="0.07em">STRING POOL</text>
+        <rect x="284" y="70" width="150" height="32" rx="6" fill="var(--lm-surface)" stroke="var(--lm-accent)"/>
+        <text x="359" y="91" text-anchor="middle" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11.5">"BOLT-7"</text>
+        <text x="452" y="91" fill="var(--lm-text-muted)" font-size="10.5">one instance</text>
+
+        <rect x="284" y="150" width="150" height="32" rx="6" fill="var(--lm-surface)" stroke="var(--lm-border-strong)"/>
+        <text x="359" y="171" text-anchor="middle" fill="var(--lm-text)" font-family="ui-monospace, monospace" font-size="11.5">"BOLT-7"</text>
+        <text x="452" y="165" fill="var(--lm-text-muted)" font-size="10.5">separate object,</text>
+        <text x="452" y="179" fill="var(--lm-text-muted)" font-size="10.5">equal characters</text>
+
+        <path d="M144 55 L284 84" fill="none" stroke="var(--lm-accent)" stroke-width="1.5"/>
+        <path d="M144 89 L284 88" fill="none" stroke="var(--lm-accent)" stroke-width="1.5"/>
+        <path d="M144 143 L284 164" fill="none" stroke="var(--lm-border-strong)" stroke-width="1.5"/>
+        <path d="M144 201 C210 201 220 100 284 92" fill="none" stroke="var(--lm-ok)" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <text x="196" y="228" fill="var(--lm-ok)" font-size="10">d = c.intern()</text>
+
+        <text x="560" y="60" fill="var(--lm-text-muted)" font-size="10.5">a == b  → true</text>
+        <text x="560" y="78" fill="var(--lm-text-muted)" font-size="10.5">a == c  → false</text>
+        <text x="560" y="96" fill="var(--lm-text-muted)" font-size="10.5">a == d  → true</text>
+        <text x="560" y="120" fill="var(--lm-text-muted)" font-size="10.5">a.equals(c)</text>
+        <text x="560" y="134" fill="var(--lm-ok)" font-size="10.5">→ always true</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Strings.java" data-verify="Strings" data-hi="12,13">
+public class Strings {
+    public static void main(String[] args) {
+        String a = "BOLT-7";
+        String b = "BOLT-7";
+        String c = new String("BOLT-7");
+        String d = c.intern();
+
+        System.out.println("a == b        -> " + (a == b));
+        System.out.println("a == c        -> " + (a == c));
+        System.out.println("a.equals(c)   -> " + a.equals(c));
+        System.out.println("a == d        -> " + (a == d));
+
+        String s = "BOLT";
+        s.concat("-7");
+        System.out.println("after concat  : " + s);
+        System.out.println("reassigned    : " + s.concat("-7"));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Strings">
+a == b        -> true
+a == c        -> false
+a.equals(c)   -> true
+a == d        -> true
+after concat  : BOLT
+reassigned    : BOLT-7
+  </pre>
+
+  <p>Lines 12–13 are the immutability trap in its purest form. <code>s.concat("-7")</code> computes a new string and throws it away, because nothing captured the return value. <code>s</code> still refers to <code>"BOLT"</code>. Every string method behaves this way.</p>
+
+  <div class="lm-callout lm-callout--danger">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6m0-6 6 6"/></svg>
+    <div>
+      <div class="lm-callout-title">Never compare strings with <code>==</code></div>
+      <p class="mb-0"><code>==</code> asks "are these the same object?". For strings you almost always want "do these hold the same characters?", which is <code>equals</code>. Literal comparison happens to work because of pooling, which makes the bug invisible in tests and fatal in production — a string read from a file, a socket, a database or <code>Scanner</code> is never pooled, so <code>==</code> returns <code>false</code> for characters that are plainly identical. Use <code>a.equals(b)</code>, or <code>Objects.equals(a, b)</code> when either side may be <code>null</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Watch the pool</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of string pooling">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">String identity</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="pool"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">References</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="pool">
+    {
+      "lang": "java",
+      "code": "String a = \"BOLT-7\";\nString b = \"BOLT-7\";\nString c = new String(\"BOLT-7\");\nString d = c.intern();\n\nSystem.out.println(a == b);\nSystem.out.println(a == c);\nSystem.out.println(a == d);",
+      "steps": [
+        { "line": 1, "vars": { "a": "→ pool#1 \"BOLT-7\"" }, "out": "",
+          "note": "The literal is looked up in the pool. It is not there, so one instance is created and registered. a references pool#1." },
+        { "line": 2, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"" }, "out": "",
+          "note": "The identical literal is found already in the pool. No new object — b references the very same instance as a." },
+        { "line": 3, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"", "c": "→ heap#2 \"BOLT-7\"" }, "out": "",
+          "note": "new String() is an explicit instruction to allocate. It copies the characters into a fresh object OUTSIDE the pool. Equal contents, different identity." },
+        { "line": 4, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"", "c": "→ heap#2 \"BOLT-7\"", "d": "→ pool#1 \"BOLT-7\"" }, "out": "",
+          "note": "intern() asks the pool for an instance with these characters. One exists, so it hands back pool#1. c is unchanged; d now aliases a." },
+        { "line": 6, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"", "c": "→ heap#2 \"BOLT-7\"", "d": "→ pool#1 \"BOLT-7\"" }, "out": "true",
+          "note": "a and b are the same reference, so == is true. This is the coincidence that hides == bugs." },
+        { "line": 7, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"", "c": "→ heap#2 \"BOLT-7\"", "d": "→ pool#1 \"BOLT-7\"" }, "out": "true\nfalse",
+          "note": "a and c point at different objects, so == is false — even though the characters match exactly. equals() would say true." },
+        { "line": 8, "vars": { "a": "→ pool#1 \"BOLT-7\"", "b": "→ pool#1 \"BOLT-7\"", "c": "→ heap#2 \"BOLT-7\"", "d": "→ pool#1 \"BOLT-7\"" }, "out": "true\nfalse\ntrue",
+          "note": "d came from the pool, so it is the same object as a. Three lines, three different answers, one set of characters." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Building strings efficiently</h3>
+
+  <p>Because strings are immutable, concatenating in a loop allocates a new object on every iteration and copies everything so far. For <var>n</var> appends that is O(<var>n</var>²) work. <code>StringBuilder</code> keeps a mutable char buffer and appends in amortised O(1).</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="String concatenation approaches">
+      <button type="button" class="lm-tab" role="tab" id="tab-sb-bad" aria-controls="panel-sb-bad" aria-selected="true" tabindex="0">In a loop — wrong</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-sb-good" aria-controls="panel-sb-good" aria-selected="false" tabindex="-1">In a loop — right</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-sb-fine" aria-controls="panel-sb-fine" aria-selected="false" tabindex="-1">Not in a loop — fine</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sb-bad" aria-labelledby="tab-sb-bad" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+String report = "";
+for (OrderLine line : order.lines()) {
+    report += line.sku() + ",";   // allocates a new String every iteration
+}
+      </pre>
+      <p class="mb-0">With 10,000 lines this copies roughly 50 million characters. It is the classic reason a report endpoint that was fine in testing falls over on a large order.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sb-good" aria-labelledby="tab-sb-good" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+StringBuilder report = new StringBuilder();
+for (OrderLine line : order.lines()) {
+    report.append(line.sku()).append(',');
+}
+String result = report.toString();
+      </pre>
+      <p class="mb-0">One buffer, grown geometrically, converted to a <code>String</code> exactly once at the end.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sb-fine" aria-labelledby="tab-sb-fine" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+String label = "SKU " + sku + " x" + qty;
+      </pre>
+      <p class="mb-0">Leave this alone. A <code>+</code> chain in a single expression is compiled into one efficient concatenation, so hand-rolling a <code>StringBuilder</code> here makes the code worse and no faster. The rule is about <em>loops</em>, not about <code>+</code>.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">More string gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>split</code> takes a regex, not a literal.</strong> <code>"1.2.3".split(".")</code> returns an empty array, because <code>.</code> matches any character. You need <code>split("\\.")</code> or <code>split(Pattern.quote("."))</code>.</li>
+        <li><strong><code>trim()</code> and <code>strip()</code> differ.</strong> <code>trim()</code> removes characters ≤ U+0020 only; <code>strip()</code> (Java 11+) is Unicode-aware and removes things like non-breaking space. Prefer <code>strip()</code> for user input.</li>
+        <li><strong><code>equalsIgnoreCase</code> beats <code>toLowerCase().equals(…)</code>.</strong> The latter allocates and, in a Turkish locale, lowercases <code>I</code> to a dotless <code>ı</code> — a real internationalisation bug. If you must change case for comparison, pass <code>Locale.ROOT</code>.</li>
+        <li><strong><code>length()</code> counts UTF-16 code units, not characters.</strong> An emoji outside the Basic Multilingual Plane counts as 2. Use <code>codePointCount</code> when you mean user-visible characters.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-str-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A SKU read from a CSV file is compared to a literal with <code>==</code> and the comparison fails, even though printing both shows <code>BOLT-7</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-str-1"><span>The file string has trailing whitespace <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-str-1"><span><code>==</code> does not work on strings longer than 5 characters <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-str-1"><span>The file string is a new heap object, not the pooled literal, so the references differ <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-str-1"><span>Strings from files use a different character encoding internally <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Only compile-time literals and explicitly interned strings live in the pool. Anything constructed at runtime — from I/O, concatenation of non-constants, <code>substring</code>, or <code>new String</code> — is a fresh object, so <code>==</code> compares two different references and returns <code>false</code>.</p>
+        <p class="mb-0"><strong>A</strong> is a plausible separate bug, but it would also make <code>equals</code> fail, and the printed output would usually reveal it. <strong>B</strong> is invented — length is irrelevant. <strong>D</strong> is wrong: a <code>String</code> in memory has no encoding you can observe; encoding applies when converting to and from bytes.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-str-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>What is printed?</span></p>
+      <pre data-code data-lang="java" data-nobar>
+String sku = "BOLT-7";
+sku.toLowerCase();
+sku.replace('-', '_');
+System.out.println(sku);
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-str-2"><span><code>bolt_7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-str-2"><span><code>BOLT-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-str-2"><span><code>bolt-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-str-2"><span><code>BOLT_7</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Both method calls return new strings that are immediately discarded. <code>sku</code> is never reassigned, and the object it points to cannot change, so it still holds the original characters.</p>
+        <p class="mb-0"><strong>A</strong> assumes both calls mutate in place. <strong>C</strong> and <strong>D</strong> each assume one of them does. To get <code>bolt_7</code> you must capture the results: <code>sku = sku.toLowerCase().replace('-', '_');</code>. Modern compilers will warn about ignoring the return value of a pure method — pay attention to that warning.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="strings"> Mark this section complete
+  </label>
+</section>

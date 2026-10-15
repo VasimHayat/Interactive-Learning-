@@ -1,0 +1,46 @@
+<section class="lm-section" id="reading" data-title="Further reading" data-num="R">
+  <p class="lm-eyebrow">Where to go next</p>
+  <h2 class="mb-4">Further reading</h2>
+
+  <p>Primary sources only — specifications, official documentation, and the two books that are actually worth the shelf space. These are links, but nothing on this page loads them; the module remains fully offline.</p>
+
+  <h3 class="mt-8 mb-3">Specifications and official docs</h3>
+  <ul>
+    <li><strong>The Java Language Specification, Java SE 21 Edition</strong> — the final word on every rule in this module. Chapter 5 (conversions and promotions) and §15.12 (method invocation) are where the overload-resolution phases are defined.<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/index.html</span></li>
+    <li><strong>The Java Virtual Machine Specification, Java SE 21 Edition</strong> — class loading, linking, initialization order, and the bytecode instruction set.<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jvms/se21/html/index.html</span></li>
+    <li><strong>Java SE 21 API documentation</strong> — the Javadoc. Read the class-level notes on <code>HashMap</code>, <code>ArrayList</code> and <code>String</code>; they document the performance characteristics this module summarises.<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/index.html</span></li>
+    <li><strong><code>Object.equals</code> and <code>Object.hashCode</code> Javadoc</strong> — the contract itself, stated in about two hundred words. Worth reading in the original.<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html</span></li>
+    <li><strong>The Java Tutorials</strong> — Oracle's introductory trail. Uneven, occasionally dated, but the Collections and Generics trails are solid.<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/tutorial/</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Books</h3>
+  <ul>
+    <li><strong>Effective Java</strong>, Joshua Bloch, 3rd edition — the single most useful Java book. Items 10 through 14 cover <code>equals</code>, <code>hashCode</code>, <code>toString</code>, <code>Comparable</code> and <code>clone</code> in far more depth than section 10 here. Read it after this module, not before.</li>
+    <li><strong>Java: A Beginner's Guide</strong>, Herbert Schildt — a conventional ground-up introduction if you want a second explanation of the same fundamentals in a different voice.</li>
+    <li><strong>Java Concurrency in Practice</strong>, Brian Goetz et al. — the standard reference for the threading material in Java Advanced. Predates virtual threads but the model it teaches is unchanged.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Tools worth knowing early</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Useful JDK tools and what they are for</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Use it to</th></tr></thead>
+      <tbody>
+        <tr><td><code>jshell</code></td><td>Try a snippet without writing a class or a <code>main</code>. The fastest way to settle an argument about what Java does.</td></tr>
+        <tr><td><code>javap -c</code></td><td>Disassemble a <code>.class</code> file. Shows you the string concatenation the compiler generated, and that generics really are erased.</td></tr>
+        <tr><td><code>javac -Xlint:all -Werror</code></td><td>Turn every warning into a build failure. Catches raw types and unchecked casts before they reach production.</td></tr>
+        <tr><td><code>jcmd</code> / <code>jstack</code></td><td>Inspect a running JVM — thread dumps, heap info, GC statistics.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Next module</div>
+      <p>The course continues in two further modules, both built on the same warehouse example.</p>
+      <p><strong>Java Intermediate</strong> picks up exactly where this stops: generics in depth (wildcards, PECS, bounded types), nested and inner classes, interfaces and enums in full, lambdas and method references, streams and collectors, <code>Optional</code>, records, sealed types with pattern matching and switch expressions, <code>Comparator</code> and immutability, the internals of <code>HashMap</code> and <code>ArrayList</code>, <code>java.time</code>, and file I/O.</p>
+      <p class="mb-0"><strong>Java Advanced</strong> then covers the runtime: threads and the Java memory model, locks and concurrent collections, executors, <code>CompletableFuture</code> and virtual threads, garbage collection and JVM tuning, class loading, reflection and annotations, the module system, and performance measurement. Take the quiz above first; if you scored below 65%, the sections you missed are worth a second pass before moving on.</p>
+    </div>
+  </div>
+</section>

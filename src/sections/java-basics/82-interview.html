@@ -1,0 +1,53 @@
+<section class="lm-section" id="interview" data-title="Interview questions" data-num="I">
+  <p class="lm-eyebrow">Rehearsal</p>
+  <h2 class="mb-4">Interview questions</h2>
+  <p>Twelve questions that actually get asked, with the answer a strong candidate gives. Say your answer out loud before opening the reveal — recognising an answer and being able to produce one are different skills.</p>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--easy">Easy</span> &nbsp;1. What is the difference between the JDK, the JRE and the JVM?</summary><div class="lm-reveal-body">
+    <p class="mb-0">The JVM executes bytecode; it is the specification and the process implementing it. The JRE is the JVM plus the standard class library — enough to <em>run</em> a program. The JDK is the JRE plus development tools, notably <code>javac</code>. Each contains the previous. Practically: install a JDK, since Java 11 there is no separate JRE download from most vendors, and if <code>java</code> works but <code>javac</code> does not, that is what has happened.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--easy">Easy</span> &nbsp;2. Why should you never compare strings with <code>==</code>?</summary><div class="lm-reveal-body">
+    <p class="mb-0"><code>==</code> compares references, not characters. It <em>appears</em> to work for literals because identical compile-time literals share one pooled instance — which is exactly what makes the bug dangerous, since it passes every test written with literals and fails the moment a string arrives from a file, socket, database or <code>Scanner</code>. Use <code>equals</code>, or <code>Objects.equals</code> when a side may be null.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--easy">Easy</span> &nbsp;3. Is Java pass-by-value or pass-by-reference?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Always pass-by-value. For reference types the <em>reference</em> is what gets copied, so the method can mutate the object you handed it, but reassigning the parameter has no effect on the caller's variable. That is why you cannot write a working <code>swap(a, b)</code> in Java. People call this "pass-by-reference" loosely; being precise about it is a good signal.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--medium">Medium</span> &nbsp;4. What happens if you override <code>equals</code> but not <code>hashCode</code>?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Every hash-based collection breaks. Two equal objects get different identity-derived hash codes and land in different buckets, so a <code>HashSet</code> stores both and <code>contains</code> with an equal instance returns <code>false</code>. Nothing throws — the JDK cannot detect the violation. The contract is that equal objects <em>must</em> return equal hash codes; the converse is not required, since collisions are unavoidable. Follow-up they often add: is a constant <code>hashCode</code> legal? Yes, and it is correct but degrades every lookup to a single bucket.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--medium">Medium</span> &nbsp;5. Checked versus unchecked exceptions — when do you use each?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Checked extends <code>Exception</code> and must be caught or declared; use it for conditions a correct program can still meet and should decide about — a missing file, a rejected payment, an out-of-stock item. Unchecked extends <code>RuntimeException</code>; use it for programming errors where the fix is to change the code — a null that should have been guarded, an argument violating a documented precondition. <code>Error</code> is a third category for JVM-level failures you should not catch at all.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--medium">Medium</span> &nbsp;6. <code>ArrayList</code> or <code>LinkedList</code>?</summary><div class="lm-reveal-body">
+    <p class="mb-0"><code>ArrayList</code>, essentially always. The textbook claim that <code>LinkedList</code> inserts in O(1) ignores that you must first walk to the index, which is O(n) — so the total is the same, while <code>ArrayList</code>'s shift is one <code>System.arraycopy</code> over contiguous, cache-friendly memory. <code>LinkedList</code> also pays an object header and two references per element. It wins only when inserting through an <code>Iterator</code> you already hold. For a queue or stack use <code>ArrayDeque</code>, not <code>LinkedList</code>.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--medium">Medium</span> &nbsp;7. Explain <code>String</code> immutability and why it was chosen.</summary><div class="lm-reveal-body">
+    <p class="mb-0">A <code>String</code>'s characters never change; every "modifying" method returns a new instance. The reasons: pooling is only safe if instances cannot change; hash codes can be cached, which makes <code>String</code> an excellent map key; instances are automatically thread-safe; and security-sensitive values such as file paths and class names cannot be mutated between a check and its use. The cost is allocation, which is why concatenating in a loop is O(n²) and <code>StringBuilder</code> exists.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--medium">Medium</span> &nbsp;8. What is autoboxing, and where does it bite?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Automatic conversion between primitives and their wrappers. Three traps: unboxing a <code>null</code> throws <code>NullPointerException</code> at an assignment that looks harmless; <code>==</code> on wrappers compares references, so it is <code>true</code> for values in the −128…127 cache and <code>false</code> outside it; and boxing in a loop allocates an object per iteration. Also overload resolution — <code>list.remove(1)</code> removes an index, <code>list.remove(Integer.valueOf(1))</code> removes a value.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--hard">Hard</span> &nbsp;9. Give the full initialization order for a subclass instance.</summary><div class="lm-reveal-body">
+    <p class="mb-0">On first active use of the class: superclass static fields and static blocks, then this class's. Then on every <code>new</code>: superclass instance fields and initializer blocks, superclass constructor body, this class's instance fields and initializer blocks, this class's constructor body. Within a level, source order. Two consequences worth volunteering: statics run once and lazily, not at JVM start; and because the superclass constructor runs before the subclass's fields are initialised, calling an overridable method from a constructor lets the override observe <code>null</code> and <code>0</code>.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--hard">Hard</span> &nbsp;10. What is type erasure and what does it prevent?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Generic type arguments exist only at compile time and are erased from the bytecode, so a <code>List&lt;String&gt;</code> is a plain <code>List</code> at runtime. It was done for backward compatibility with pre-generics code. Consequences: no <code>new T()</code>, no <code>new T[]</code>, no <code>instanceof List&lt;String&gt;</code>, no overloads differing only by type argument, and no primitive type arguments. It is also why a raw type can smuggle a wrong element in and the <code>ClassCastException</code> surfaces later, at the read, far from the cause.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--hard">Hard</span> &nbsp;11. Overloading versus overriding — and when is each resolved?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Overloading is same name, different parameter types, resolved by the <em>compiler</em> from the static types of the arguments, in three phases: exact and widening first, then boxing, then varargs. Overriding is a subclass replacing a superclass method with the same signature, resolved by the <em>JVM</em> from the object's runtime class. So one call site can be picked at compile time and dispatched at runtime, and mixing them up produces genuinely surprising behaviour — a common test is a method overloaded on <code>Object</code> and <code>String</code> called with a <code>null</code>, or with a variable declared <code>Object</code> holding a <code>String</code>.</p>
+  </div></details>
+
+  <details class="lm-reveal"><summary><span class="lm-badge lm-badge--hard">Hard</span> &nbsp;12. What does try-with-resources do that <code>finally</code> does not?</summary><div class="lm-reveal-body">
+    <p class="mb-0">Three things. It closes resources in reverse acquisition order automatically. It closes only what was successfully acquired, so if the second resource's constructor throws, the first is still closed and the second is not touched. And it <em>suppresses</em> rather than discards: if the body throws and <code>close()</code> also throws, the body's exception propagates and the close exception is attached, retrievable via <code>getSuppressed()</code>. The hand-written <code>finally { in.close(); }</code> pattern gets the last one backwards, replacing the real failure with the close failure — which is how the actual cause of an outage disappears.</p>
+  </div></details>
+</section>

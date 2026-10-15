@@ -1,0 +1,138 @@
+<section class="lm-section" id="access" data-title="Packages and access modifiers" data-num="14">
+  <p class="lm-eyebrow">Section 14</p>
+  <h2 class="mb-4">Packages and access modifiers</h2>
+
+  <p>A package is a namespace and a unit of access control. The declaration must be the first statement in the file, and the directory structure has to match: <code>package com.acme.inventory;</code> lives in <code>com/acme/inventory/</code>. Package names are reverse domain names to keep them globally unique.</p>
+
+  <p>Four access levels control who may see a member. The one people get wrong is the one you get by writing nothing at all.</p>
+
+  <h3 class="mt-8 mb-3">Who can see what</h3>
+
+  <div class="lm-card" data-sandbox="access-matrix">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      Pick a modifier and a caller
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field"><span>Member declared</span>
+        <select data-sb-mod>
+          <option>private</option>
+          <option>no modifier (package-private)</option>
+          <option>protected</option>
+          <option selected>public</option>
+        </select></label>
+      <label class="lm-field grow"><span>Referenced from</span>
+        <select data-sb-loc>
+          <option value="same">the same class</option>
+          <option value="pkg">another class, same package</option>
+          <option value="sub">a subclass, different package</option>
+          <option value="world" selected>an unrelated class, different package</option>
+        </select></label>
+    </div>
+    <div class="lm-callout mb-4" data-sb-out></div>
+    <div class="lm-table-wrap" data-sb-table>
+      <table class="lm-matrix">
+        <caption class="lm-visually-hidden">Access matrix: modifier by caller location</caption>
+        <thead><tr>
+          <th scope="col">Modifier</th><th scope="col">Same class</th><th scope="col">Same package</th><th scope="col">Subclass, other package</th><th scope="col">Anywhere</th>
+        </tr></thead>
+        <tbody>
+          <tr data-mod="private"><td><code>private</code></td><td data-col="same" class="yes">yes</td><td data-col="pkg" class="no">no</td><td data-col="sub" class="no">no</td><td data-col="world" class="no">no</td></tr>
+          <tr data-mod="no modifier (package-private)"><td><em>no modifier</em></td><td data-col="same" class="yes">yes</td><td data-col="pkg" class="yes">yes</td><td data-col="sub" class="no">no</td><td data-col="world" class="no">no</td></tr>
+          <tr data-mod="protected"><td><code>protected</code></td><td data-col="same" class="yes">yes</td><td data-col="pkg" class="yes">yes</td><td data-col="sub" class="yes">yes</td><td data-col="world" class="no">no</td></tr>
+          <tr data-mod="public"><td><code>public</code></td><td data-col="same" class="yes">yes</td><td data-col="pkg" class="yes">yes</td><td data-col="sub" class="yes">yes</td><td data-col="world" class="yes">yes</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Two things the table cannot show</div>
+      <ul class="mb-0">
+        <li><strong>There is no <code>package</code> keyword for access.</strong> Omitting a modifier <em>is</em> the declaration — the level is called package-private. Writing nothing is a decision, not a default you have deferred.</li>
+        <li><strong><code>protected</code> is narrower than it looks.</strong> A subclass in another package may access a protected member only through a reference of <em>its own</em> type (or a subtype), not through a bare superclass reference. <code>other.shippingInCents()</code> where <code>other</code> is declared <code>Product</code> will not compile inside <code>Girder</code>, even though <code>Girder</code> inherits it.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Encapsulation in practice</h3>
+
+  <pre data-code data-lang="java" data-file="Order.java" data-nobar data-hi="2,3,12">
+public class Order {
+    private final String id;                       // nobody can reassign it
+    private final List<OrderLine> lines = new ArrayList<>();
+    private Status status = Status.DRAFT;
+
+    public Order(String id) {
+        this.id = Objects.requireNonNull(id, "id");
+    }
+
+    public void addLine(OrderLine line) {          // the ONLY way lines change
+        if (status != Status.DRAFT) throw new IllegalStateException("order is " + status);
+        lines.add(line);
+    }
+
+    public List<OrderLine> lines() {
+        return List.copyOf(lines);                 // defensive copy, not the field
+    }
+}
+  </pre>
+
+  <p>Line 12 is the part people skip. Returning the <code>lines</code> field directly would hand callers a live, mutable reference to internal state — they could add lines to a shipped order and bypass the check in <code>addLine</code> entirely. <code>List.copyOf</code> returns an immutable snapshot, so the invariant survives contact with the outside world. Making the field <code>final</code> only stops <em>reassignment</em> of the reference; it does nothing to stop mutation of what it points at.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>One <code>public</code> top-level class per file, named after the file.</strong> Additional non-public classes in the same file are legal but are usually better off as nested or separate types.</li>
+        <li><strong>Access is per class, not per object.</strong> A method of <code>Order</code> can read <code>other.status</code> on a <em>different</em> <code>Order</code> instance — which is how <code>equals</code> works at all.</li>
+        <li><strong>Start <code>private</code> and widen only when forced.</strong> Widening later is easy; narrowing a member other people already call is a breaking change.</li>
+        <li><strong>Getters and setters for every field are not encapsulation.</strong> A <code>setStatus</code> that skips the state machine is a <code>public</code> field wearing a disguise. Expose <em>operations</em> — <code>ship()</code>, <code>cancel()</code> — not fields.</li>
+        <li><strong>Wildcard imports hide clashes.</strong> <code>import java.util.*;</code> plus <code>import java.sql.*;</code> makes <code>Date</code> ambiguous and the file stops compiling. Import explicitly.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-acc-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A field is declared <code>int qty;</code> with no modifier. Which callers can read it?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-acc-1"><span>Only the declaring class — no modifier means <code>private</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-acc-1"><span>Any class in the same package, but not subclasses in other packages <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-acc-1"><span>Any class anywhere — no modifier means <code>public</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-acc-1"><span>The declaring class and all its subclasses, wherever they live <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> That is package-private. The unit of trust is the package, so any class sitting in the same one has full access — including classes someone else adds to that package later.</p>
+        <p class="mb-0"><strong>A</strong> is the most common wrong answer; <code>private</code> must be written explicitly. <strong>C</strong> is how it works in some other languages, not Java. <strong>D</strong> describes <code>protected</code>, which is strictly wider — it adds out-of-package subclasses on top of package access.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-acc-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>lines</code> is <code>private final</code>, and <code>lines()</code> returns the field directly. A caller does <code>order.lines().clear()</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-acc-2"><span>Compile error — the field is <code>private</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-acc-2"><span><code>UnsupportedOperationException</code> — <code>final</code> makes it immutable <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-acc-2"><span>The order's lines are silently emptied, bypassing every check in <code>addLine</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-acc-2"><span>Nothing — the getter returns a copy by default <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The getter handed out a live reference to internal state, so the caller is now mutating the order's own list. Every invariant <code>addLine</code> protects is bypassed. Return <code>List.copyOf(lines)</code> — or better, expose no getter at all and add the operation the caller actually needs.</p>
+        <p class="mb-0"><strong>A</strong> confuses the field's access with the method's: <code>lines()</code> is public and hands the reference out legitimately. <strong>B</strong> is the crucial misunderstanding — <code>final</code> prevents reassigning the variable, never mutation of the object it refers to. <strong>D</strong> invents a defensive copy Java does not make for you.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="access"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,296 @@
+<section class="lm-section" id="lambdas" data-title="Lambdas, functional interfaces and method references" data-num="4">
+  <p class="lm-eyebrow">Section 4</p>
+  <h2 class="mb-4">Lambdas, functional interfaces and method references</h2>
+
+  <p>A lambda is a compact way to write an object that implements a <strong>functional interface</strong> — an interface with exactly one abstract method (§3). <code>p -> p.onHand() &lt; 5</code> is not a function floating free; it becomes an instance of whatever single-method interface the surrounding code expects, and that interface's method body is the lambda. Nothing else about it is new. What makes lambdas worth a whole section is <em>how the compiler decides which interface</em>, what the lambda may touch from its surroundings, and the four shorthand forms called method references that replace most lambdas you would otherwise write.</p>
+
+  <p>The mental model to carry through streams (§5) and collectors (§6): a lambda has <strong>no type of its own</strong>. The same text <code>x -> x</code> is a <code>Function&lt;String,String&gt;</code> in one place and a <code>UnaryOperator&lt;Integer&gt;</code> in another, and in a place with no target type at all it is a compile error.</p>
+
+  <h3 class="mt-8 mb-3">The interfaces you will actually use</h3>
+
+  <p>Almost every lambda in real code targets one of the interfaces in <code>java.util.function</code>. Learn these shapes and you can read any stream pipeline.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Core functional interfaces, their abstract method and a warehouse example</caption>
+      <thead><tr><th scope="col">Interface</th><th scope="col">Method</th><th scope="col">Shape</th><th scope="col">Example</th></tr></thead>
+      <tbody>
+        <tr><td><code>Function&lt;T,R&gt;</code></td><td><code>R apply(T)</code></td><td>one in, one out</td><td><code>Product::sku</code></td></tr>
+        <tr><td><code>BiFunction&lt;T,U,R&gt;</code></td><td><code>R apply(T,U)</code></td><td>two in, one out</td><td><code>(sku, qty) -> new OrderLine(sku, qty)</code></td></tr>
+        <tr><td><code>Predicate&lt;T&gt;</code></td><td><code>boolean test(T)</code></td><td>one in, yes/no</td><td><code>p -> p.onHand() == 0</code></td></tr>
+        <tr><td><code>Consumer&lt;T&gt;</code></td><td><code>void accept(T)</code></td><td>one in, nothing out</td><td><code>System.out::println</code></td></tr>
+        <tr><td><code>Supplier&lt;T&gt;</code></td><td><code>T get()</code></td><td>nothing in, one out</td><td><code>ArrayList::new</code></td></tr>
+        <tr><td><code>UnaryOperator&lt;T&gt;</code></td><td><code>T apply(T)</code></td><td><code>Function</code> where in = out</td><td><code>String::trim</code></td></tr>
+        <tr><td><code>BinaryOperator&lt;T&gt;</code></td><td><code>T apply(T,T)</code></td><td><code>BiFunction</code> with all three the same</td><td><code>Integer::sum</code></td></tr>
+        <tr><td><code>IntPredicate</code>, <code>IntFunction&lt;R&gt;</code>, <code>ToIntFunction&lt;T&gt;</code>, <code>IntBinaryOperator</code>…</td><td>as above, on <code>int</code></td><td>primitive specialisations</td><td><code>mapToInt(Product::onHand)</code> takes a <code>ToIntFunction</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">The primitive variants exist because generics cannot take <code>int</code> (Fundamentals §13). <code>Function&lt;Product,Integer&gt;</code> would box every result; <code>ToIntFunction&lt;Product&gt;</code> does not. Streams use them everywhere — <code>mapToInt</code>, <code>IntStream.sum()</code> — and §5 shows why that matters.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Every lambda and every kind of method reference, applied to stock levels. Read the comments on the right of each declaration first; they name which of the four reference forms it is.</p>
+
+  <pre data-code data-lang="java" data-file="Lambdas.java" data-verify="Lambdas" data-hi="23,24,25,26,28,47,48">
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
+
+public class Lambdas {
+
+    record Product(String sku, int priceInCents, int onHand) {}
+
+    static boolean isLowStock(Product p) { return p.onHand() < 5; }
+
+    public static void main(String[] args) {
+        List<Product> stock = List.of(
+                new Product("BOLT-7", 80, 500),
+                new Product("GIRD-1", 120_000, 2),
+                new Product("CAM-9", 425, 3));
+
+        // a lambda has no type of its own: each one below is typed by its target
+        Predicate<Product> low = p -> p.onHand() < 5;
+        Function<Product, String> sku = Product::sku;                 // unbound instance method
+        Supplier<List<Product>> fresh = ArrayList::new;               // constructor
+        BiFunction<Integer, Integer, Integer> max = Math::max;        // static method
+        Product sample = stock.get(0);
+        Supplier<String> boundSku = sample::sku;                      // bound instance method
+
+        System.out.println("low stock:         " + stock.stream().filter(low).map(sku).toList());
+        System.out.println("fresh list empty:  " + fresh.get().isEmpty());
+        System.out.println("max:               " + max.apply(80, 4_250));
+        System.out.println("bound receiver:    " + boundSku.get());
+
+        // composition builds new functions from old ones without a class in sight
+        Predicate<Product> cheap = p -> p.priceInCents() < 1_000;
+        Predicate<Product> reorder = low.and(cheap.negate());
+        System.out.println("low and not cheap: " + stock.stream().filter(reorder).map(Product::sku).toList());
+
+        Function<Integer, Integer> addTax = cents -> cents + cents / 5;
+        Function<Integer, Integer> addShipping = cents -> cents + 150;
+        System.out.println("tax then shipping: " + addTax.andThen(addShipping).apply(1_000));
+        System.out.println("shipping then tax: " + addTax.compose(addShipping).apply(1_000));
+
+        // capture: the lambda copies the VALUE of threshold, so threshold must never change
+        int threshold = 5;
+        Predicate<Product> under = p -> p.onHand() < threshold;
+        // threshold = 6;   // uncomment: "local variables referenced from a lambda expression must be final or effectively final"
+        System.out.println("under threshold:   " + stock.stream().filter(under).count());
+
+        Comparator<Product> byPrice = Comparator.comparingInt(Product::priceInCents);
+        List<Product> sorted = new ArrayList<>(stock);
+        sorted.sort(byPrice.reversed());
+        System.out.println("priciest first:    " + sorted.stream().map(Product::sku).toList());
+        System.out.println("own static helper: " + stock.stream().filter(Lambdas::isLowStock).count());
+
+        UnaryOperator<String> shout = String::toUpperCase;
+        System.out.println(shout.apply("ready"));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Lambdas">
+low stock:         [GIRD-1, CAM-9]
+fresh list empty:  true
+max:               4250
+bound receiver:    BOLT-7
+low and not cheap: [GIRD-1]
+tax then shipping: 1350
+shipping then tax: 1380
+under threshold:   2
+priciest first:    [GIRD-1, CAM-9, BOLT-7]
+own static helper: 2
+READY
+  </pre>
+
+  <p><code>andThen</code> and <code>compose</code> are the same two functions in opposite orders: <code>f.andThen(g)</code> runs <code>f</code> first, <code>f.compose(g)</code> runs <code>g</code> first. The 30-cent difference in the output is tax applied before or after the shipping charge — exactly the kind of thing a pricing bug is made of, so read these carefully in code review. <code>Predicate.and</code>, <code>or</code> and <code>negate</code> compose tests the same way.</p>
+
+  <h3 class="mt-8 mb-3">Four kinds of method reference</h3>
+
+  <p>A method reference is a lambda whose body is a single call that forwards its parameters unchanged. The compiler expands it; there is nothing a reference can do that a lambda cannot, and the reverse is also true. The four forms differ in <em>where the receiver comes from</em>.</p>
+
+  <div class="lm-card" data-sandbox="method-ref">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg>
+      Expand a method reference
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Reference</span>
+        <select data-sb-ref>
+          <option value="0" selected>Product::sku</option>
+          <option value="1">String::compareToIgnoreCase</option>
+          <option value="2">Integer::parseInt</option>
+          <option value="3">Math::max</option>
+          <option value="4">System.out::println</option>
+          <option value="5">this::isLowStock</option>
+          <option value="6">inventory::onHand</option>
+          <option value="7">Product::new</option>
+          <option value="8">ArrayList::new</option>
+          <option value="9">int[]::new</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Bound versus unbound is the one that bites</div>
+      <p class="mb-0"><code>sample::sku</code> and <code>Product::sku</code> look alike and differ completely. The first is <strong>bound</strong>: the receiver <code>sample</code> is evaluated <em>once, when the reference is created</em>, and the resulting <code>Supplier</code> takes no parameters. The second is <strong>unbound</strong>: the receiver arrives later as the first parameter, so it is a <code>Function&lt;Product,String&gt;</code>. <code>System.out::println</code> is bound to the <code>System.out</code> object that existed at that moment — reassign <code>System.setOut</code> afterwards and the reference still prints to the old stream.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Watch the compiler type a lambda</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of lambda target typing">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Target typing</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="target-typing"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What the compiler knows</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Diagnostic</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="target-typing">
+    {
+      "lang": "java",
+      "code": "Comparator<Product> byPrice = (a, b) -> Integer.compare(a.priceInCents(), b.priceInCents());\n\nvar byName = (a, b) -> a.name().compareTo(b.name());\n\nObject o = p -> p.sku();\n\nFunction<Product, String> sku = p -> p.sku();\nSupplier<String> hello = () -> \"hello\";",
+      "steps": [
+        { "line": 1, "vars": { "target type": "Comparator<Product>", "its abstract method": "int compare(Product, Product)" }, "out": "",
+          "note": "The compiler starts from the LEFT. The declared type is a functional interface, so it looks up the one abstract method." },
+        { "line": 1, "vars": { "target type": "Comparator<Product>", "a": "Product (from parameter 1)", "b": "Product (from parameter 2)" }, "out": "",
+          "note": "The lambda's parameters are untyped in the source. They get their types from the method's parameter list, position by position. Writing (Product a, Product b) would be legal and identical." },
+        { "line": 1, "vars": { "a": "Product", "b": "Product", "body type": "int", "required return": "int" }, "out": "ok",
+          "note": "Finally the body is type-checked against the return type. Integer.compare returns int; compare must return int; the lambda is accepted." },
+        { "line": 3, "vars": { "target type": "none — var infers FROM the initialiser" }, "out": "error: cannot infer type for local variable byName\n  (lambda expression needs an explicit target-type)",
+          "note": "var works the other way round: it takes the type of the right-hand side. A lambda has no type of its own, so there is nothing to take and the compiler gives up." },
+        { "line": 5, "vars": { "target type": "Object", "is it a functional interface?": "no" }, "out": "error: incompatible types: Object is not a functional interface",
+          "note": "Object is a type, but not an interface with one abstract method. A lambda can only become an instance of a functional interface, never a plain Object or a class." },
+        { "line": 7, "vars": { "target type": "Function<Product, String>", "p": "Product", "required return": "String" }, "out": "ok",
+          "note": "The same body as line 5, now with a usable target. p is a Product because Function<Product, String>.apply takes a Product." },
+        { "line": 8, "vars": { "target type": "Supplier<String>", "parameters": "none", "required return": "String" }, "out": "ok",
+          "note": "() -> \"hello\" matches get(): no parameters, returns a String. The rule in one line: a lambda is typed by the method that will receive it, and the same text can mean different things in different places." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What a lambda can touch</h3>
+
+  <p>A lambda body can use the enclosing method's local variables, the enclosing instance's fields, and <code>this</code>. The rules for each are different, and the difference is the source of most lambda bugs.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Capture rules">
+      <button type="button" class="lm-tab" role="tab" id="tab-lambdas-local" aria-controls="panel-lambdas-local" aria-selected="true" tabindex="0">Local variables</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-lambdas-this" aria-controls="panel-lambdas-this" aria-selected="false" tabindex="-1"><code>this</code></button>
+      <button type="button" class="lm-tab" role="tab" id="tab-lambdas-checked" aria-controls="panel-lambdas-checked" aria-selected="false" tabindex="-1">Checked exceptions</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-lambdas-local" aria-labelledby="tab-lambdas-local" tabindex="0">
+      <p>A captured local must be <strong>effectively final</strong>: assigned exactly once and never changed, whether or not you wrote <code>final</code>. The reason is that the lambda <em>copies the value</em> when it is created. The lambda may outlive the method — be stored in a field, run on another thread — long after the method's stack frame is gone, so there is no variable left to share. Allowing writes would give you two copies that silently disagree, so the compiler forbids them on both sides.</p>
+      <p class="mb-0">If you need a mutable counter, the fix is not <code>int[] count = {0}</code> — that compiles because the <em>reference</em> is effectively final, but it is a thread-unsafe hack. Use a <code>reduce</code> or <code>count()</code> on the stream, or an <code>AtomicInteger</code> if you genuinely need shared mutable state.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-lambdas-this" aria-labelledby="tab-lambdas-this" tabindex="0" hidden>
+      <p>Inside a lambda, <code>this</code> means <em>the enclosing instance</em> — the same object it meant on the line before the lambda. A lambda introduces no new scope for <code>this</code>, which is why <code>this::isLowStock</code> works in an instance method and why a lambda can read fields with no qualifier.</p>
+      <p class="mb-0">Inside an anonymous class, <code>this</code> is the anonymous object itself, and the enclosing instance is <code>Outer.this</code>. This is the single behavioural difference between a lambda and an anonymous class that implements the same interface, and it is why an IDE's "convert to lambda" can change meaning if the body uses <code>this</code>. §2 covered the anonymous-class side.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-lambdas-checked" aria-labelledby="tab-lambdas-checked" tabindex="0" hidden>
+      <p>None of the <code>java.util.function</code> interfaces declare <code>throws</code>. So <code>path -> Files.readString(path)</code> does not compile as a <code>Function</code>: <code>readString</code> throws <code>IOException</code>, and <code>apply</code> is not allowed to. The error message — <em>unreported exception IOException; must be caught or declared to be thrown</em> — points at the lambda body.</p>
+      <p class="mb-0">Your options are to catch inside the lambda and wrap in an <code>UncheckedIOException</code>, to declare your own functional interface whose method does <code>throws</code>, or to move the I/O out of the pipeline entirely. Wrapping is the usual answer; silently swallowing the exception in a <code>catch</code> that returns <code>null</code> is the usual mistake.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Overloads plus lambdas confuse inference.</strong> <code>submit(() -> doWork())</code> on an <code>ExecutorService</code> has both a <code>Runnable</code> and a <code>Callable</code> overload. If <code>doWork</code> returns a value the <code>Callable</code> wins; if not, <code>Runnable</code>. Change the method's return type and you silently change which overload is called.</li>
+        <li><strong><code>@FunctionalInterface</code> is a promise, not a requirement.</strong> Any single-abstract-method interface works as a lambda target. The annotation makes the compiler reject a second abstract method, which protects callers who rely on lambdas. Put it on every interface you intend to be used that way.</li>
+        <li><strong>A lambda is not always a new object.</strong> A non-capturing lambda is typically allocated once and reused; a capturing one is allocated per evaluation. Do not compare lambdas with <code>==</code> or use them as map keys.</li>
+        <li><strong>Long lambdas are a smell.</strong> A body of more than a few lines belongs in a named method, referenced with <code>this::name</code>. The name documents it, and a stack trace through <code>lambda$main$3</code> tells you nothing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-lambdas-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Inside a method: <code>int shipped = 0; orders.forEach(o -> shipped += o.qty());</code> — what happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-lambdas-1"><span>It compiles and <code>shipped</code> holds the total afterwards <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-lambdas-1"><span>It compiles but <code>shipped</code> is still 0 afterwards, because the lambda got a copy <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-lambdas-1"><span>Compile error: <code>shipped</code> must be final or effectively final <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-lambdas-1"><span>Runtime <code>ConcurrentModificationException</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> A lambda captures a copy of the local's value, so a write inside the body could never reach the variable outside. Rather than let that silently happen, the language refuses to compile any lambda that assigns to a captured local — or any method that assigns to a local a lambda has captured.</p>
+        <p class="mb-0"><strong>B</strong> is what <em>would</em> happen if the rule did not exist, and is exactly the surprise the rule prevents. <strong>A</strong> requires shared variables, which Java lambdas do not have. <strong>D</strong> is about modifying a collection during iteration, which this code does not do. Use <code>orders.stream().mapToInt(Order::qty).sum()</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-lambdas-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>Comparator&lt;String&gt; c = String::compareToIgnoreCase;</code> — which kind of method reference is this, and what does it expand to?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-lambdas-2"><span>Static — <code>(a, b) -> String.compareToIgnoreCase(a, b)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-lambdas-2"><span>Unbound instance — <code>(a, b) -> a.compareToIgnoreCase(b)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-lambdas-2"><span>Bound instance — <code>b -> "String".compareToIgnoreCase(b)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-lambdas-2"><span>It does not compile: <code>compare</code> takes two arguments but <code>compareToIgnoreCase</code> takes one <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>compareToIgnoreCase</code> is an instance method, and <code>String::</code> names the type rather than an object, so the reference is unbound: the <em>first</em> parameter of the target method becomes the receiver and the rest become arguments. Two parameters in, one receiver plus one argument out — the arities line up.</p>
+        <p class="mb-0"><strong>A</strong> would need a static method, and there is none with that name. <strong>C</strong> would need an expression before the <code>::</code>, not a type. <strong>D</strong> is the trap: the counts <em>do</em> match once you account for the receiver, which is the whole point of the unbound form.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-lambdas-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these can the lambda <code>(a, b) -> a + b</code> be assigned to without error? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>BinaryOperator&lt;Integer&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>Function&lt;Integer, Integer&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>var</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>BiFunction&lt;String, String, String&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Both targets have a two-parameter abstract method, and <code>+</code> works on the inferred types — numeric addition for <code>Integer</code>, concatenation for <code>String</code>. The same lambda text means two different things depending on the target, which is the lesson of this section.</p>
+        <p class="mb-0"><strong>B</strong> fails because <code>Function.apply</code> takes one argument and the lambda declares two. <strong>C</strong> fails because <code>var</code> infers from the initialiser and a lambda has no intrinsic type to infer.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lambdas"> Mark this section complete
+  </label>
+</section>

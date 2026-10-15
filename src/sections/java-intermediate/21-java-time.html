@@ -1,0 +1,259 @@
+<section class="lm-section" id="java-time" data-title="Dates and times with java.time" data-num="12">
+  <p class="lm-eyebrow">Section 12</p>
+  <h2 class="mb-4">Dates and times with <code>java.time</code></h2>
+
+  <p>Every order has a <em>placed</em> timestamp, every SLA is a deadline, and every report is a window. Getting those wrong does not throw — it silently ships an order a day late twice a year, or double-counts the hour that happens twice in October. <code>java.time</code> (Java 8) was designed around the two ideas that the older <code>java.util.Date</code> never separated: a <strong>point on the timeline</strong> is not the same thing as a <strong>reading on a wall clock</strong>, and the mapping between them depends on a <strong>zone</strong> whose rules change.</p>
+
+  <p>Every type in the package is immutable and thread-safe, every "setter" returns a new value, months are numbered from 1, and arithmetic is explicit about whether it counts calendar units or elapsed seconds. Those four properties are what you are buying; the rest of this section is about using them correctly.</p>
+
+  <h3 class="mt-8 mb-3">Which type holds what</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The core java.time types, what each stores, and what to use it for</caption>
+      <thead><tr><th scope="col">Type</th><th scope="col">Stores</th><th scope="col">Zone?</th><th scope="col">Use it for</th></tr></thead>
+      <tbody>
+        <tr><td><code>Instant</code></td><td>Nanoseconds since 1970-01-01T00:00Z</td><td>UTC only</td><td><strong>When something happened.</strong> Store this in the database and in logs.</td></tr>
+        <tr><td><code>LocalDate</code></td><td>Year, month, day</td><td>none</td><td>Birthdays, invoice dates, "placed on" — a calendar day with no time of day.</td></tr>
+        <tr><td><code>LocalTime</code></td><td>Hour, minute, second, nano</td><td>none</td><td>Opening hours, a daily cut-off — a wall-clock time with no date.</td></tr>
+        <tr><td><code>LocalDateTime</code></td><td>Date + time</td><td>none</td><td>A reading off a wall clock whose zone is known from context. Ambiguous on its own — it cannot be converted to an <code>Instant</code> without a zone.</td></tr>
+        <tr><td><code>ZonedDateTime</code></td><td>Date + time + <code>ZoneId</code> + offset</td><td>region rules</td><td><strong>A future appointment in a place.</strong> Adjusts itself when DST rules apply.</td></tr>
+        <tr><td><code>OffsetDateTime</code></td><td>Date + time + fixed offset</td><td>fixed offset</td><td>Interchange with systems that want <code>2026-03-28T23:30+01:00</code>. No rules, so no surprises — and no DST.</td></tr>
+        <tr><td><code>Duration</code></td><td>Seconds + nanos</td><td>—</td><td><strong>Elapsed time:</strong> a timeout, a job's run time, "3 hours from now".</td></tr>
+        <tr><td><code>Period</code></td><td>Years, months, days</td><td>—</td><td><strong>Calendar distance:</strong> "10 working days", "one month's notice".</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">Rule of thumb: <strong>store an <code>Instant</code>, display a <code>ZonedDateTime</code>, schedule with a <code>ZonedDateTime</code></strong>. A <code>LocalDateTime</code> in a database column is a bug waiting for the first user outside the server's zone.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Spring 2026 in London: at 01:00 on Sunday 29 March the clocks jump to 02:00, so the hour 01:00–01:59 never happens. In October the reverse: 01:00–01:59 on the 25th happens twice. The program below places an order the evening before the spring change and then does the things people do to timestamps.</p>
+
+  <pre data-code data-lang="java" data-file="Times.java" data-verify="Times" data-hi="21,22" data-bad="56">
+import java.time.DayOfWeek;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.Period;
+import java.time.YearMonth;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.Locale;
+
+public class Times {
+    public static void main(String[] args) {
+        ZoneId london = ZoneId.of("Europe/London");
+
+        // an order placed the night before the clocks go forward (29 Mar 2026, 01:00 -> 02:00)
+        ZonedDateTime placed = LocalDateTime.of(2026, 3, 28, 23, 30).atZone(london);
+        System.out.println("placed            = " + placed);
+        System.out.println("plusDays(1)       = " + placed.plusDays(1));     // same wall clock, 23h later
+        System.out.println("plusHours(24)     = " + placed.plusHours(24));   // 24h later, different wall clock
+
+        // a time that does not exist, and one that exists twice
+        ZonedDateTime inGap = LocalDateTime.of(2026, 3, 29, 1, 30).atZone(london);
+        System.out.println("01:30 in the gap  = " + inGap);
+        ZonedDateTime overlap = LocalDateTime.of(2026, 10, 25, 1, 30).atZone(london);
+        System.out.println("01:30 in overlap  = " + overlap + " / later: " + overlap.withLaterOffsetAtOverlap());
+
+        // one instant, three views
+        Instant at = placed.toInstant();
+        System.out.println("instant           = " + at);
+        System.out.println("same instant NYC  = " + at.atZone(ZoneId.of("America/New_York")));
+        System.out.println("same instant Tokyo= " + at.atZone(ZoneId.of("Asia/Tokyo")));
+
+        // Period counts calendar units; Duration counts elapsed time
+        LocalDate due = placed.toLocalDate().plusDays(10);
+        System.out.println("SLA period        = " + Period.between(placed.toLocalDate(), due));
+        System.out.println("elapsed to +1 day = " + Duration.between(placed, placed.plusDays(1)));
+
+        // formatting: ISO is locale-free; a pattern needs a Locale
+        DateTimeFormatter uk = DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm", Locale.UK);
+        System.out.println("ISO_LOCAL_DATE    = " + placed.format(DateTimeFormatter.ISO_LOCAL_DATE));
+        System.out.println("pattern, UK       = " + placed.format(uk));
+
+        // calendar arithmetic clamps rather than overflowing
+        LocalDate jan31 = LocalDate.of(2026, 1, 31);
+        System.out.println("31 Jan + 1 month  = " + jan31.plusMonths(1));
+        System.out.println("truncated to hour = " + placed.truncatedTo(ChronoUnit.HOURS).toLocalDateTime());
+        YearMonth ym = YearMonth.from(placed);
+        System.out.println("year-month        = " + ym + " (" + ym.lengthOfMonth() + " days)");
+        System.out.println("day of week       = " + placed.getDayOfWeek() + ", weekend=" + (placed.getDayOfWeek() == DayOfWeek.SATURDAY));
+        System.out.println("parsed + 1 week   = " + LocalDate.parse("2026-10-15").plusWeeks(1));
+
+        // every java.time type is immutable: this line does nothing
+        placed.plusDays(30);
+        System.out.println("still placed on   = " + placed.toLocalDate());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Times">
+placed            = 2026-03-28T23:30Z[Europe/London]
+plusDays(1)       = 2026-03-29T23:30+01:00[Europe/London]
+plusHours(24)     = 2026-03-30T00:30+01:00[Europe/London]
+01:30 in the gap  = 2026-03-29T02:30+01:00[Europe/London]
+01:30 in overlap  = 2026-10-25T01:30+01:00[Europe/London] / later: 2026-10-25T01:30Z[Europe/London]
+instant           = 2026-03-28T23:30:00Z
+same instant NYC  = 2026-03-28T19:30-04:00[America/New_York]
+same instant Tokyo= 2026-03-29T08:30+09:00[Asia/Tokyo]
+SLA period        = P10D
+elapsed to +1 day = PT23H
+ISO_LOCAL_DATE    = 2026-03-28
+pattern, UK       = 28 Mar 2026 23:30
+31 Jan + 1 month  = 2026-02-28
+truncated to hour = 2026-03-28T23:00
+year-month        = 2026-03 (31 days)
+day of week       = SATURDAY, weekend=true
+parsed + 1 week   = 2026-10-22
+still placed on   = 2026-03-28
+  </pre>
+
+  <p>Read the first three lines together. <code>plusDays(1)</code> and <code>plusHours(24)</code> look interchangeable and are not: the first keeps the wall clock at 23:30 and lands on the 29th, only <strong>23 real hours</strong> later, because the day it crossed had 23 hours. The second adds exactly 24 hours of elapsed time and lands at 00:30 on the 30th. Neither is wrong — they answer different questions. "Same time tomorrow" is a calendar question; "the 24-hour timeout expires" is an elapsed-time question. Pick the method that matches the question, not the one that reads most naturally.</p>
+
+  <p>The <code>Z</code> versus <code>+01:00</code> at the end of each value is the offset java.time resolved from the zone rules at that instant. The zone (<code>Europe/London</code>) is stable; the offset is a consequence. That is also why the gap line prints 02:30: there was no 01:30, so the value was pushed forward by the length of the gap and given the post-change offset. In the overlap, 01:30 exists twice and the <em>earlier</em> one (still on summer time, <code>+01:00</code>) is chosen unless you ask for the later.</p>
+
+  <h3 class="mt-8 mb-3">Try the arithmetic</h3>
+
+  <div class="lm-card" data-sandbox="period-vs-duration">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      Calendar versus elapsed, across the 2026 London clock changes
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <p class="text-sm text-ink-muted mb-3">Computed in the browser from the same rules <code>java.time</code> applies to <code>Europe/London</code> in 2026 — clocks forward 29 March, back 25 October. Pick a start, an amount, and the kind of amount.</p>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Start (<code>placed</code>)</span>
+        <select data-sb-start>
+          <option value="2026-03-28T23:30" selected>2026-03-28 23:30 — night before clocks go forward</option>
+          <option value="2026-10-24T23:30">2026-10-24 23:30 — night before clocks go back</option>
+          <option value="2026-01-31T23:30">2026-01-31 23:30 — last day of a long month</option>
+          <option value="2026-06-15T09:00">2026-06-15 09:00 — an ordinary summer morning</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Add <span class="lm-readout" data-sb-amountout>1</span></span>
+        <input type="range" data-sb-amount min="1" max="3" value="1" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Kind of amount</span>
+        <select data-sb-unit>
+          <option value="days" selected>Period — plusDays(n)</option>
+          <option value="months">Period — plus(Period.ofMonths(n))</option>
+          <option value="durationDays">Duration — plus(Duration.ofDays(n))</option>
+          <option value="hours">Duration — plusHours(24 × n)</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3"><code>Period</code> is a calendar, <code>Duration</code> is a stopwatch</h3>
+
+  <p>A <code>Period</code> is years, months and days as <em>fields</em> — <code>P10D</code> above is "ten days", and <code>P1M</code> is "one month" whatever length that month turns out to have. A <code>Duration</code> is a count of seconds — <code>PT23H</code> — with no idea what a month is; <code>Duration.ofDays(1)</code> is sugar for 86,400 seconds. The consequence on a <code>ZonedDateTime</code>:</p>
+
+  <ul>
+    <li><code>plus(Period)</code>, <code>plusDays</code>, <code>plusMonths</code>, <code>plusYears</code> work on the <strong>local date-time</strong> and then re-resolve the zone. Wall clock preserved; elapsed time varies.</li>
+    <li><code>plus(Duration)</code>, <code>plusHours</code>, <code>plusMinutes</code>, <code>plusSeconds</code> work on the <strong>instant</strong>. Elapsed time preserved; wall clock varies.</li>
+  </ul>
+
+  <p>On a <code>LocalDateTime</code> there is no zone, so the two agree and <code>plusDays(1)</code> is always 24 hours. That is exactly why it is the wrong type for anything that will later be shown in a zone: the arithmetic is done before the question of "which 24 hours" can be asked.</p>
+
+  <p>Month arithmetic clamps. <code>31 January + 1 month</code> is 28 February, and <code>28 February + 1 month</code> is 28 March — so <code>plusMonths(1).minusMonths(1)</code> does not necessarily return where it started. If you need "same day next month or the last day if there is none", that is the behaviour you already have; if you need something else, say it explicitly with <code>TemporalAdjusters.lastDayOfMonth()</code>.</p>
+
+  <h3 class="mt-8 mb-3"><code>ZoneId</code> versus <code>ZoneOffset</code></h3>
+
+  <p>A <code>ZoneId</code> such as <code>Europe/London</code> names a <em>set of rules</em> maintained in the IANA tz database that the JDK ships and updates: which offset applies when, including every historical and scheduled DST change. A <code>ZoneOffset</code> such as <code>+01:00</code> is a fixed number of seconds from UTC and knows nothing. A <code>ZonedDateTime</code> holds both — the id you gave it and the offset it derived — and re-derives the offset whenever the date-time changes. An <code>OffsetDateTime</code> holds only the offset, which is why adding a day to it never crosses a DST boundary: it cannot.</p>
+
+  <p>Use <code>ZoneId.of("Europe/London")</code>, never <code>ZoneId.of("BST")</code> or <code>"GMT+1"</code>: the three-letter abbreviations are ambiguous (<code>CST</code> is three different zones) and a fixed offset silently stops being right in March. When you need the server's zone, <code>ZoneId.systemDefault()</code> exists — but code that depends on it behaves differently on every machine it runs on, which is the problem <code>java.time</code> was designed to let you avoid.</p>
+
+  <h3 class="mt-8 mb-3">Formatting and parsing</h3>
+
+  <p>Two families of formatter. The <strong>ISO</strong> constants (<code>ISO_LOCAL_DATE</code>, <code>ISO_INSTANT</code>, <code>ISO_ZONED_DATE_TIME</code>) are locale-independent, round-trip exactly, and are what <code>toString()</code> and <code>parse(CharSequence)</code> use; they are the right choice for anything machine-read. <strong>Pattern</strong> formatters from <code>ofPattern</code> are for humans, and a human has a locale: month names, day names, am/pm markers and even digits vary. Always pass one — <code>ofPattern("dd MMM yyyy", Locale.UK)</code> — because the overload without a locale uses the JVM default, and the same build will print <code>Mar</code> on one machine and <code>mars</code> on another.</p>
+
+  <p>The pattern letters are case-sensitive and the cases are traps. <code>MM</code> is month, <code>mm</code> is minute. <code>HH</code> is 0–23, <code>hh</code> is 1–12 and is meaningless without <code>a</code>. <code>yyyy</code> is the year of era, <code>uuuu</code> is the proleptic year (they differ only before year 1), and <code>YYYY</code> is the <em>week-based</em> year — the one that prints <code>2025</code> for 30 December 2024, because that Monday starts ISO week 1 of 2025. <code>YYYY</code> has appeared in more production date bugs than any other four characters; if you did not specifically want week numbering, you wanted <code>yyyy</code>.</p>
+
+  <p>Parsing is strict by default: <code>LocalDate.parse("2026-2-3")</code> throws <code>DateTimeParseException</code> because the ISO format requires two-digit months. That strictness is a feature — a lenient parser is how <code>31/02/2026</code> turns into 3 March without anyone noticing.</p>
+
+  <h3 class="mt-8 mb-3">The legacy types, and testable time</h3>
+
+  <p><code>java.util.Date</code> is a mutable millisecond timestamp with a misleading name; <code>Calendar</code> is mutable, zero-indexes its months, and is not thread-safe. You will still meet them at the edges — JDBC drivers, old libraries, <code>java.sql.Timestamp</code> — so know the bridges and keep them at the boundary: <code>date.toInstant()</code> and <code>Date.from(instant)</code>; <code>calendar.toInstant()</code>; <code>timestamp.toLocalDateTime()</code>. Convert on the way in, work in <code>java.time</code>, convert on the way out.</p>
+
+  <p>Code that calls <code>Instant.now()</code> or <code>LocalDate.now()</code> directly cannot be tested for "what happens at midnight" or "what happens during the DST overlap" without waiting for those moments. Every <code>now()</code> has an overload taking a <code>Clock</code>; inject one. In production, <code>Clock.systemUTC()</code>. In a test, <code>Clock.fixed(Instant.parse("2026-10-25T00:30:00Z"), ZoneId.of("Europe/London"))</code>, and the overlap is now a unit test that runs in a millisecond. That is also why every program in this module uses fixed dates: the output has to be the same on the day you read it as on the day it was built.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Five ways to get it wrong without an exception</div>
+      <ul class="mb-0">
+        <li><strong>Ignoring the return value.</strong> <code>placed.plusDays(30);</code> on its own does nothing — every java.time type is immutable, and the new value was discarded. The program above does exactly this on its highlighted last lines to prove it. Static analysis tools flag it; the compiler does not.</li>
+        <li><strong><code>YYYY</code> in a pattern.</strong> Week-based year. Correct for 51 weeks and wrong at the one moment nobody is watching.</li>
+        <li><strong>Storing a <code>LocalDateTime</code> for an event.</strong> Without a zone it is not a point in time. Two servers in two zones will disagree about when it happened, and there is no way back to the truth.</li>
+        <li><strong><code>Duration.ofDays(1)</code> where you meant "tomorrow".</strong> It is 86,400 seconds. Twice a year, in every zone with DST, that is not one calendar day.</li>
+        <li><strong><code>equals</code> on <code>ZonedDateTime</code>.</strong> It compares the zone and the local fields, so the same instant viewed from London and Tokyo is <em>not</em> equal. Use <code>isEqual</code>, or compare the <code>Instant</code>s.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-java-time-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A courier promise says "delivered within 24 hours of the order being placed". An order is placed at 23:30 on 28 March 2026 in London. Which expression gives the deadline, and when is it?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-java-time-1"><span><code>placed.plusDays(1)</code> — 23:30 on 29 March <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-java-time-1"><span><code>placed.plusDays(1)</code> — 00:30 on 30 March <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-java-time-1"><span><code>placed.plusHours(24)</code> — 00:30 on 30 March <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-java-time-1"><span><code>placed.plusHours(24)</code> — 23:30 on 29 March <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> "Within 24 hours" is elapsed time, so it is a <code>Duration</code> question and <code>plusHours(24)</code> is the right tool. The night of 28–29 March has only 23 hours in London, so 24 real hours after 23:30 is 00:30 on the 30th.</p>
+        <p class="mb-0"><strong>A</strong> is what <code>plusDays(1)</code> really produces, but it is only 23 hours later — the courier would be judged against a deadline one hour too early. <strong>B</strong> and <strong>D</strong> each pair a method with the result the <em>other</em> method gives.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-java-time-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You are storing a customer's chosen delivery slot — "Tuesday 7 April 2027, 09:00, at their address in Madrid" — to be acted on next year. Which type should the field be?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-java-time-2"><span><code>Instant</code>, because instants are the canonical storage type <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-java-time-2"><span><code>ZonedDateTime</code> with <code>Europe/Madrid</code>, because the customer means 09:00 on their clock whatever the rules say by then <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-java-time-2"><span><code>LocalDateTime</code>, because the zone is obvious from the address <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-java-time-2"><span><code>OffsetDateTime</code> with <code>+02:00</code>, Madrid's current summer offset <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> A future appointment is a wall-clock promise in a place. If Spain changes its DST rules before April 2027 — governments do — a <code>ZonedDateTime</code> re-resolves to the new correct instant when the JDK's tz data is updated, and still means 09:00 on the customer's clock.</p>
+        <p class="mb-0"><strong>A</strong> freezes the instant under today's rules; after a rule change it would be an hour off and nothing would flag it. "Store instants" is the rule for things that <em>have happened</em>, not for promises about the future. <strong>C</strong> loses the zone entirely — "obvious from the address" is not something the type system can see, and the next developer will call <code>atZone(systemDefault())</code>. <strong>D</strong> hard-codes an offset that is only correct in summer; it is the fixed-offset mistake with a type to make it look deliberate.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-java-time-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>What does <code>LocalDate.of(2024, 12, 30).format(DateTimeFormatter.ofPattern("YYYY-MM-dd", Locale.UK))</code> produce?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-java-time-3"><span><code>2024-12-30</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-java-time-3"><span>A <code>DateTimeException</code>: <code>Y</code> is not a valid pattern letter <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-java-time-3"><span><code>2025-12-30</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-java-time-3"><span><code>2024-12-30</code> on the JVM, but the compiler warns about the pattern <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Upper-case <code>Y</code> is the week-based year. 30 December 2024 is a Monday, and under the UK's ISO week rules that Monday begins week 1 of 2025, so the year field prints 2025 while the month and day still print December 30. The result is a date that does not exist.</p>
+        <p class="mb-0"><strong>A</strong> is what <code>yyyy</code> prints and what the author meant. <strong>B</strong>: <code>Y</code> is perfectly valid, which is the whole problem. <strong>D</strong>: a pattern is a runtime string; the compiler has no opinion about its contents.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="java-time"> Mark this section complete
+  </label>
+</section>

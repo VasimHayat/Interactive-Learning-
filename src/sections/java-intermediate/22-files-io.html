@@ -1,0 +1,298 @@
+<section class="lm-section" id="files-io" data-title="Files, paths and I/O" data-num="13">
+  <p class="lm-eyebrow">Section 13</p>
+  <h2 class="mb-4">Files, paths and I/O</h2>
+
+  <p>Stock arrives as a CSV export, orders leave as a report, and both must survive a machine that was not the one you developed on. Java has two generations of file API. <code>java.io</code> (1996) is a family of <em>streams</em> — byte pipes and character pipes you wrap around each other. <code>java.nio.file</code> (Java 7) adds <code>Path</code> and <code>Files</code>: a model of the file system plus static helpers that do the common jobs in one call and open the right stream for you underneath. Use the second; understand the first, because it is what the second returns when the one-liner is not enough.</p>
+
+  <h3 class="mt-8 mb-3"><code>Path</code> is a value, not a file</h3>
+
+  <p>A <code>Path</code> is an immutable, parsed path string — segments plus a root — with no requirement that anything exists on disk. Every method below is pure string manipulation; only <code>Files</code> touches the file system. Given <code>Path base = Path.of("data", "2026")</code>:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common Path operations with their results</caption>
+      <thead><tr><th scope="col">Expression</th><th scope="col">Result</th><th scope="col">What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>base.resolve("stock.csv")</code></td><td><code>data/2026/stock.csv</code></td><td>Appends a relative path. If the argument is absolute, the result <em>is</em> the argument — a classic surprise with user input.</td></tr>
+        <tr><td><code>base.resolveSibling("2027")</code></td><td><code>data/2027</code></td><td>Replaces the last segment.</td></tr>
+        <tr><td><code>base.relativize(Path.of("data/2026/archive/x.csv"))</code></td><td><code>archive/x.csv</code></td><td>The path from <code>base</code> to the argument. Both must be relative or both absolute.</td></tr>
+        <tr><td><code>Path.of("data/./2026/../2026").normalize()</code></td><td><code>data/2026</code></td><td>Removes <code>.</code> and <code>..</code> textually — it does not follow symlinks.</td></tr>
+        <tr><td><code>base.getFileName()</code></td><td><code>2026</code></td><td>The last segment, even when it is a directory.</td></tr>
+        <tr><td><code>base.getParent()</code></td><td><code>data</code></td><td><code>null</code> for a single-segment path — guard it.</td></tr>
+        <tr><td><code>base.toAbsolutePath()</code></td><td><code>/home/…/data/2026</code></td><td>Resolved against the JVM's working directory, which is wherever the process was <em>started</em>, not where the class file lives.</td></tr>
+        <tr><td><code>base.startsWith("data")</code></td><td><code>true</code></td><td>Segment-wise, so <code>Path.of("database")</code> does not start with <code>"data"</code>. Use it, not string <code>startsWith</code>, to check a path stays inside a directory.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">On Windows the separator is <code>\</code> and a root is <code>C:\</code>; on everything else it is <code>/</code>. <code>Path.of("data", "stock.csv")</code> with separate segments is correct everywhere; <code>Path.of("data/stock.csv")</code> happens to work on Windows too, but <code>Path.of("data\\stock.csv")</code> is a single file name on Linux.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Write a small stock file, read it back three different ways, copy it into an archive, list what exists, and clean up. Everything happens in a fresh temporary directory, and only names relative to it are printed, so the output is identical on every machine.</p>
+
+  <pre data-code data-lang="java" data-file="FilesDemo.java" data-verify="FilesDemo" data-hi="32,37">
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.List;
+import java.util.stream.Stream;
+
+public class FilesDemo {
+    public static void main(String[] args) throws IOException {
+        Path dir = Files.createTempDirectory("inventory-");   // somewhere under java.io.tmpdir
+        Path csv = dir.resolve("stock.csv");
+
+        Files.writeString(csv, """
+                # sku,qty
+                BOLT-7,10
+                NUT-3,4
+
+                CAM-9,2
+                """, StandardCharsets.UTF_8);
+        System.out.println("file             = " + csv.getFileName());
+        System.out.println("size in bytes    = " + Files.size(csv));
+
+        // 1. the whole file in memory
+        List<String> all = Files.readAllLines(csv, StandardCharsets.UTF_8);
+        System.out.println("readAllLines     = " + all.size() + " lines");
+
+        // 2. a lazy stream - the file stays open until the try block ends
+        long units;
+        try (Stream<String> lines = Files.lines(csv, StandardCharsets.UTF_8)) {
+            units = lines.map(String::strip)
+                         .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                         .mapToLong(l -> Long.parseLong(l.split(",")[1]))
+                         .sum();
+        }
+        System.out.println("units via lines  = " + units);
+
+        // 3. a buffered reader, one line at a time
+        int skus = 0;
+        try (BufferedReader in = Files.newBufferedReader(csv, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = in.readLine()) != null) {
+                if (line.isBlank() || line.startsWith("#")) continue;
+                skus++;
+            }
+        }
+        System.out.println("skus via reader  = " + skus);
+
+        // directories, copies, and a walk
+        Path archive = Files.createDirectories(dir.resolve("archive"));
+        Path copy = Files.copy(csv, archive.resolve("stock-2026-10-15.csv"), StandardCopyOption.REPLACE_EXISTING);
+        System.out.println("copied to        = " + slashes(dir.relativize(copy)));
+        try (Stream<Path> walk = Files.walk(dir)) {
+            System.out.println("regular files    = " + walk.filter(Files::isRegularFile)
+                    .map(p -> slashes(dir.relativize(p)))
+                    .sorted()
+                    .toList());
+        }
+        System.out.println("exists           = " + Files.exists(copy)
+                + ", notExists(nope.csv) = " + Files.notExists(dir.resolve("nope.csv")));
+
+        // a missing file is a specific IOException, not a null
+        try {
+            Files.readString(dir.resolve("nope.csv"));
+        } catch (NoSuchFileException e) {
+            System.out.println("NoSuchFile       = " + Path.of(e.getFile()).getFileName());
+        }
+
+        // delete children before parents; a non-empty directory refuses
+        Files.delete(copy);
+        Files.delete(archive);
+        Files.delete(csv);
+        Files.delete(dir);
+        System.out.println("cleaned up       = " + Files.notExists(dir));
+    }
+
+    // Windows separates with '\'; print '/' so the lesson reads the same everywhere
+    static String slashes(Path p) { return p.toString().replace(p.getFileSystem().getSeparator(), "/"); }
+}
+  </pre>
+
+  <pre data-output data-for="FilesDemo">
+file             = stock.csv
+size in bytes    = 37
+readAllLines     = 5 lines
+units via lines  = 16
+skus via reader  = 3
+copied to        = archive/stock-2026-10-15.csv
+regular files    = [archive/stock-2026-10-15.csv, stock.csv]
+exists           = true, notExists(nope.csv) = true
+NoSuchFile       = nope.csv
+cleaned up       = true
+  </pre>
+
+  <p>Thirty-seven bytes for five lines: the text block normalises every line ending to <code>\n</code> regardless of the platform the source was saved on, and UTF-8 encodes these ASCII characters one byte each. <code>readAllLines</code> gives five strings including the comment and the blank; the stream version filters both out and sums the quantities; the reader counts the SKUs. Three tools for three shapes of problem, and the choice between them is the subject of the next three subsections.</p>
+
+  <p>Notice what the walk returned: a sorted list of <em>relative</em> paths. <code>Files.walk</code> yields paths in file-system order, which is not specified and differs between NTFS and ext4, so a program that prints or compares them unsorted is non-deterministic. Also notice the order of the four <code>delete</code> calls. <code>Files.delete</code> on a directory that still has a file in it throws <code>DirectoryNotEmptyException</code>; children first, then parents.</p>
+
+  <h3 class="mt-8 mb-3">Three layers, one file</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Byte streams, character streams, and Files helpers">
+      <button type="button" class="lm-tab" role="tab" id="tab-files-io-bytes" aria-controls="panel-files-io-bytes" aria-selected="true" tabindex="0">Byte streams</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-files-io-chars" aria-controls="panel-files-io-chars" aria-selected="false" tabindex="-1">Character streams</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-files-io-nio" aria-controls="panel-files-io-nio" aria-selected="false" tabindex="-1">Files helpers</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-files-io-bytes" aria-labelledby="tab-files-io-bytes" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+// InputStream / OutputStream: raw bytes, no idea what a character is
+try (InputStream in = new BufferedInputStream(Files.newInputStream(csv))) {
+    byte[] header = in.readNBytes(9);          // "# sku,qty" as UTF-8 bytes
+    int b;
+    while ((b = in.read()) != -1) { /* one byte at a time, buffered underneath */ }
+}
+      </pre>
+      <ul class="mb-0">
+        <li>The bottom layer. Images, zips, sockets, anything binary.</li>
+        <li><code>read()</code> returns an <code>int</code> 0–255, or −1 at end of stream — the <code>int</code> is so that −1 cannot collide with a byte value.</li>
+        <li>Unbuffered, every <code>read()</code> is a system call. Wrap in <code>BufferedInputStream</code> or read in chunks.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-files-io-chars" aria-labelledby="tab-files-io-chars" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// Reader / Writer: characters, decoded from bytes by a Charset you choose
+try (BufferedReader in = new BufferedReader(
+        new InputStreamReader(Files.newInputStream(csv), StandardCharsets.UTF_8))) {
+    String line = in.readLine();               // null at end of stream
+}
+// ...which is exactly what Files.newBufferedReader(csv, UTF_8) builds for you
+      </pre>
+      <ul class="mb-0">
+        <li>Text. <code>InputStreamReader</code> is the bridge: it decodes bytes into <code>char</code>s using the charset you pass.</li>
+        <li><code>BufferedReader</code> adds the buffer <em>and</em> <code>readLine()</code>, which handles <code>\n</code>, <code>\r\n</code> and <code>\r</code> alike.</li>
+        <li><code>FileReader</code> and <code>FileWriter</code> exist; before Java 11 they could not take a charset. Prefer the <code>Files</code> factories.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-files-io-nio" aria-labelledby="tab-files-io-nio" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+String whole      = Files.readString(csv, UTF_8);            // small text file
+List<String> rows = Files.readAllLines(csv, UTF_8);          // small text file, by line
+byte[] raw        = Files.readAllBytes(csv);                 // small binary file
+try (Stream<String> s = Files.lines(csv, UTF_8)) { ... }     // any size, lazily
+Files.writeString(out, text, UTF_8);                         // create or truncate
+Files.write(out, rows, UTF_8, StandardOpenOption.APPEND);    // explicit options
+      </pre>
+      <ul class="mb-0">
+        <li>Each helper opens the right stream, buffers it, and closes it — except <code>lines</code> and <code>walk</code>, which return a stream that <em>you</em> must close.</li>
+        <li>The <code>readAll*</code> family loads the entire file into memory. Fine for a config file; wrong for a 4 GB log.</li>
+        <li>Write options default to <code>CREATE, TRUNCATE_EXISTING, WRITE</code> — a silent overwrite unless you say <code>APPEND</code> or <code>CREATE_NEW</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Charsets: say what you mean</h3>
+
+  <p>A file is bytes. Turning bytes into text requires a charset, and a charset is not a property of the file — nothing in <code>stock.csv</code> records that it was written as UTF-8. If the writer and the reader disagree, there is no exception: <code>é</code> written as the two UTF-8 bytes <code>C3 A9</code> and read as ISO-8859-1 comes back as <code>Ã©</code>, and the first anyone hears of it is a customer complaint. Until Java 17 the no-argument overloads used the platform default, which was UTF-8 on Linux and <code>windows-1252</code> on most Windows machines, so code passed its tests on the developer's laptop and corrupted data on the server. Java 18 (JEP 400) made UTF-8 the default everywhere, but the rule has not changed: <strong>pass the charset explicitly</strong>, because explicit is what a reader six months from now can verify.</p>
+
+  <h3 class="mt-8 mb-3">Buffering, and why <code>readLine</code> is not expensive</h3>
+
+  <p>A file system call costs microseconds; a Java method call costs nanoseconds. An unbuffered stream makes one system call per <code>read()</code>; a <code>BufferedReader</code> makes one per 8 KB and serves <code>readLine()</code> from memory. The difference on a hundred-megabyte file is seconds versus minutes. Every <code>Files</code> helper is buffered already. If you build a stream by hand, wrap it — and wrap the <em>outermost</em> layer you read from, so the buffer sits between you and the decoder, not between the decoder and the disk.</p>
+
+  <h3 class="mt-8 mb-3">Lazy streams hold the file open</h3>
+
+  <p><code>Files.lines</code> and <code>Files.walk</code> are the two <code>Files</code> helpers that return a <code>Stream</code>. The stream reads on demand, which is what lets it handle a file bigger than memory — and it means the file descriptor stays open until the stream is closed. <code>Stream</code> implements <code>AutoCloseable</code> precisely for this: always put it in a try-with-resources, as the worked example does on its highlighted lines. Without that, the handle is released only when the garbage collector finalises the stream, which may be never; on Windows the file cannot be deleted or renamed in the meantime, and on any OS a loop that forgets this will eventually hit <em>too many open files</em>.</p>
+
+  <p>For a large file, <code>Files.lines</code> or <code>newBufferedReader</code> and a loop are the only options. <code>readAllLines</code> is simpler, and the right choice when the file is known to be small — but "known" means a config file you ship, not a CSV a customer uploads.</p>
+
+  <h3 class="mt-8 mb-3">Tokenised input: <code>Scanner</code></h3>
+
+  <p><code>Scanner</code> splits a source on whitespace (or a regex you supply) and parses tokens on demand: <code>nextInt()</code>, <code>nextLine()</code>, <code>hasNext()</code>. It is convenient for small structured input and for <code>System.in</code>. It has two traps. It is slow — it compiles regular expressions per token — so it is not for bulk files. And <code>nextInt()</code> leaves the line terminator unread, so a following <code>nextLine()</code> returns an empty string; the fix is an extra <code>nextLine()</code> to consume it, or reading whole lines and parsing them yourself, which is clearer anyway. Construct it as <code>new Scanner(path, StandardCharsets.UTF_8)</code> — the charset argument exists for the same reason as everywhere else.</p>
+
+  <h3 class="mt-8 mb-3">The exceptions are specific</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Subclasses of IOException thrown by java.nio.file and what each means</caption>
+      <thead><tr><th scope="col">Exception</th><th scope="col">Thrown when</th><th scope="col">Usually fix by</th></tr></thead>
+      <tbody>
+        <tr><td><code>NoSuchFileException</code></td><td>The path does not exist</td><td>Checking the working directory — relative paths resolve from where the JVM was started.</td></tr>
+        <tr><td><code>FileAlreadyExistsException</code></td><td><code>createFile</code>, <code>createDirectory</code>, or <code>copy</code> without <code>REPLACE_EXISTING</code> hits an existing target</td><td>Deciding deliberately: replace, append, or refuse.</td></tr>
+        <tr><td><code>AccessDeniedException</code></td><td>Permissions, or on Windows a file another process has open</td><td>Closing the stream that still holds it.</td></tr>
+        <tr><td><code>DirectoryNotEmptyException</code></td><td><code>delete</code> on a directory with contents</td><td>Walking it depth-first and deleting children first.</td></tr>
+        <tr><td><code>NotDirectoryException</code></td><td><code>list</code> or <code>newDirectoryStream</code> on a regular file</td><td>Checking <code>Files.isDirectory</code> first.</td></tr>
+        <tr><td><code>MalformedInputException</code></td><td>Bytes that are not valid in the charset you decoded with</td><td>Using the charset the file was actually written in.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>All of these extend <code>IOException</code>, so a bare <code>catch (IOException e)</code> catches them all — and throws away the diagnosis. Catch the specific one when you can act on it (a missing optional config file is not an error; a missing required one is), and let the rest propagate with the message intact. <code>Files.exists</code> before <code>readString</code> does not replace this: the file can disappear between the two calls, and the check costs a system call that the read was going to make anyway.</p>
+
+  <p>For recursive operations, <code>Files.walk</code> plus a stream is usually enough; <code>Files.walkFileTree</code> with a <code>FileVisitor</code> is the heavier tool when you need to react to directories before and after their contents, or to continue past unreadable subtrees. And if an old API hands you a <code>java.io.File</code>, <code>file.toPath()</code> converts it, and <code>path.toFile()</code> goes back; do the conversion at the boundary and stay in <code>java.nio.file</code>.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Where file code goes wrong</div>
+      <ul class="mb-0">
+        <li><strong><code>Files.lines(path).count()</code> with no try.</strong> Compiles, runs, leaks a file handle every call. The symptom shows up hours later as a failed delete or an exhausted descriptor table.</li>
+        <li><strong>Relative paths and the working directory.</strong> <code>Path.of("config.properties")</code> resolves against the directory the JVM was <em>launched</em> from. It works from your IDE and fails from <code>systemd</code>. Resolve against a known base, or read from the classpath.</li>
+        <li><strong><code>Files.write</code> truncates by default.</strong> Writing a log line with the default options replaces the log. Pass <code>StandardOpenOption.APPEND</code>, and <code>CREATE</code> if the file may not exist.</li>
+        <li><strong>Trusting <code>resolve</code> with user input.</strong> <code>base.resolve(userSupplied)</code> returns <code>userSupplied</code> unchanged if it is absolute, and <code>..</code> segments walk out of <code>base</code>. Normalise, then check <code>startsWith(base)</code>, before touching the disk.</li>
+        <li><strong><code>readAllBytes</code> on a file you did not size first.</strong> Arrays are limited to 2<sup>31</sup> elements and your heap is smaller than that. Stream anything that could be large.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-files-io-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>On a Windows server, <code>long n = Files.lines(report, UTF_8).count();</code> runs and returns the right number, but the scheduled job that then calls <code>Files.delete(report)</code> fails with <code>AccessDeniedException</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-files-io-1"><span><code>count()</code> is a terminal operation and leaves the stream in a consumed-but-locked state until the JVM exits <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-files-io-1"><span>The service account lacks delete permission; <code>lines</code> is unrelated <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-files-io-1"><span>The stream was never closed, so the file handle is still open and Windows refuses to delete an open file; wrapping the stream in try-with-resources fixes it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-files-io-1"><span><code>Files.lines</code> memory-maps the file, and mapped files cannot be deleted on any platform <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>Files.lines</code> opens the file and the returned <code>Stream</code> owns that handle; a terminal operation consumes the elements but does not close the stream. The handle is released when <code>close()</code> runs — which here is never, or whenever the garbage collector gets round to it. Windows enforces sharing locks, so an open file cannot be deleted; on Linux the delete would succeed and the leak would go unnoticed for longer.</p>
+        <p class="mb-0"><strong>A</strong> invents a state: a consumed stream is just a closed-for-reuse stream, not a lock, and the resource is released by <code>close()</code>, not by exit. <strong>B</strong> would fail every run, not only the ones after a count. <strong>D</strong>: <code>lines</code> uses an ordinary buffered reader, not a memory map, and even mapped files can be deleted on Linux.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-files-io-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A customer's export was written by a tool that uses <code>windows-1252</code>. Your import reads it with <code>Files.readAllLines(p, StandardCharsets.UTF_8)</code>. The file contains a product called <code>Écrou M8</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-files-io-2"><span>Java detects the encoding from the bytes and reads it correctly <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-files-io-2"><span><code>readAllLines</code> throws <code>MalformedInputException</code>, because the single byte <code>0xC9</code> for <code>É</code> is not a valid UTF-8 sequence <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-files-io-2"><span>The name is silently read as <code>?crou M8</code> and the import proceeds <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-files-io-2"><span>The name is read correctly because <code>É</code> is in the Latin-1 range shared by both encodings <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> In windows-1252, <code>É</code> is the single byte <code>C9</code>. A UTF-8 decoder reads <code>C9</code> as the start of a two-byte sequence and finds <code>63</code> (<code>c</code>) next, which is not a valid continuation byte. The <code>Files</code> helpers use a decoder configured to <em>report</em> malformed input, so you get an exception naming the position. That is the good outcome: the import stops instead of storing garbage.</p>
+        <p class="mb-0"><strong>A</strong>: nothing in a file declares its encoding and Java does not guess. <strong>C</strong> is what a hand-built <code>InputStreamReader</code> does — its decoder defaults to <em>replacing</em> bad input with <code>U+FFFD</code>, which is why the same bug in older code is silent. <strong>D</strong> confuses code points with bytes: the character is the same, the bytes are not.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-files-io-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>An upload endpoint saves files as <code>uploads.resolve(filename)</code> where <code>filename</code> comes from the request. Which checks are needed to keep the write inside <code>uploads</code>? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>normalize()</code> the resolved path, then verify it <code>startsWith(uploads)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Reject filenames containing <code>/</code>, which is the only separator Java recognises <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Nothing — <code>resolve</code> always produces a child of the base path <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Reject an absolute <code>filename</code>, because <code>resolve</code> returns it unchanged <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> <code>uploads.resolve("../../etc/passwd")</code> is a legal path that <code>normalize()</code> turns into something outside <code>uploads</code>; the segment-wise <code>startsWith</code> check catches it. And <code>uploads.resolve("/etc/passwd")</code> is simply <code>/etc/passwd</code> — the documented behaviour for an absolute argument — so absolute input must be rejected before or by the same check. Simplest of all is to keep only <code>Path.of(filename).getFileName()</code>, which cannot contain a separator.</p>
+        <p class="mb-0"><strong>B</strong> is incomplete: on Windows <code>\</code> is also a separator, and it does nothing about <code>..</code>. <strong>C</strong> is the assumption that makes directory-traversal bugs.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="files-io"> Mark this section complete
+  </label>
+</section>

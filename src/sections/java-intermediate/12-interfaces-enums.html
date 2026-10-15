@@ -1,0 +1,310 @@
+<section class="lm-section" id="interfaces-enums" data-title="Interfaces and enums in depth" data-num="3">
+  <p class="lm-eyebrow">Section 3</p>
+  <h2 class="mb-4">Interfaces and enums in depth</h2>
+
+  <p>Fundamentals §8 drew the line between an abstract class and an interface: state on one side, pure contract on the other. That line moved in Java 8. An interface can now ship <em>behaviour</em> — <code>default</code> methods with bodies, <code>static</code> factories, and since Java 9 <code>private</code> helpers — while still carrying no instance state. The reason was pragmatic: <code>Collection.stream()</code> had to be added to an interface that thousands of third-party classes already implemented, without breaking a single one of them. A method with a body that implementers inherit automatically was the only way.</p>
+
+  <p>That convenience creates one genuinely new problem — a class can now inherit <em>two</em> bodies for the same method — and the language resolves it with three rules you need to know by heart. The second half of this section does the same for <code>enum</code>, which is far more than a list of names: each constant is a singleton object that can carry fields, constructors, and its own method bodies.</p>
+
+  <h3 class="mt-8 mb-3">Four kinds of interface method</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Interface member kinds, their modifiers and what they are for</caption>
+      <thead><tr><th scope="col">Kind</th><th scope="col">Written as</th><th scope="col">Implementers get</th><th scope="col">Use it for</th></tr></thead>
+      <tbody>
+        <tr><td>Abstract</td><td><code>int priceInCents();</code></td><td>an obligation — implicitly <code>public abstract</code></td><td>the contract itself</td></tr>
+        <tr><td>Default</td><td><code>default String describe() { … }</code></td><td>a body they may keep or override</td><td>evolving a published interface; convenience built on the abstract methods</td></tr>
+        <tr><td>Static</td><td><code>static Priced of(int c) { … }</code></td><td>nothing — called only as <code>Priced.of(…)</code>, never inherited</td><td>factories and utilities that belong with the type</td></tr>
+        <tr><td>Private</td><td><code>private int handling() { … }</code></td><td>nothing — invisible outside the interface</td><td>sharing code between two defaults without exposing it</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">A field in an interface is always <code>public static final</code> whether you write the modifiers or not. It is a constant, not state — an interface still has no instance fields and never will.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: all three resolution rules</h3>
+
+  <p>Three classes, each inheriting <code>describe()</code> from more than one place. The output shows which body ran and the comments name the rule that chose it.</p>
+
+  <pre data-code data-lang="java" data-file="DefaultMethods.java" data-verify="DefaultMethods" data-hi="17,20,21,22,30,36">
+public class DefaultMethods {
+
+    interface Priced {
+        int priceInCents();
+        default String describe() { return "priced at " + priceInCents() + "c"; }
+        static Priced of(int cents) { return () -> cents; }        // static: called as Priced.of(...)
+    }
+
+    interface Shippable {
+        int shippingInCents();
+        default String describe() { return "ships for " + shippingInCents() + "c"; }
+        default int totalInCents(int price) { return price + shippingInCents() + handling(); }
+        private int handling() { return 50; }                        // private: shared by defaults only
+    }
+
+    // rule 3: two unrelated defaults with one signature -> the class MUST override
+    static class Bolt implements Priced, Shippable {
+        public int priceInCents() { return 80; }
+        public int shippingInCents() { return 150; }
+        @Override public String describe() {
+            return Priced.super.describe() + ", " + Shippable.super.describe();
+        }
+    }
+
+    interface Fragile extends Shippable {
+        @Override default String describe() { return "fragile: " + Shippable.super.describe(); }
+    }
+    // rule 2: the more specific interface wins -> Fragile's default, not Shippable's
+    static class Lens implements Shippable, Fragile {
+        public int shippingInCents() { return 900; }
+    }
+
+    static class Base { public String describe() { return "a plain class method"; } }
+    // rule 1: a superclass method always beats an interface default
+    static class Girder extends Base implements Priced {
+        public int priceInCents() { return 120_000; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("Bolt:   " + new Bolt().describe());
+        System.out.println("Lens:   " + new Lens().describe());
+        System.out.println("Girder: " + new Girder().describe());
+        System.out.println("total:  " + new Lens().totalInCents(1_000));
+        System.out.println("static: " + Priced.of(25).describe());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="DefaultMethods">
+Bolt:   priced at 80c, ships for 150c
+Lens:   fragile: ships for 900c
+Girder: a plain class method
+total:  1950
+static: priced at 25c
+  </pre>
+
+  <p>The rules, in the order the compiler applies them:</p>
+  <ol class="max-w-prose">
+    <li><strong>A class wins over any interface.</strong> If a superclass — however far up — supplies a concrete method, every interface default with that signature is ignored. <code>Girder</code> prints <code>Base</code>'s text and <code>Priced.describe</code> never runs. This is what keeps old code old: adding a default to an interface cannot change what an existing class hierarchy does.</li>
+    <li><strong>A more specific interface wins over a less specific one.</strong> <code>Fragile extends Shippable</code> and overrides the default, so for <code>Lens</code> the <code>Fragile</code> body is chosen even though <code>Lens</code> names <code>Shippable</code> first. Declaration order is irrelevant.</li>
+    <li><strong>Otherwise the class must decide.</strong> <code>Priced</code> and <code>Shippable</code> are unrelated and both supply <code>describe()</code>. Delete <code>Bolt</code>'s override and the compiler says <code>class Bolt inherits unrelated defaults for describe() from types Priced and Shippable</code>. The override may do anything, including delegate to one or both with the <code>Interface.super.method()</code> syntax — the only place that form is legal.</li>
+  </ol>
+
+  <p>Note the <code>private</code> helper: <code>handling()</code> is callable from <code>totalInCents</code> but not from <code>Lens</code>, so the interface can factor out shared logic without widening its public surface.</p>
+
+  <h3 class="mt-8 mb-3">Resolve a diamond yourself</h3>
+
+  <div class="lm-card" data-sandbox="diamond-resolver">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3 3 12l9 9 9-9-9-9Z"/><path d="M12 3v18M3 12h18"/></svg>
+      Which <code>describe()</code> does <code>new Bolt().describe()</code> run?
+    </div>
+    <p class="text-sm text-ink-muted">Choose where <code>describe()</code> is defined. <code>Bolt extends Base implements Priced, Shippable</code>, and <code>Bolt</code> itself has no override.</p>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Superclass <code>Base</code></span>
+        <select data-sb-base>
+          <option value="none" selected>does not define it</option>
+          <option value="yes">defines describe()</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Interface <code>Priced</code></span>
+        <select data-sb-a>
+          <option value="none">does not define it</option>
+          <option value="default" selected>default describe()</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Interface <code>Shippable</code></span>
+        <select data-sb-b>
+          <option value="none">does not define it</option>
+          <option value="default" selected>default describe(), unrelated to Priced</option>
+          <option value="sub">default describe(), and extends Priced</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Functional interfaces, briefly</h3>
+
+  <p>An interface with exactly <em>one</em> abstract method — default, static and private methods do not count — is a <strong>functional interface</strong>, and that single method is what a lambda implements. <code>Priced</code> above qualifies, which is why <code>Priced.of</code> could return <code>() -> cents</code>. <code>Comparator</code>, <code>Runnable</code> and everything in <code>java.util.function</code> are functional interfaces. §4 is about nothing else.</p>
+
+  <h3 class="mt-8 mb-3">Enums are classes</h3>
+
+  <p>An <code>enum</code> declares a class with a fixed, compiler-known set of instances. Each constant is created once, during class initialisation, by calling the enum's constructor — which is why that constructor is always <code>private</code> and why <code>==</code> is the correct way to compare enum values. Everything a class can have, an enum can have: fields, methods, constructors, interfaces, and even a different method body per constant.</p>
+
+  <pre data-code data-lang="java" data-file="Enums.java" data-verify="Enums" data-hi="10,11,12,23,28">
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.Map;
+
+public class Enums {
+
+    interface Describable { String describe(); }
+
+    enum Category implements Describable {
+        FASTENER("Fasteners", 1.0) {
+            @Override int shippingInCents(int weightGrams) { return 150; }            // flat rate
+        },
+        STRUCTURAL("Structural steel", 2.5) {
+            @Override int shippingInCents(int weightGrams) { return weightGrams * 3; }
+        },
+        TOOLING("Tooling", 1.2) {
+            @Override int shippingInCents(int weightGrams) { return 500 + weightGrams; }
+        };
+
+        private final String label;
+        private final double multiplier;
+
+        Category(String label, double multiplier) {      // always private: nobody else can call new
+            this.label = label;
+            this.multiplier = multiplier;
+        }
+
+        abstract int shippingInCents(int weightGrams);   // every constant must supply a body
+
+        String label() { return label; }
+        double multiplier() { return multiplier; }
+
+        @Override public String describe() { return label + " (x" + multiplier + ")"; }
+    }
+
+    public static void main(String[] args) {
+        for (Category c : Category.values()) {
+            System.out.printf("%-10s ordinal=%d  %-22s ship(200g)=%d%n",
+                    c, c.ordinal(), c.describe(), c.shippingInCents(200));
+        }
+
+        Category parsed = Category.valueOf("TOOLING");
+        System.out.println("valueOf -> " + parsed + ", same object: " + (parsed == Category.TOOLING));
+
+        Map<Category, Integer> stockByCategory = new EnumMap<>(Category.class);
+        stockByCategory.put(Category.TOOLING, 4);
+        stockByCategory.put(Category.FASTENER, 1_200);
+        System.out.println("EnumMap keeps declaration order: " + stockByCategory);
+
+        EnumSet<Category> heavy = EnumSet.of(Category.STRUCTURAL, Category.TOOLING);
+        System.out.println("complement of " + heavy + " is " + EnumSet.complementOf(heavy));
+
+        String storage = switch (parsed) {               // exhaustive: no default needed
+            case FASTENER   -> "bin";
+            case STRUCTURAL -> "yard";
+            case TOOLING    -> "locked cage";
+        };
+        System.out.println("switch -> " + storage);
+
+        try {
+            Category.valueOf("tooling");
+        } catch (IllegalArgumentException e) {
+            System.out.println("valueOf is exact-match only: " + e.getMessage());
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Enums">
+FASTENER   ordinal=0  Fasteners (x1.0)       ship(200g)=150
+STRUCTURAL ordinal=1  Structural steel (x2.5) ship(200g)=600
+TOOLING    ordinal=2  Tooling (x1.2)         ship(200g)=700
+valueOf -> TOOLING, same object: true
+EnumMap keeps declaration order: {FASTENER=1200, TOOLING=4}
+complement of [STRUCTURAL, TOOLING] is [FASTENER]
+switch -> locked cage
+valueOf is exact-match only: No enum constant Enums.Category.tooling
+  </pre>
+
+  <p>Three things in that program deserve a closer look.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Enum features">
+      <button type="button" class="lm-tab" role="tab" id="tab-interfaces-enums-body" aria-controls="panel-interfaces-enums-body" aria-selected="true" tabindex="0">Constant-specific bodies</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-interfaces-enums-coll" aria-controls="panel-interfaces-enums-coll" aria-selected="false" tabindex="-1">EnumMap and EnumSet</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-interfaces-enums-switch" aria-controls="panel-interfaces-enums-switch" aria-selected="false" tabindex="-1">switch on an enum</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-interfaces-enums-body" aria-labelledby="tab-interfaces-enums-body" tabindex="0">
+      <p>Writing <code>{ … }</code> after a constant's arguments creates an anonymous subclass of the enum for that one constant. An <code>abstract</code> method on the enum then forces every constant to supply its own body, and the compiler refuses a new constant that forgets. This replaces the <code>switch (this)</code> inside a method that silently falls through when someone adds a constant — the behaviour lives next to the data it belongs to.</p>
+      <p class="mb-0">The cost is that <code>FASTENER.getClass()</code> is a subclass, not <code>Category</code> itself. Use <code>getDeclaringClass()</code> if you ever need the enum type reflectively.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-interfaces-enums-coll" aria-labelledby="tab-interfaces-enums-coll" tabindex="0" hidden>
+      <p>An enum has a known number of constants, each with a fixed <code>ordinal()</code>. <code>EnumMap</code> exploits that: it is an array indexed by ordinal, so <code>get</code> and <code>put</code> are a single array access with no hashing, no boxing and no collisions, and iteration is always in declaration order. <code>EnumSet</code> is a bit vector — one <code>long</code> for up to 64 constants — which makes <code>contains</code>, union and <code>complementOf</code> single machine instructions.</p>
+      <p class="mb-0">Prefer them over <code>HashMap</code>/<code>HashSet</code> whenever the key is an enum. They are also the right way to represent a set of flags; a bit-mask <code>int</code> is what they replace.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-interfaces-enums-switch" aria-labelledby="tab-interfaces-enums-switch" tabindex="0" hidden>
+      <p>Inside a <code>switch</code> on an enum you write the bare constant name — <code>case TOOLING</code>, not <code>case Category.TOOLING</code>. The compiler knows the type from the selector. A switch <em>expression</em> (the arrow form that yields a value) must be exhaustive: cover every constant and you need no <code>default</code>, and adding a fourth constant later becomes a compile error at every such switch rather than a silent fall-through. §9 takes this further with sealed types.</p>
+      <p class="mb-0">Avoid writing a <code>default</code> in an enum switch expression that could be exhaustive. It compiles today, and it hides tomorrow's missing case.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Never persist <code>ordinal()</code>.</strong> It is the constant's position in the source file. Insert a constant in the middle and every stored number now means something else. Store <code>name()</code>, or an explicit field such as a database code, and look it up on the way back in.</li>
+        <li><strong><code>valueOf</code> is exact and throws.</strong> It compares the full name, case-sensitively, and raises <code>IllegalArgumentException</code> — not <code>null</code> — on a miss. User input needs a guard: normalise it, or loop over <code>values()</code> comparing with <code>equalsIgnoreCase</code>.</li>
+        <li><strong>A default method cannot override <code>Object</code> methods.</strong> <code>default String toString()</code> in an interface is a compile error. Every class already has one from <code>Object</code>, and rule 1 says the class would win anyway.</li>
+        <li><strong>Defaults do not let an interface hold state.</strong> A default method can only call other interface methods. If it needs a field, you wanted an abstract class.</li>
+        <li><strong>An enum is the correct singleton.</strong> <code>enum Registry { INSTANCE; … }</code> is serialisation-safe and reflection-proof, which the double-checked-locking singleton is not. Java Advanced revisits why.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-interfaces-enums-1" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>class Cart implements Priced, Shippable</code>, where both unrelated interfaces declare <code>default String describe()</code> and <code>Cart</code> does not override it. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-interfaces-enums-1"><span>The first interface listed wins <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-interfaces-enums-1"><span>The JVM picks one at runtime based on the object <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-interfaces-enums-1"><span>It compiles; calling <code>describe()</code> throws <code>IncompatibleClassChangeError</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-interfaces-enums-1"><span>Compile error: <code>Cart</code> must override <code>describe()</code> itself <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> Rule 3: two unrelated defaults with the same signature are a conflict the class must resolve, and the compiler refuses to guess. The override can pick one with <code>Priced.super.describe()</code>, combine both, or do something new.</p>
+        <p class="mb-0"><strong>A</strong> is a common guess but declaration order never affects resolution. <strong>B</strong> confuses this with dynamic dispatch, which picks among <em>overrides in a class hierarchy</em>, not among interface defaults. <strong>C</strong> describes what can happen when a class file is compiled against one version of an interface and run against another — a binary-compatibility problem, not a source one.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-interfaces-enums-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A team stores each product's category in the database as <code>category.ordinal()</code>. A year later someone adds <code>ELECTRICAL</code> between <code>FASTENER</code> and <code>STRUCTURAL</code>. What is the consequence?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-interfaces-enums-2"><span>None — ordinals are assigned by the JVM and stay stable <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-interfaces-enums-2"><span>Every stored <code>1</code> that meant <code>STRUCTURAL</code> now reads back as <code>ELECTRICAL</code>, silently <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-interfaces-enums-2"><span><code>values()[1]</code> throws <code>ArrayIndexOutOfBoundsException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-interfaces-enums-2"><span>The compiler rejects inserting a constant into an existing enum <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> An ordinal is nothing more than the source-order index. Shifting the constants shifts every number, and nothing fails loudly: the data simply reads back as the wrong category. Persist <code>name()</code> or a dedicated code field instead.</p>
+        <p class="mb-0"><strong>A</strong> is false — the ordinal is fixed at compile time from the declaration order. <strong>C</strong>: the array just got longer; index 1 is valid and returns the wrong constant. <strong>D</strong>: the compiler has no notion of an enum being "published" and allows any edit.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-interfaces-enums-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>interface Audited { default String toString() { return "audited"; } }</code> — does this compile, and why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-interfaces-enums-3"><span>Yes, and every implementer prints <code>audited</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-interfaces-enums-3"><span>Yes, but it is ignored because <code>toString</code> is <code>final</code> in <code>Object</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-interfaces-enums-3"><span>No — a default method may not override a public method of <code>Object</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-interfaces-enums-3"><span>No — default methods cannot return <code>String</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The language forbids it outright, and rule 1 explains why it would be pointless anyway: every class already inherits <code>toString</code> from <code>Object</code>, a class, and a class method always beats an interface default.</p>
+        <p class="mb-0"><strong>A</strong> would require interfaces to beat classes, which is backwards. <strong>B</strong>: <code>toString</code> is not <code>final</code> — you override it all the time. <strong>D</strong> is invented; default methods can return anything.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="interfaces-enums"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,305 @@
+<section class="lm-section" id="records" data-title="Records" data-num="8">
+  <p class="lm-eyebrow">Section 8</p>
+  <h2 class="mb-4">Records</h2>
+
+  <p>Fundamentals §10 ended with the observation that <code>equals</code>, <code>hashCode</code> and <code>toString</code> are forty lines of ceremony you get wrong once per career, and that a <code>record</code> gives you all three for free. Here is the full story. A record is a class whose entire state is declared in its header, and from that header the compiler derives everything a value type needs: a <code>private final</code> field per component, a <em>canonical constructor</em> that takes them all, an accessor per component, and <code>equals</code>, <code>hashCode</code> and <code>toString</code> that use every component. What you give up is exactly the freedom that made the hand-written versions error-prone: no extra instance fields, no setters, no superclass, no subclasses.</p>
+
+  <p>The design intent is the phrase "a transparent carrier for immutable data". <code>OrderLine</code> is one: three values, no identity beyond them, equal when the values are equal. <code>InventoryService</code> is not: it has behaviour, mutable state and a lifecycle. Knowing which of your classes are records and which are not is most of the skill.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Records.java" data-verify="Records" data-hi="8,9,10,11,12,13,14" data-bad="30">
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Records {
+
+    record OrderLine(String sku, int qty, int unitPriceInCents) {
+        // compact constructor: no parameter list; runs BEFORE the fields are assigned
+        OrderLine {
+            if (sku == null || sku.isBlank()) throw new IllegalArgumentException("sku required");
+            if (qty <= 0) throw new IllegalArgumentException("qty must be positive: " + qty);
+            sku = sku.strip().toUpperCase();          // reassigns the PARAMETER; the field is set from it after
+        }
+        int totalInCents() { return qty * unitPriceInCents; }
+    }
+
+    record Address(String city, String country) { }
+
+    record Order(long id, Address shipTo, List<OrderLine> lines) {
+        Order {
+            lines = List.copyOf(lines);               // defensive, immutable copy
+        }
+        static Order of(long id, Address shipTo, OrderLine... lines) {   // static factory
+            return new Order(id, shipTo, List.of(lines));
+        }
+        int totalInCents() { return lines.stream().mapToInt(OrderLine::totalInCents).sum(); }
+    }
+
+    record Bag(List<String> items) { }                // NO defensive copy: deliberately leaky
+
+    public static void main(String[] args) {
+        OrderLine a = new OrderLine("  bolt-7 ", 10, 80);
+        OrderLine b = new OrderLine("BOLT-7", 10, 80);
+        System.out.println("toString  = " + a);
+        System.out.println("equals    = " + a.equals(b) + ", same hash = " + (a.hashCode() == b.hashCode()));
+        System.out.println("accessor  = " + a.sku() + " x" + a.qty());
+
+        try { new OrderLine("NUT-3", 0, 25); }
+        catch (IllegalArgumentException e) { System.out.println("rejected  = " + e.getMessage()); }
+
+        OrderLine nut = new OrderLine("NUT-3", 4, 25);
+        List<OrderLine> lines = new ArrayList<>(List.of(a, nut));
+        Order order = Order.of(1001L, new Address("Leeds", "UK"), a, nut);
+        Order copied = new Order(1001L, new Address("Leeds", "UK"), lines);
+        lines.add(new OrderLine("CAM-9", 1, 2_300));  // the caller mutates its own list afterwards
+        System.out.println("totals    = " + order.totalInCents() + "c and " + copied.totalInCents() + "c (the copy did not change)");
+        System.out.println("nested eq = " + order.equals(copied));
+
+        Map<OrderLine, Integer> picked = new HashMap<>();
+        picked.merge(a, 1, Integer::sum);
+        picked.merge(b, 1, Integer::sum);               // an equal record is the same key
+        System.out.println("map keys  = " + picked.size() + ", picks of BOLT-7 = " + picked.get(b));
+
+        // shallow immutability: the reference cannot change, the list behind it can
+        List<String> items = new ArrayList<>(List.of("x"));
+        Bag bag = new Bag(items);
+        items.add("y");
+        System.out.println("leaky bag = " + bag.items());
+
+        // a local record is a named, typed intermediate for a pipeline
+        record SkuTotal(String sku, int total) { }
+        List<SkuTotal> totals = order.lines().stream()
+            .map(l -> new SkuTotal(l.sku(), l.totalInCents()))
+            .toList();
+        System.out.println("per line  = " + totals);
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Records">
+toString  = OrderLine[sku=BOLT-7, qty=10, unitPriceInCents=80]
+equals    = true, same hash = true
+accessor  = BOLT-7 x10
+rejected  = qty must be positive: 0
+totals    = 900c and 900c (the copy did not change)
+nested eq = true
+map keys  = 1, picks of BOLT-7 = 2
+leaky bag = [x, y]
+per line  = [SkuTotal[sku=BOLT-7, total=800], SkuTotal[sku=NUT-3, total=100]]
+  </pre>
+
+  <p>Read the first three output lines against the highlighted record. <code>"  bolt-7 "</code> went in; <code>BOLT-7</code> came out, because the compact constructor normalised the <em>parameter</em> and the compiler-generated assignment <code>this.sku = sku</code> ran afterwards. Two lines built from different input strings are equal and share a hash code, because both derived members use the normalised fields. And <code>nested eq</code> is <code>true</code> because record equality recurses: <code>Order.equals</code> compares its <code>Address</code> with <code>Address.equals</code> and its <code>List</code> with <code>List.equals</code>, element by element.</p>
+
+  <p>The red line is the counter-example. <code>Bag</code> stores the caller's <code>ArrayList</code> as-is, so the caller's later <code>add</code> is visible through <code>bag.items()</code>. The record's <em>reference</em> is final; the object it refers to is whatever you put there. <code>Order</code> avoids this with <code>List.copyOf</code>, which is both a copy and immutable — and is a no-op when handed a list that is already immutable, so the <code>of</code> factory's <code>List.of</code> costs nothing extra.</p>
+
+  <h3 class="mt-8 mb-3">What the compiler writes for you</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Record anatomy">
+      <button type="button" class="lm-tab" role="tab" id="tab-records-decl" aria-controls="panel-records-decl" aria-selected="true" tabindex="0">You write</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-records-gen" aria-controls="panel-records-gen" aria-selected="false" tabindex="-1">The compiler generates</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-records-ctor" aria-controls="panel-records-ctor" aria-selected="false" tabindex="-1">Canonical vs compact</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-records-decl" aria-labelledby="tab-records-decl" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+record OrderLine(String sku, int qty, int unitPriceInCents) { }
+      </pre>
+      <p class="mb-0">The header is the whole state. Components are listed once and become fields, constructor parameters, accessors and the members of <code>equals</code>/<code>hashCode</code>/<code>toString</code>, in that order.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-records-gen" aria-labelledby="tab-records-gen" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+final class OrderLine extends java.lang.Record {
+    private final String sku;
+    private final int qty;
+    private final int unitPriceInCents;
+
+    OrderLine(String sku, int qty, int unitPriceInCents) {   // canonical constructor
+        this.sku = sku; this.qty = qty; this.unitPriceInCents = unitPriceInCents;
+    }
+    public String sku() { return sku; }                       // accessors: no "get" prefix
+    public int qty() { return qty; }
+    public int unitPriceInCents() { return unitPriceInCents; }
+
+    public boolean equals(Object o) { /* same class and every component equal */ }
+    public int hashCode()           { /* combined from every component */ }
+    public String toString()        { /* OrderLine[sku=…, qty=…, unitPriceInCents=…] */ }
+}
+      </pre>
+      <p class="mb-0">Every one of these may be declared explicitly to override the generated version. Do it for an accessor that must return a defensive copy, or a <code>toString</code> that must hide a secret — and never for <code>equals</code> unless you can state why two records with equal components should be unequal.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-records-ctor" aria-labelledby="tab-records-ctor" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// Canonical: full parameter list, you MUST assign every field yourself
+record OrderLine(String sku, int qty, int unitPriceInCents) {
+    OrderLine(String sku, int qty, int unitPriceInCents) {
+        if (qty <= 0) throw new IllegalArgumentException("qty");
+        this.sku = sku.strip();
+        this.qty = qty;
+        this.unitPriceInCents = unitPriceInCents;
+    }
+}
+
+// Compact: no parameter list, parameters are in scope, fields are assigned
+// from the (possibly reassigned) parameters AFTER your body runs
+record OrderLine(String sku, int qty, int unitPriceInCents) {
+    OrderLine {
+        if (qty <= 0) throw new IllegalArgumentException("qty");
+        sku = sku.strip();          // legal: it is the parameter
+        // this.sku = sku;          // compile error: the field is assigned for you
+    }
+}
+      </pre>
+      <p class="mb-0">Use the compact form unless you need to do something the automatic assignment cannot. Any other constructor you add (a two-argument convenience, say) must delegate with <code>this(…)</code> to the canonical one, so validation runs exactly once on every path.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Put the compact constructor in order</h3>
+
+  <p>Five lines of a validating, normalising compact constructor for <code>Address</code>. Order them so that the record can never hold a blank city and always stores the country code in upper case. Remember that the compact body has no parameter list and never assigns <code>this.x</code>.</p>
+
+  <div class="lm-card lm-order-wrap" data-order data-solution="a,b,c,d,e">
+    <ol class="lm-order">
+      <li class="lm-order-item" data-id="c" data-shuffle="0">
+        <span class="lm-order-pos">1</span>
+        <span>    country = country.strip().toUpperCase();</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="e" data-shuffle="1">
+        <span class="lm-order-pos">2</span>
+        <span>}</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="a" data-shuffle="2">
+        <span class="lm-order-pos">3</span>
+        <span>Address {</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="d" data-shuffle="3">
+        <span class="lm-order-pos">4</span>
+        <span>    if (country.length() != 2) throw new IllegalArgumentException("ISO country code required");</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="b" data-shuffle="4">
+        <span class="lm-order-pos">5</span>
+        <span>    if (city == null || city.isBlank()) throw new IllegalArgumentException("city required");</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+    </ol>
+    <div class="flex gap-2 mt-3">
+      <button type="button" class="lm-btn lm-btn--primary" data-order-check>Check order</button>
+      <button type="button" class="lm-btn" data-order-reset>Reset</button>
+    </div>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">Correct. Validate the cheap, independent condition first; normalise <code>country</code> <em>before</em> checking its length, so <code>" gb "</code> is accepted as <code>GB</code> rather than rejected for its padding. The implicit <code>this.city = city; this.country = country;</code> runs after the closing brace, picking up the normalised parameter. Swapping lines 3 and 4 would also compile — but then <code>" gb "</code> would throw.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The rules, and the reasons</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Record restrictions and their rationale</caption>
+      <thead><tr><th scope="col">Rule</th><th scope="col">Because</th></tr></thead>
+      <tbody>
+        <tr><td>No instance fields beyond the components</td><td>The header must be the complete state, or the generated <code>equals</code> would be wrong. Static fields are allowed.</td></tr>
+        <tr><td>Implicitly <code>final</code>; cannot be <code>abstract</code></td><td>A subclass could add state the header does not know about.</td></tr>
+        <tr><td>Cannot <code>extends</code> anything</td><td>Every record already extends <code>java.lang.Record</code>. It <em>may</em> implement interfaces, including <code>Comparable</code>.</td></tr>
+        <tr><td>Components are <code>final</code>; no setters are generated</td><td>Immutability is the point. "Change" one by constructing a new record — <code>withQty(int)</code> style methods are a common addition.</td></tr>
+        <tr><td>Accessors are <code>name()</code>, not <code>getName()</code></td><td>A deliberate break from the JavaBeans convention; frameworks that reflect on getters have mostly caught up.</td></tr>
+        <tr><td>Native methods are forbidden; instance initialiser blocks are forbidden</td><td>All initialisation must be visible in the constructor.</td></tr>
+        <tr><td>May be nested, local, or generic: <code>record Pair&lt;A, B&gt;(A first, B second)</code></td><td>A nested record is implicitly <code>static</code>; a local one cannot capture locals from the enclosing method.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">When not to use one</h3>
+
+  <ul>
+    <li><strong>The thing has identity.</strong> A <code>Customer</code> whose name can change is still the same customer; two records with equal components are indistinguishable by design. If "same object" matters, it is a class.</li>
+    <li><strong>The thing changes.</strong> <code>InventoryService</code> mutates. A record of its state could be a <em>snapshot</em>, but the service itself is a class.</li>
+    <li><strong>It needs a superclass.</strong> Records cannot extend. Share behaviour through an interface with <code>default</code> methods (§3) or composition.</li>
+    <li><strong>It is a JPA entity or a framework bean</strong> that requires a no-argument constructor and setters. Records have neither, by design.</li>
+    <li><strong>Some components are derived.</strong> If <code>total</code> is always <code>qty * price</code>, it is a method, not a component — otherwise two lines can disagree with themselves and <code>equals</code> will notice.</li>
+  </ul>
+
+  <p>What is left — DTOs, map keys, multi-value returns, stream intermediates, configuration values, messages, coordinates, money — is most of the small classes in any codebase. And because a record's components are exactly its accessors, the pattern-matching <code>switch</code> in §9 can take one apart: <code>case OrderLine(var sku, var qty, var price)</code> is only possible because the compiler knows the record's shape.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Record gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Immutability is shallow.</strong> A component of type <code>List</code>, array or <code>Date</code> is a reference, and the record cannot stop anyone mutating what it points to. Copy in the compact constructor (<code>List.copyOf</code>, <code>array.clone()</code>) and, for arrays, copy again in the accessor.</li>
+        <li><strong>Arrays make <code>equals</code> useless.</strong> The generated <code>equals</code> uses <code>Objects.equals</code> on each component, and for arrays that is identity. A <code>record Row(int[] cells)</code> is never equal to another <code>Row</code> with the same numbers. Use a <code>List</code>.</li>
+        <li><strong>A mutable component breaks hash-based collections.</strong> Same lesson as Fundamentals §10: if a component's own <code>hashCode</code> can change, the record's can, and a <code>HashSet</code> loses it.</li>
+        <li><strong>Overriding an accessor changes <code>toString</code> but not <code>equals</code>.</strong> <code>equals</code> and <code>hashCode</code> read the <em>fields</em> directly, not the accessors. An accessor that returns a copy is fine; one that returns something different from the field makes the record lie.</li>
+        <li><strong>Adding a component is a breaking change for every caller.</strong> The canonical constructor's signature changes. Keep a static factory or an explicit convenience constructor as the public entry point if the shape is likely to evolve.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-records-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Inside a compact constructor you write <code>this.sku = sku.strip();</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-records-1"><span>It works — that is how you normalise a component <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-records-1"><span>Compile error — the field is assigned automatically after the body; you must assign the parameter <code>sku</code> instead <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-records-1"><span>It compiles but the automatic assignment overwrites it with the original value <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-records-1"><span>Compile error — compact constructors cannot contain statements, only validation <code>throw</code>s <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> In a compact constructor the fields are definitely assigned by the compiler at the end of the body, so assigning <code>this.sku</code> yourself is an error ("cannot assign a value to final variable"). The idiom is to reassign the parameter — <code>sku = sku.strip();</code> — which the automatic assignment then picks up.</p>
+        <p class="mb-0"><strong>A</strong> describes the canonical (full-parameter-list) constructor, where you do assign fields yourself. <strong>C</strong> would be a terrible design and is not what happens — the compiler rejects the code instead. <strong>D</strong> is wrong: any statement is allowed, including logging, normalisation and computation; only field assignment is reserved.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-records-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>record Order(long id, List&lt;OrderLine&gt; lines) { }</code> with no explicit constructor. A caller does <code>var l = new ArrayList&lt;OrderLine&gt;(); var o = new Order(1, l); l.add(line);</code>. What is <code>o.lines().size()</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-records-2"><span>0 — records copy their components <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-records-2"><span><code>l.add</code> throws — the list became immutable when the record captured it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-records-2"><span>1 — the record holds the caller's list, so the mutation is visible <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-records-2"><span>It does not compile — a record component cannot be a mutable type <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The generated canonical constructor is a plain <code>this.lines = lines</code>. The record's field is final, but it refers to the caller's <code>ArrayList</code>, which the caller can still change. This is the <code>Bag</code> case from the worked example. A compact constructor with <code>lines = List.copyOf(lines);</code> is the fix, and it is the first thing to write for any record with a collection component.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>B</strong> credit records with behaviour they do not have — nothing is copied or frozen unless you write it. <strong>D</strong> is wrong: a component can be any type, which is exactly why shallow immutability is a trap.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-records-3" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these should <em>not</em> be a record?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-records-3"><span>A <code>ShoppingCart</code> that items are added to and removed from over a session <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-records-3"><span>A <code>Money(long cents, String currency)</code> value used as a map key <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-records-3"><span>A <code>SkuTotal(String sku, int total)</code> produced inside a stream pipeline <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-records-3"><span>A <code>StockLevel(String sku, int onHand)</code> snapshot returned from a report <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> A cart mutates and has identity — two carts with the same contents are two different customers' carts. You could model it as a record holding a mutable list, but then its <code>equals</code> and <code>hashCode</code> change under it, and nothing about it is "transparent immutable data". It is a class.</p>
+        <p class="mb-0"><strong>B</strong>, <strong>C</strong> and <strong>D</strong> are textbook records: values with no identity, compared by content, never changed after construction. <strong>D</strong> is the interesting one — the <em>stock</em> changes, but a <em>snapshot</em> of it does not, and a record is the right way to say so.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="records"> Mark this section complete
+  </label>
+</section>

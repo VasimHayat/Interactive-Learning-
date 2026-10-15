@@ -1,0 +1,125 @@
+// ---------------------------------------------------------------------------
+// Design tokens. Light is the complete palette on bare :root.
+// Dark redefines ONLY what changes, twice: once for the system preference
+// (guarded so an explicit light choice wins) and once for the explicit toggle.
+// No colour is ever defined only inside a media query.
+// ---------------------------------------------------------------------------
+
+:root {
+  // neutrals
+  --lm-bg: #fbfbfa;
+  --lm-surface: #ffffff;
+  --lm-surface-2: #f4f4f2;
+  --lm-border: #e2e2de;
+  --lm-border-strong: #c9c9c3;
+  --lm-text: #1c1c1a;
+  --lm-text-muted: #5f5f58;
+  // subtle carries 11-12px uppercase micro-labels, so it must clear 4.5:1
+  // against --lm-surface-2, not just against white
+  --lm-text-subtle: #6f6f66;
+
+  // semantic
+  --lm-ok: #15803d;
+  --lm-ok-weak: #dcfce7;
+  --lm-bad: #b91c1c;
+  --lm-bad-weak: #fee2e2;
+  --lm-warn: #a16207;
+  --lm-warn-weak: #fef9c3;
+  --lm-info: #1d4ed8;
+  --lm-info-weak: #dbeafe;
+
+  // track accent — Java
+  --lm-accent: #b45309;
+  --lm-accent-weak: #fef3c7;
+  --lm-accent-contrast: #ffffff;
+
+  // syntax
+  --lm-syn-keyword: #7c3aed;
+  --lm-syn-type: #0e7490;
+  --lm-syn-string: #15803d;
+  --lm-syn-number: #b45309;
+  --lm-syn-comment: #6a6a61;
+  --lm-syn-annot: #8a5406;
+  --lm-syn-punct: #5f5f58;
+
+  // elevation
+  --lm-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.05);
+  --lm-shadow-md: 0 2px 8px rgb(0 0 0 / 0.06);
+  --lm-shadow-lg: 0 8px 24px rgb(0 0 0 / 0.08);
+
+  // geometry
+  --lm-radius-sm: 4px;
+  --lm-radius-md: 8px;
+  --lm-radius-lg: 12px;
+  --lm-header-h: 56px;
+
+  color-scheme: light;
+}
+
+@mixin dark-tokens {
+  --lm-bg: #141416;
+  --lm-surface: #1c1c20;
+  --lm-surface-2: #232328;
+  --lm-border: #303036;
+  --lm-border-strong: #45454d;
+  --lm-text: #ecece8;
+  --lm-text-muted: #a3a39c;
+  --lm-text-subtle: #8f8f87;
+
+  --lm-ok: #4ade80;
+  --lm-ok-weak: #14321f;
+  --lm-bad: #f87171;
+  --lm-bad-weak: #3a1a1a;
+  --lm-warn: #fbbf24;
+  --lm-warn-weak: #362a10;
+  --lm-info: #60a5fa;
+  --lm-info-weak: #15243f;
+
+  --lm-accent: #fbbf24;
+  --lm-accent-weak: #3a2f14;
+  --lm-accent-contrast: #141416;
+
+  --lm-syn-keyword: #c4b5fd;
+  --lm-syn-type: #67e8f9;
+  --lm-syn-string: #86efac;
+  --lm-syn-number: #fcd34d;
+  --lm-syn-comment: #909089;
+  --lm-syn-annot: #fbbf24;
+  --lm-syn-punct: #a3a39c;
+
+  // dark UI reads better with borders than drop shadows
+  --lm-shadow-sm: 0 0 0 1px rgb(255 255 255 / 0.04);
+  --lm-shadow-md: 0 0 0 1px rgb(255 255 255 / 0.06);
+  --lm-shadow-lg: 0 8px 24px rgb(0 0 0 / 0.5);
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) { @include dark-tokens; }
+}
+:root[data-theme='dark'] { @include dark-tokens; }
+
+// ---------------------------------------------------------------------------
+// Per-module accent. The default (amber) lives on :root above; a module opts
+// into another track colour with <html data-accent="…">. Each variant is
+// defined for light AND dark so no accent ever exists only in one scheme.
+// ---------------------------------------------------------------------------
+:root[data-accent="violet"] {
+  --lm-accent: #6d28d9;
+  --lm-accent-weak: #ede9fe;
+  --lm-accent-contrast: #ffffff;
+}
+:root[data-accent="sky"] {
+  --lm-accent: #0369a1;
+  --lm-accent-weak: #e0f2fe;
+  --lm-accent-contrast: #ffffff;
+}
+@mixin dark-accents {
+  &[data-accent="violet"] { --lm-accent: #c4b5fd; --lm-accent-weak: #2e2548; --lm-accent-contrast: #141416; }
+  &[data-accent="sky"]    { --lm-accent: #7dd3fc; --lm-accent-weak: #11304a; --lm-accent-contrast: #141416; }
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { @include dark-accents; }
+}
+:root[data-theme="dark"] { @include dark-accents; }

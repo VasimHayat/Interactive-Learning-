@@ -1,0 +1,121 @@
+<section class="lm-section" id="cheatsheet" data-title="Cheat sheet" data-num="C">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Cheat sheet</h2>
+  <p>Everything worth having in front of you. This section is laid out to print cleanly — controls and navigation are hidden, and tables are kept whole across page breaks.</p>
+
+  <h3 class="mt-8 mb-3">Primitives</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Primitive types, size, range, default and wrapper</caption>
+      <thead><tr><th scope="col">Type</th><th scope="col">Bits</th><th scope="col">Range</th><th scope="col">Default</th><th scope="col">Wrapper</th></tr></thead>
+      <tbody>
+        <tr><td><code>byte</code></td><td>8</td><td>−128 … 127</td><td><code>0</code></td><td><code>Byte</code></td></tr>
+        <tr><td><code>short</code></td><td>16</td><td>−32,768 … 32,767</td><td><code>0</code></td><td><code>Short</code></td></tr>
+        <tr><td><code>int</code></td><td>32</td><td>−2.15 × 10<sup>9</sup> … 2.15 × 10<sup>9</sup></td><td><code>0</code></td><td><code>Integer</code></td></tr>
+        <tr><td><code>long</code></td><td>64</td><td>±9.22 × 10<sup>18</sup></td><td><code>0L</code></td><td><code>Long</code></td></tr>
+        <tr><td><code>float</code></td><td>32</td><td>~7 significant digits</td><td><code>0.0f</code></td><td><code>Float</code></td></tr>
+        <tr><td><code>double</code></td><td>64</td><td>~15 significant digits</td><td><code>0.0d</code></td><td><code>Double</code></td></tr>
+        <tr><td><code>char</code></td><td>16</td><td>0 … 65,535 (UTF-16 unit)</td><td><code>'\u0000'</code></td><td><code>Character</code></td></tr>
+        <tr><td><code>boolean</code></td><td>—</td><td><code>true</code> / <code>false</code></td><td><code>false</code></td><td><code>Boolean</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Access modifiers</h3>
+  <div class="lm-table-wrap">
+    <table class="lm-matrix">
+      <caption class="lm-visually-hidden">Access by modifier and caller location</caption>
+      <thead><tr><th scope="col">Modifier</th><th scope="col">Same class</th><th scope="col">Same package</th><th scope="col">Subclass, other pkg</th><th scope="col">Anywhere</th></tr></thead>
+      <tbody>
+        <tr><td><code>private</code></td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="no">no</td></tr>
+        <tr><td><em>none</em> (package-private)</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td></tr>
+        <tr><td><code>protected</code></td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no</td></tr>
+        <tr><td><code>public</code></td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Collection selection</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Which collection to use for which need</caption>
+      <thead><tr><th scope="col">You need</th><th scope="col">Use</th><th scope="col">Key cost</th></tr></thead>
+      <tbody>
+        <tr><td>An ordered sequence, indexed access</td><td><code>ArrayList</code></td><td>get O(1), contains O(n)</td></tr>
+        <tr><td>A queue or stack, both ends</td><td><code>ArrayDeque</code></td><td>add/remove either end O(1)*</td></tr>
+        <tr><td>Uniqueness, order irrelevant</td><td><code>HashSet</code></td><td>contains O(1)</td></tr>
+        <tr><td>Uniqueness, insertion order kept</td><td><code>LinkedHashSet</code></td><td>contains O(1)</td></tr>
+        <tr><td>Uniqueness, sorted</td><td><code>TreeSet</code></td><td>contains O(log n)</td></tr>
+        <tr><td>Key → value lookup</td><td><code>HashMap</code></td><td>get/put O(1)</td></tr>
+        <tr><td>Key → value, insertion order</td><td><code>LinkedHashMap</code></td><td>get/put O(1)</td></tr>
+        <tr><td>Key → value, sorted keys</td><td><code>TreeMap</code></td><td>get/put O(log n)</td></tr>
+        <tr><td>An immutable constant</td><td><code>List.of</code> / <code>Set.of</code> / <code>Map.of</code></td><td>rejects nulls, rejects writes</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Exceptions</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common exceptions, their cause and the usual fix</caption>
+      <thead><tr><th scope="col">Exception</th><th scope="col">Checked?</th><th scope="col">Usual cause and fix</th></tr></thead>
+      <tbody>
+        <tr><td><code>NullPointerException</code></td><td>no</td><td>Using a reference that was never assigned, or an unboxed <code>null</code> from a map. Read the Java 14+ message — it names the expression.</td></tr>
+        <tr><td><code>ArrayIndexOutOfBoundsException</code></td><td>no</td><td><code>&lt;=</code> where <code>&lt;</code> was meant. Prefer the enhanced <code>for</code>.</td></tr>
+        <tr><td><code>ClassCastException</code></td><td>no</td><td>A raw type let the wrong element in. Parameterise and treat unchecked warnings as errors.</td></tr>
+        <tr><td><code>NumberFormatException</code></td><td>no</td><td><code>Integer.parseInt</code> on non-numeric input. Validate, or catch at the boundary.</td></tr>
+        <tr><td><code>IllegalArgumentException</code></td><td>no</td><td>A caller violated a documented precondition. Throw it yourself from constructors.</td></tr>
+        <tr><td><code>IllegalStateException</code></td><td>no</td><td>Valid operation, wrong time — shipping an already-shipped order.</td></tr>
+        <tr><td><code>ConcurrentModificationException</code></td><td>no</td><td>Structural change while iterating. Use <code>removeIf</code> or <code>Iterator.remove</code>.</td></tr>
+        <tr><td><code>UnsupportedOperationException</code></td><td>no</td><td>Mutating an immutable view (<code>List.of</code>, <code>Arrays.asList</code>).</td></tr>
+        <tr><td><code>IOException</code></td><td><strong>yes</strong></td><td>The environment failed. Handle or declare; never swallow.</td></tr>
+        <tr><td><code>StackOverflowError</code></td><td>no (Error)</td><td>Runaway recursion — usually a missing base case. Do not catch.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Equality, at a glance</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">What each equality operation compares</caption>
+      <thead><tr><th scope="col">Expression</th><th scope="col">Compares</th><th scope="col">Use for</th></tr></thead>
+      <tbody>
+        <tr><td><code>a == b</code> on primitives</td><td>values</td><td>always correct</td></tr>
+        <tr><td><code>a == b</code> on references</td><td>identity</td><td>only when you mean "the same object"</td></tr>
+        <tr><td><code>a.equals(b)</code></td><td>whatever the class defines</td><td>value equality; throws if <code>a</code> is null</td></tr>
+        <tr><td><code>Objects.equals(a, b)</code></td><td>same, null-safe</td><td>when either side may be null</td></tr>
+        <tr><td><code>Arrays.equals(a, b)</code></td><td>elements, one dimension</td><td>arrays — <code>equals</code> will not work</td></tr>
+        <tr><td><code>a.compareTo(b) == 0</code></td><td>ordering equivalence</td><td><code>TreeSet</code> / <code>TreeMap</code> membership</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Command line</h3>
+  <pre data-code data-lang="bash" data-nobar>
+javac -encoding UTF-8 -d out src/*.java   # compile into out/
+java -cp out com.acme.Main arg1           # run: class NAME, not file name
+java Main.java                            # single-file source mode, no javac needed
+jar --create --file app.jar -C out .      # package
+java -jar app.jar                         # run a jar (needs Main-Class in the manifest)
+javac -Xlint:all -Werror src/*.java       # make every warning fatal
+jshell                                    # REPL for trying snippets
+  </pre>
+
+  <h3 class="mt-8 mb-3">Rules that prevent most beginner bugs</h3>
+  <div class="lm-card">
+    <ol class="mb-0">
+      <li>Compare objects with <code>equals</code>, never <code>==</code>.</li>
+      <li>Override <code>equals</code> and <code>hashCode</code> together, from the same fields.</li>
+      <li>Write <code>@Override</code> every time you intend to override.</li>
+      <li>Declare fields <code>private</code>; return copies of mutable internal state.</li>
+      <li>Prefer the enhanced <code>for</code>; you cannot go out of bounds without a bound.</li>
+      <li>Never concatenate strings in a loop — use <code>StringBuilder</code>.</li>
+      <li>Never use <code>double</code> for money — use <code>BigDecimal</code> or integer cents.</li>
+      <li>Never leave a <code>catch</code> block empty.</li>
+      <li>Use try-with-resources for anything closeable.</li>
+      <li>Parameterise your generics; treat unchecked warnings as errors.</li>
+      <li>Declare the interface, construct the implementation.</li>
+      <li>Prefer <code>getOrDefault</code> to <code>get</code> when a miss means zero.</li>
+    </ol>
+  </div>
+</section>

@@ -1,0 +1,235 @@
+<section class="lm-section" id="jvm" data-title="How Java runs your code" data-num="1">
+  <p class="lm-eyebrow">Section 1</p>
+  <h2 class="mb-4">How Java runs your code</h2>
+
+  <p>Java is neither purely compiled nor purely interpreted, and almost every confusing thing about the toolchain follows from that. Your source is compiled ahead of time into <strong>bytecode</strong> — a portable instruction set for a machine that does not exist — and then a real machine, the JVM, loads that bytecode, starts interpreting it, and progressively compiles the hot parts to native code while the program runs.</p>
+
+  <p>That two-stage design is why a <code>.class</code> file built on your laptop runs unmodified on a Linux server, and why a long-running Java service is often faster after a few minutes than it was at startup.</p>
+
+  <h3 class="mt-8 mb-3">The mental model</h3>
+
+  <div class="lm-diagram">
+    <svg viewBox="0 0 780 268" role="img" aria-labelledby="jvm-dia-t jvm-dia-d">
+      <title id="jvm-dia-t">From source file to running native code</title>
+      <desc id="jvm-dia-d">InventoryStart.java is compiled by javac into InventoryStart.class containing bytecode. The JVM then loads that class, verifies the bytecode, and begins interpreting it. Methods that run frequently are handed to the JIT compiler, which produces optimised native code that replaces interpretation for those methods.</desc>
+      <defs>
+        <marker id="jvm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 10 5 0 10z" fill="var(--lm-border-strong)"/>
+        </marker>
+      </defs>
+      <g font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">
+
+        <rect x="8" y="52" width="126" height="58" rx="8" fill="var(--lm-surface)" stroke="var(--lm-border-strong)"/>
+        <text x="71" y="76" text-anchor="middle" fill="var(--lm-text)" font-size="12.5" font-weight="600">InventoryStart</text>
+        <text x="71" y="93" text-anchor="middle" fill="var(--lm-text-muted)" font-family="ui-monospace, monospace" font-size="11">.java</text>
+
+        <line x1="140" y1="81" x2="176" y2="81" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#jvm-arrow)"/>
+        <text x="158" y="72" text-anchor="middle" fill="var(--lm-accent)" font-family="ui-monospace, monospace" font-size="10.5" font-weight="600">javac</text>
+
+        <rect x="182" y="52" width="126" height="58" rx="8" fill="var(--lm-surface)" stroke="var(--lm-border-strong)"/>
+        <text x="245" y="76" text-anchor="middle" fill="var(--lm-text)" font-size="12.5" font-weight="600">InventoryStart</text>
+        <text x="245" y="93" text-anchor="middle" fill="var(--lm-text-muted)" font-family="ui-monospace, monospace" font-size="11">.class — bytecode</text>
+
+        <line x1="314" y1="81" x2="350" y2="81" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#jvm-arrow)"/>
+        <text x="332" y="72" text-anchor="middle" fill="var(--lm-accent)" font-family="ui-monospace, monospace" font-size="10.5" font-weight="600">java</text>
+
+        <rect x="356" y="14" width="416" height="240" rx="12" fill="none" stroke="var(--lm-border-strong)" stroke-dasharray="5 4"/>
+        <text x="370" y="34" fill="var(--lm-text-subtle)" font-size="11" font-weight="700" letter-spacing="0.08em">JVM — one process</text>
+
+        <rect x="374" y="52" width="112" height="58" rx="8" fill="var(--lm-surface-2)" stroke="var(--lm-border-strong)"/>
+        <text x="430" y="77" text-anchor="middle" fill="var(--lm-text)" font-size="12" font-weight="600">Class loader</text>
+        <text x="430" y="93" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10.5">finds &amp; links</text>
+
+        <line x1="492" y1="81" x2="522" y2="81" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#jvm-arrow)"/>
+
+        <rect x="528" y="52" width="112" height="58" rx="8" fill="var(--lm-surface-2)" stroke="var(--lm-border-strong)"/>
+        <text x="584" y="77" text-anchor="middle" fill="var(--lm-text)" font-size="12" font-weight="600">Verifier</text>
+        <text x="584" y="93" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10.5">rejects unsafe code</text>
+
+        <line x1="584" y1="116" x2="584" y2="140" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#jvm-arrow)"/>
+
+        <rect x="450" y="146" width="140" height="58" rx="8" fill="var(--lm-info-weak)" stroke="var(--lm-info)"/>
+        <text x="520" y="171" text-anchor="middle" fill="var(--lm-text)" font-size="12" font-weight="600">Interpreter</text>
+        <text x="520" y="187" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10.5">runs bytecode now</text>
+
+        <line x1="596" y1="175" x2="632" y2="175" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#jvm-arrow)"/>
+        <text x="614" y="166" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="9.5">hot</text>
+
+        <rect x="638" y="146" width="120" height="58" rx="8" fill="var(--lm-accent-weak)" stroke="var(--lm-accent)"/>
+        <text x="698" y="171" text-anchor="middle" fill="var(--lm-text)" font-size="12" font-weight="600">JIT compiler</text>
+        <text x="698" y="187" text-anchor="middle" fill="var(--lm-text-muted)" font-size="10.5">→ native code</text>
+
+        <path d="M698 210 v18 h-178" fill="none" stroke="var(--lm-border-strong)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#jvm-arrow)"/>
+        <text x="612" y="243" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">replaces the interpreted version</text>
+
+        <text x="71" y="140" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10.5">you write this</text>
+        <text x="245" y="140" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10.5">portable artefact</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 class="mt-8 mb-3">JDK, JRE, JVM — which is which</h3>
+
+  <p>These three names get used interchangeably in conversation and they are not interchangeable at all. Each one contains the next.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="JDK, JRE and JVM compared">
+      <button type="button" class="lm-tab" role="tab" id="tab-jdk" aria-controls="panel-jdk" aria-selected="true" tabindex="0">JDK</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-jre" aria-controls="panel-jre" aria-selected="false" tabindex="-1">JRE</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-jvm" aria-controls="panel-jvm" aria-selected="false" tabindex="-1">JVM</button>
+    </div>
+
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jdk" aria-labelledby="tab-jdk" tabindex="0">
+      <p><strong>Java Development Kit</strong> — everything needed to <em>build</em> Java, which includes everything needed to run it.</p>
+      <ul>
+        <li><code>javac</code>, the compiler that turns <code>.java</code> into <code>.class</code></li>
+        <li><code>jar</code>, <code>javadoc</code>, <code>jshell</code>, <code>jlink</code>, and the diagnostic tools (<code>jstack</code>, <code>jmap</code>, <code>jcmd</code>)</li>
+        <li>a complete JRE inside it</li>
+      </ul>
+      <p class="mb-0"><strong>Install this one.</strong> Since Java 11 there is no separate JRE download from most vendors, and a JDK is what every build tool expects.</p>
+    </div>
+
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jre" aria-labelledby="tab-jre" tabindex="0" hidden>
+      <p><strong>Java Runtime Environment</strong> — everything needed to <em>run</em> a compiled program, and nothing needed to build one.</p>
+      <ul>
+        <li>the JVM itself</li>
+        <li>the standard class library: <code>java.lang</code>, <code>java.util</code>, <code>java.io</code>, and the rest</li>
+        <li><strong>no</strong> <code>javac</code></li>
+      </ul>
+      <p class="mb-0">If <code>java -version</code> works but <code>javac -version</code> says "command not found", you have a JRE. That is the single most common setup problem for people new to Java.</p>
+    </div>
+
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jvm" aria-labelledby="tab-jvm" tabindex="0" hidden>
+      <p><strong>Java Virtual Machine</strong> — the specification, and the process that implements it. This is the part that actually executes bytecode.</p>
+      <ul>
+        <li>loads and verifies classes, then interprets their bytecode</li>
+        <li>manages the heap and runs the garbage collector</li>
+        <li>JIT-compiles hot methods to native instructions</li>
+      </ul>
+      <p class="mb-0">The JVM is not Java-specific. Kotlin, Scala, Clojure and Groovy all compile to the same bytecode and run on the same machine.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>The whole cycle, with the smallest program that touches both a reference type and a primitive. Save it as <code>InventoryStart.java</code> — the file name must match the public class name exactly, including case.</p>
+
+  <pre data-code data-lang="java" data-file="InventoryStart.java" data-verify="InventoryStart">
+public class InventoryStart {
+    public static void main(String[] args) {
+        String sku = "BOLT-7";
+        int onHand = 42;
+        System.out.println("SKU " + sku + " has " + onHand + " units on hand.");
+        System.out.println("Running on Java " + System.getProperty("java.specification.version"));
+    }
+}
+  </pre>
+
+  <pre data-code data-lang="bash" data-nobar>
+javac InventoryStart.java   # produces InventoryStart.class
+java InventoryStart         # note: no .class extension
+  </pre>
+
+  <pre data-output data-for="InventoryStart">
+SKU BOLT-7 has 42 units on hand.
+Running on Java 21
+  </pre>
+
+  <p class="text-sm text-ink-muted">That second line is not decoration. This module's build compiled and ran this exact program on the JDK it documents, and captured what it printed — which is how you know the "Java 21" claim on this page is true.</p>
+
+  <h3 class="mt-8 mb-3">Watch it execute</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through execution of InventoryStart">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Execution</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="jvm-run"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Locals in <code>main</code></div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="jvm-run">
+    {
+      "lang": "java",
+      "code": "public class InventoryStart {\n    public static void main(String[] args) {\n        String sku = \"BOLT-7\";\n        int onHand = 42;\n        System.out.println(\"SKU \" + sku + \" has \" + onHand + \" units on hand.\");\n        System.out.println(\"Running on Java \" + System.getProperty(\"java.specification.version\"));\n    }\n}",
+      "steps": [
+        { "line": 1, "vars": {}, "out": "",
+          "note": "java InventoryStart starts a JVM. The class loader locates InventoryStart.class on the classpath, links it, and the verifier checks its bytecode is well-formed." },
+        { "line": 2, "vars": { "args": "String[0]" }, "out": "",
+          "note": "The JVM looks for exactly public static void main(String[]) and invokes it. A new stack frame is pushed. You passed no arguments, so args is an empty array — empty, not null." },
+        { "line": 3, "vars": { "args": "String[0]", "sku": "→ \"BOLT-7\"" }, "out": "",
+          "note": "The literal \"BOLT-7\" is interned in the string pool on the heap. The local sku holds a reference to it, not the characters themselves." },
+        { "line": 4, "vars": { "args": "String[0]", "sku": "→ \"BOLT-7\"", "onHand": "42" }, "out": "",
+          "note": "onHand is a primitive int. The value 42 sits directly in the frame — there is no object and no reference involved." },
+        { "line": 5, "vars": { "args": "String[0]", "sku": "→ \"BOLT-7\"", "onHand": "42" },
+          "out": "SKU BOLT-7 has 42 units on hand.",
+          "note": "Concatenation builds one new String (javac compiles the + chain into an efficient concat), which println writes to stdout followed by a newline." },
+        { "line": 6, "vars": { "args": "String[0]", "sku": "→ \"BOLT-7\"", "onHand": "42" },
+          "out": "SKU BOLT-7 has 42 units on hand.\nRunning on Java 21",
+          "note": "System.getProperty reads a value the JVM populated at startup. This is the line that proves which runtime you are actually on." },
+        { "line": 7, "vars": {}, "out": "SKU BOLT-7 has 42 units on hand.\nRunning on Java 21",
+          "note": "main returns. Its frame is popped and the locals vanish. With no other non-daemon threads alive, the JVM shuts down and exits with status 0." }
+      ]
+    }
+    </script>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas that cost beginners an afternoon</div>
+      <ul class="mb-0">
+        <li><strong><code>java InventoryStart.class</code> fails.</strong> The launcher takes a <em>class name</em>, not a file name. You will get <code>ClassNotFoundException: InventoryStart.class</code> because it looks for a class literally called <code>class</code> in a package called <code>InventoryStart</code>.</li>
+        <li><strong>The file name must match the public class.</strong> <code>class InventoryStart</code> in <code>Start.java</code> is a compile error: <code>class InventoryStart is public, should be declared in a file named InventoryStart.java</code>.</li>
+        <li><strong><code>main</code> must be exactly that signature.</strong> Drop <code>static</code>, or take <code>String</code> instead of <code>String[]</code>, and the class compiles fine but the launcher fails at runtime with <code>Main method not found in class InventoryStart</code>. The compiler has no idea you intended that method to be an entry point.</li>
+        <li><strong>"Compiles" and "runs" are separate failures.</strong> A missing semicolon is a <code>javac</code> error. A missing class at runtime is a <code>NoClassDefFoundError</code>. Knowing which stage failed halves your debugging time.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <details class="lm-reveal">
+    <summary>Your colleague can run <code>java -version</code> but <code>javac</code> is not found. What do they have, and what should they install?</summary>
+    <div class="lm-reveal-body">
+      <p class="mb-0">They have a JRE, not a JDK — the compiler ships only with the JDK. They should install a JDK 21 (or newer) and make sure its <code>bin</code> directory comes first on <code>PATH</code>. On a machine with several Javas installed, <code>java -version</code> and <code>javac -version</code> can even report different versions; if they disagree, <code>PATH</code> is picking the two binaries from different installations.</p>
+    </div>
+  </details>
+
+  <details class="lm-reveal">
+    <summary>Why can the same <code>.class</code> file run on Windows, Linux and macOS, when a compiled C program cannot?</summary>
+    <div class="lm-reveal-body">
+      <p class="mb-0">Because <code>javac</code> does not target any real CPU. It emits bytecode for the abstract JVM instruction set, and the portability problem is then solved once per platform by shipping a native JVM for each. A C compiler emits instructions for a specific CPU and calls into a specific operating system's ABI, so the binary is bound to both. The cost of Java's approach is that a JVM must be present, and that the first execution of any method is interpreted rather than native.</p>
+    </div>
+  </details>
+
+  <details class="lm-reveal">
+    <summary>A service is benchmarked immediately after startup and looks slow, then benchmarked again ten minutes later and looks fast. Nothing was redeployed. Why?</summary>
+    <div class="lm-reveal-body">
+      <p class="mb-0">JIT compilation. Every method starts out interpreted. Once a method or loop crosses an invocation threshold the JIT compiles it to optimised native code, using profiling data gathered during interpretation to inline calls and eliminate branches that never fire in practice. This is why JVM benchmarks need a warm-up phase before measurement, and why the first few requests to a freshly deployed service are routinely the slowest ones it will ever serve.</p>
+    </div>
+  </details>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="jvm"> Mark this section complete
+  </label>
+</section>

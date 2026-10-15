@@ -1,0 +1,12 @@
+{
+  "title": "Java Intermediate",
+  "subtitle": "The modern language and library — generics in depth, lambdas and streams, records, sealed types and pattern matching, Optional, java.time and NIO — applied to the same order-and-inventory system, now grown into a pricing and reporting pipeline.",
+  "level": "Intermediate",
+  "tech": "Java 21 LTS",
+  "time": "9–11 hours",
+  "updated": "October 2026",
+  "accent": "violet",
+  "order": 2,
+  "next": "Java Advanced",
+  "prev": "Java Fundamentals"
+}

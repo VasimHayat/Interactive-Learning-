@@ -1,0 +1,162 @@
+<section class="lm-section" id="collections" data-title="Collections: choosing the right one" data-num="12">
+  <p class="lm-eyebrow">Section 12</p>
+  <h2 class="mb-4">Collections: choosing the right one</h2>
+
+  <p>Three interfaces cover almost everything. <strong><code>List</code></strong> is an ordered sequence that allows duplicates and is addressable by index. <strong><code>Set</code></strong> holds distinct elements. <strong><code>Map</code></strong> associates keys with values. Pick the interface from what your data <em>is</em>, then pick the implementation from how you will <em>use</em> it.</p>
+
+  <h3 class="mt-8 mb-3">Describe your access pattern</h3>
+
+  <div class="lm-card" data-sandbox="collection-picker">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 6h18M7 12h10M10 18h4"/></svg>
+      What are you storing?
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field"><span>Lookup by</span>
+        <select data-sb-lookup><option value="position">position or scan</option><option value="key">a key</option></select></label>
+      <label class="lm-field"><span>Duplicates</span>
+        <select data-sb-dupes><option value="yes">allowed</option><option value="no">must be unique</option></select></label>
+      <label class="lm-field"><span>Iteration order</span>
+        <select data-sb-order><option value="any">does not matter</option><option value="insertion">as inserted</option><option value="sorted">sorted</option></select></label>
+      <label class="lm-field"><span>Inserts mostly at</span>
+        <select data-sb-insert><option value="end">the end</option><option value="ends">both ends</option><option value="middle">the middle</option></select></label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Cost of the operations you actually perform</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Time complexity of common operations by implementation</caption>
+      <thead><tr><th scope="col">Type</th><th scope="col">get by index</th><th scope="col">contains</th><th scope="col">add at end</th><th scope="col">add/remove at front</th><th scope="col">Ordered?</th></tr></thead>
+      <tbody>
+        <tr><td><code>ArrayList</code></td><td>O(1)</td><td>O(n)</td><td>O(1)*</td><td>O(n)</td><td>insertion</td></tr>
+        <tr><td><code>LinkedList</code></td><td>O(n)</td><td>O(n)</td><td>O(1)</td><td>O(1)</td><td>insertion</td></tr>
+        <tr><td><code>ArrayDeque</code></td><td>—</td><td>O(n)</td><td>O(1)*</td><td>O(1)*</td><td>insertion</td></tr>
+        <tr><td><code>HashSet</code> / <code>HashMap</code></td><td>—</td><td>O(1)</td><td>O(1)*</td><td>—</td><td>none</td></tr>
+        <tr><td><code>LinkedHashSet</code> / <code>LinkedHashMap</code></td><td>—</td><td>O(1)</td><td>O(1)*</td><td>—</td><td>insertion</td></tr>
+        <tr><td><code>TreeSet</code> / <code>TreeMap</code></td><td>—</td><td>O(log n)</td><td>O(log n)</td><td>—</td><td>sorted</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">* amortised — occasionally a resize copies everything, but averaged over many operations the cost is constant.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title"><code>LinkedList</code> is almost never the answer</div>
+      <p class="mb-0">The table says O(1) insertion, which sounds decisive — but to insert <em>at index i</em> you must first walk <var>i</var> nodes, so the real cost is O(n) anyway. Meanwhile <code>ArrayList</code>'s O(n) shift is a single <code>System.arraycopy</code> over contiguous memory, which the CPU cache handles roughly an order of magnitude faster than chasing scattered node pointers, and each node costs an extra object header plus two references. <code>LinkedList</code> wins only when you insert through an <code>Iterator</code> you already hold. If you want a queue or a stack, use <code>ArrayDeque</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="CollectionTour.java" data-verify="CollectionTour">
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+
+public class CollectionTour {
+    public static void main(String[] args) {
+        List<String> picks = new ArrayList<>(List.of("NUT-3", "BOLT-7", "NUT-3"));
+        System.out.println("list, dupes kept     = " + picks);
+
+        Set<String> unique = new HashSet<>(picks);
+        System.out.println("hashset size         = " + unique.size());
+        System.out.println("linkedhashset        = " + new LinkedHashSet<>(picks));
+        System.out.println("treeset, sorted      = " + new TreeSet<>(picks));
+
+        Map<String, Integer> onHand = new HashMap<>();
+        onHand.put("BOLT-7", 12);
+        onHand.put("NUT-3", 0);
+        System.out.println("get missing key      = " + onHand.get("NOPE"));
+        System.out.println("getOrDefault         = " + onHand.getOrDefault("NOPE", 0));
+        System.out.println("containsKey NUT-3    = " + onHand.containsKey("NUT-3"));
+
+        onHand.put("BOLT-7", onHand.get("BOLT-7") + 5);
+        System.out.println("after restock        = " + onHand.get("BOLT-7"));
+
+        try {
+            List.of("A", "B").add("C");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("List.of is immutable = true");
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="CollectionTour">
+list, dupes kept     = [NUT-3, BOLT-7, NUT-3]
+hashset size         = 2
+linkedhashset        = [NUT-3, BOLT-7]
+treeset, sorted      = [BOLT-7, NUT-3]
+get missing key      = null
+getOrDefault         = 0
+containsKey NUT-3    = true
+after restock        = 17
+List.of is immutable = true
+  </pre>
+
+  <p>Note what is <em>not</em> printed: the <code>HashSet</code>'s contents. Its iteration order is unspecified and may differ between JVM versions, so printing it in a test is how you get a suite that passes locally and fails in CI. Only the <em>size</em> is meaningful. <code>LinkedHashSet</code> preserves insertion order; <code>TreeSet</code> sorts.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>map.get()</code> returning <code>null</code> is ambiguous.</strong> It means either "no such key" or "the key maps to null". Use <code>containsKey</code> to distinguish, or <code>getOrDefault</code> to stop caring.</li>
+        <li><strong>Unboxing a missing value throws.</strong> <code>int n = onHand.get("NOPE");</code> compiles and throws <code>NullPointerException</code>. <code>getOrDefault(key, 0)</code> is the fix.</li>
+        <li><strong><code>List.of</code> and <code>Map.of</code> are immutable and reject nulls.</strong> Great as constants, wrong as a starting point for something you will mutate — wrap in <code>new ArrayList&lt;&gt;(…)</code> for that.</li>
+        <li><strong>Keys must have correct <code>equals</code>/<code>hashCode</code>, and should be immutable.</strong> See section 10 for what breaks otherwise.</li>
+        <li><strong>Declare the interface, construct the implementation.</strong> <code>List&lt;String&gt; picks = new ArrayList&lt;&gt;()</code> lets you swap the implementation without touching callers.</li>
+        <li><strong>Size the collection if you know the count.</strong> <code>new ArrayList&lt;&gt;(10_000)</code> avoids a dozen grow-and-copy cycles.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-col-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>You need to record which SKUs a picker has already visited on this run, and ask "seen this one?" tens of thousands of times. Order never matters. What do you use?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-col-1"><span><code>ArrayList&lt;String&gt;</code> with <code>contains</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-col-1"><span><code>TreeSet&lt;String&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-col-1"><span><code>HashSet&lt;String&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-col-1"><span><code>LinkedList&lt;String&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Membership testing is exactly what a hash set is for: O(1) <code>contains</code> and free deduplication.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>D</strong> both scan the whole list — O(n) per check, so O(n²) overall, which is the classic reason a nightly job that was fine with 100 SKUs takes hours with 100,000. <strong>B</strong> works and is O(log n), but you are paying for sorted order you explicitly do not need.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-col-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A test asserts <code>set.toString()</code> equals <code>"[BOLT-7, NUT-3]"</code>. It passes locally and fails on the build server. The set is a <code>HashSet</code>. Why, and what is the right fix?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-col-2"><span>The server has a different locale; set the default locale in the test <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-col-2"><span><code>HashSet</code> iteration order is unspecified; assert on contents and size, or use a <code>LinkedHashSet</code>/<code>TreeSet</code> if order is genuinely part of the contract <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-col-2"><span>The set is being mutated concurrently; synchronise it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-col-2"><span>Sort the set before calling <code>toString</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Nothing guarantees <code>HashSet</code> iteration order — it falls out of hash values and table size, and can differ across JVM versions and vendors. The assertion was testing an implementation detail. Assert what you actually care about: that the set contains those two elements and has size 2.</p>
+        <p class="mb-0"><strong>A</strong> is a real cause of other cross-machine failures — date and case formatting — but not this one. <strong>C</strong> would more likely give a <code>ConcurrentModificationException</code> or corruption, not a stable-but-different order. <strong>D</strong> cannot be done to a <code>HashSet</code> in place; copying to a sorted structure just to satisfy an assertion is the tail wagging the dog — if order matters, choose an ordered type in the production code.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="collections"> Mark this section complete
+  </label>
+</section>

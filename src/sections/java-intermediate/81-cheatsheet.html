@@ -1,0 +1,237 @@
+<section class="lm-section" id="cheatsheet" data-title="Cheat sheet" data-num="C">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Cheat sheet</h2>
+  <p>Everything worth having in front of you while you write. This section is laid out to print cleanly — controls and navigation are hidden, and tables are kept whole across page breaks. Each block names the section it condenses.</p>
+
+  <h3 class="mt-8 mb-3">Wildcards: the PECS decision <span class="lm-badge">§1</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Which wildcard to use for a method parameter</caption>
+      <thead><tr><th scope="col">The method…</th><th scope="col">Parameter type</th><th scope="col">Inside the method</th><th scope="col">Callers may pass</th></tr></thead>
+      <tbody>
+        <tr><td>only <strong>reads</strong> elements (producer)</td><td><code>List&lt;? extends Product&gt;</code></td><td>read as <code>Product</code>; <code>add</code> rejected</td><td><code>List&lt;Product&gt;</code>, <code>List&lt;Perishable&gt;</code>, …</td></tr>
+        <tr><td>only <strong>writes</strong> elements (consumer)</td><td><code>List&lt;? super Perishable&gt;</code></td><td><code>add(Perishable)</code>; read only as <code>Object</code></td><td><code>List&lt;Perishable&gt;</code>, <code>List&lt;Product&gt;</code>, <code>List&lt;Object&gt;</code></td></tr>
+        <tr><td>reads <strong>and</strong> writes</td><td><code>List&lt;Product&gt;</code> or <code>&lt;T&gt; … List&lt;T&gt;</code></td><td>everything</td><td>exactly that type</td></tr>
+        <tr><td>touches no element (<code>size</code>, <code>isEmpty</code>, <code>clear</code>)</td><td><code>List&lt;?&gt;</code></td><td>read as <code>Object</code>; no <code>add</code> but <code>null</code></td><td>any <code>List</code></td></tr>
+        <tr><td>compares elements to each other</td><td><code>&lt;T extends Comparable&lt;? super T&gt;&gt;</code></td><td><code>a.compareTo(b)</code></td><td>subclasses that inherit <code>compareTo</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Wildcards go in parameters, never return types. Erasure forbids <code>new T()</code>, <code>new T[n]</code>, <code>instanceof List&lt;String&gt;</code>, <code>List&lt;int&gt;</code>, <code>static T</code>, <code>catch (T e)</code>, and two overloads that differ only by type argument.</p>
+
+  <h3 class="mt-8 mb-3">The functional interfaces <span class="lm-badge">§4</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">java.util.function interfaces and their shapes</caption>
+      <thead><tr><th scope="col">Interface</th><th scope="col">Method</th><th scope="col">Shape</th><th scope="col">Primitive form</th></tr></thead>
+      <tbody>
+        <tr><td><code>Function&lt;T,R&gt;</code></td><td><code>R apply(T)</code></td><td>T → R</td><td><code>IntFunction&lt;R&gt;</code>, <code>ToIntFunction&lt;T&gt;</code></td></tr>
+        <tr><td><code>BiFunction&lt;T,U,R&gt;</code></td><td><code>R apply(T,U)</code></td><td>T, U → R</td><td><code>ToIntBiFunction&lt;T,U&gt;</code></td></tr>
+        <tr><td><code>UnaryOperator&lt;T&gt;</code></td><td><code>T apply(T)</code></td><td>T → T</td><td><code>IntUnaryOperator</code></td></tr>
+        <tr><td><code>BinaryOperator&lt;T&gt;</code></td><td><code>T apply(T,T)</code></td><td>T, T → T</td><td><code>IntBinaryOperator</code></td></tr>
+        <tr><td><code>Predicate&lt;T&gt;</code></td><td><code>boolean test(T)</code></td><td>T → yes/no</td><td><code>IntPredicate</code></td></tr>
+        <tr><td><code>Consumer&lt;T&gt;</code></td><td><code>void accept(T)</code></td><td>T → nothing</td><td><code>IntConsumer</code></td></tr>
+        <tr><td><code>Supplier&lt;T&gt;</code></td><td><code>T get()</code></td><td>nothing → T</td><td><code>IntSupplier</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Composition: <code>f.andThen(g)</code> runs <code>f</code> first; <code>f.compose(g)</code> runs <code>g</code> first; <code>p.and(q)</code>, <code>p.or(q)</code>, <code>p.negate()</code>. A captured local must be effectively final. <code>this</code> in a lambda is the enclosing instance; in an anonymous class it is the anonymous object. No <code>java.util.function</code> method declares <code>throws</code>.</p>
+
+  <h3 class="mt-8 mb-3">The four method-reference forms <span class="lm-badge">§4</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Kinds of method reference</caption>
+      <thead><tr><th scope="col">Kind</th><th scope="col">Syntax</th><th scope="col">Equivalent lambda</th><th scope="col">Where the receiver comes from</th></tr></thead>
+      <tbody>
+        <tr><td>Static</td><td><code>Integer::parseInt</code></td><td><code>s -&gt; Integer.parseInt(s)</code></td><td>none — a static call</td></tr>
+        <tr><td>Bound instance</td><td><code>sample::sku</code>, <code>System.out::println</code></td><td><code>() -&gt; sample.sku()</code></td><td>the object before <code>::</code>, evaluated once, when the reference is created</td></tr>
+        <tr><td>Unbound instance</td><td><code>Product::sku</code>, <code>String::compareToIgnoreCase</code></td><td><code>p -&gt; p.sku()</code>, <code>(a, b) -&gt; a.compareToIgnoreCase(b)</code></td><td>the <em>first</em> parameter</td></tr>
+        <tr><td>Constructor</td><td><code>Product::new</code>, <code>int[]::new</code></td><td><code>(sku, price) -&gt; new Product(sku, price)</code></td><td>none — overload chosen from the target's arity</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Stream operations <span class="lm-badge">§5</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Stream operations by category</caption>
+      <thead><tr><th scope="col">Category</th><th scope="col">Operations</th><th scope="col">Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td>Stateless intermediate</td><td><code>filter</code>, <code>map</code>, <code>mapToInt</code>, <code>flatMap</code>, <code>peek</code></td><td>one element at a time, lazily; no memory</td></tr>
+        <tr><td>Stateful intermediate</td><td><code>sorted</code>, <code>distinct</code></td><td><code>sorted</code> is a barrier: nothing leaves until everything has arrived</td></tr>
+        <tr><td>Short-circuiting intermediate</td><td><code>limit</code>, <code>takeWhile</code></td><td>can finish an infinite stream; still waits for an upstream <code>sorted</code></td></tr>
+        <tr><td>Short-circuiting terminal</td><td><code>findFirst</code>, <code>findAny</code>, <code>anyMatch</code>, <code>allMatch</code>, <code>noneMatch</code></td><td>stop pulling as soon as the answer is known</td></tr>
+        <tr><td>Full terminal</td><td><code>toList</code>, <code>collect</code>, <code>count</code>, <code>sum</code>, <code>reduce</code>, <code>max</code>, <code>forEach</code></td><td>consume every element</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">No terminal, no work. One use per stream — a second terminal throws <code>IllegalStateException</code>. <code>reduce(identity, op)</code> needs a neutral identity; <code>reduce(op)</code> returns <code>Optional</code>. Go primitive early: <code>mapToInt(…).sum()</code> does not box. <code>parallel()</code> only after measuring.</p>
+
+  <h3 class="mt-8 mb-3">Collectors by need <span class="lm-badge">§6</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Which collector produces which result</caption>
+      <thead><tr><th scope="col">You need</th><th scope="col">Collector</th><th scope="col">Result</th><th scope="col">Trap</th></tr></thead>
+      <tbody>
+        <tr><td>an unmodifiable list</td><td><code>stream.toList()</code></td><td><code>List&lt;T&gt;</code></td><td><code>Collectors.toList()</code> is mutable; neither is guaranteed to be an <code>ArrayList</code></td></tr>
+        <tr><td>key → value</td><td><code>toMap(keyFn, valueFn, mergeFn, mapSupplier)</code></td><td><code>Map&lt;K,V&gt;</code></td><td>without <code>mergeFn</code>, a duplicate key throws <code>IllegalStateException</code>; a <code>null</code> value throws</td></tr>
+        <tr><td>buckets by a key</td><td><code>groupingBy(classifier, mapFactory, downstream)</code></td><td><code>Map&lt;K,D&gt;</code></td><td>factory is the <em>middle</em> argument; keys exist only for values that occurred; <code>null</code> key throws</td></tr>
+        <tr><td>true/false buckets, both always present</td><td><code>partitioningBy(predicate, downstream)</code></td><td><code>Map&lt;Boolean,D&gt;</code></td><td><code>groupingBy</code> on a boolean omits an empty side</td></tr>
+        <tr><td>how many per bucket</td><td><code>counting()</code></td><td><code>Long</code></td><td>never <code>Integer</code></td></tr>
+        <tr><td>a total per bucket</td><td><code>summingInt / summingLong(fn)</code></td><td><code>Integer</code> / <code>Long</code></td><td>pick the width before the overflow</td></tr>
+        <tr><td>count, sum, min, max, average at once</td><td><code>summarizingInt(fn)</code></td><td><code>IntSummaryStatistics</code></td><td>—</td></tr>
+        <tr><td>the best element per bucket</td><td><code>collectingAndThen(maxBy(cmp), Optional::get)</code></td><td><code>T</code></td><td><code>maxBy</code> alone gives <code>Optional&lt;T&gt;</code></td></tr>
+        <tr><td>a string</td><td><code>joining(sep, prefix, suffix)</code></td><td><code>String</code></td><td>elements must already be <code>CharSequence</code></td></tr>
+        <tr><td>transform inside a bucket</td><td><code>mapping(fn, downstream)</code>, <code>filtering(pred, downstream)</code>, <code>flatMapping(fn, downstream)</code></td><td>whatever downstream gives</td><td><code>filtering</code> keeps the key even when the bucket ends up empty</td></tr>
+        <tr><td>two results from one pass</td><td><code>teeing(c1, c2, merger)</code></td><td>whatever <code>merger</code> returns</td><td>Java 12+</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Optional, by the question it answers <span class="lm-badge">§7</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Optional methods by purpose</caption>
+      <thead><tr><th scope="col">Question</th><th scope="col">Method</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        <tr><td>make one</td><td><code>of(v)</code> · <code>ofNullable(v)</code> · <code>empty()</code></td><td><code>of(null)</code> throws; <code>ofNullable</code> is the bridge from <code>Map.get</code></td></tr>
+        <tr><td>transform</td><td><code>map(fn)</code> · <code>flatMap(fn)</code> · <code>filter(pred)</code></td><td><code>flatMap</code> when <code>fn</code> itself returns an <code>Optional</code></td></tr>
+        <tr><td>and if empty?</td><td><code>orElse(v)</code> · <code>orElseGet(supplier)</code> · <code>orElseThrow()</code> · <code>or(supplier)</code></td><td><code>orElse</code>'s argument is evaluated eagerly, always</td></tr>
+        <tr><td>do something</td><td><code>ifPresent(c)</code> · <code>ifPresentOrElse(c, r)</code></td><td>replaces <code>isPresent()</code> + <code>get()</code></td></tr>
+        <tr><td>leave it</td><td><code>stream()</code></td><td>inside <code>flatMap</code>, drops the empties</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">A return type only. Never a field, a parameter, a collection element, or a wrapper around a collection. <code>get()</code> is <code>orElseThrow()</code> with a misleading name. Never return <code>null</code> from a method typed <code>Optional</code>.</p>
+
+  <h3 class="mt-8 mb-3">Records <span class="lm-badge">§8</span></h3>
+  <ul>
+    <li>Header = complete state. Generated: <code>private final</code> fields, canonical constructor, <code>name()</code> accessors, <code>equals</code>, <code>hashCode</code>, <code>toString</code>.</li>
+    <li>Compact constructor <code>Line { sku = sku.strip(); if (qty &lt;= 0) throw …; }</code>: validate and normalise the <em>parameters</em>; fields are assigned after the body. Other constructors must delegate with <code>this(…)</code>.</li>
+    <li>Implicitly <code>final</code>; no <code>extends</code>; may <code>implements</code>; no instance fields beyond components; nested records are static; local records cannot capture locals.</li>
+    <li>Immutability is <strong>shallow</strong>: copy collection components with <code>List.copyOf</code> in the compact constructor; arrays break <code>equals</code> — use a <code>List</code>.</li>
+    <li>Not a record: anything with identity, anything that mutates, anything that needs a superclass or a no-arg constructor.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Sealed types and pattern switch <span class="lm-badge">§9</span></h3>
+  <pre data-code data-lang="java" data-nobar>
+sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne {}
+record PercentOff(int pct) implements Discount {}
+record FixedOff(int cents) implements Discount {}
+record BuyNGetOne(int n) implements Discount {}
+
+long apply(Discount d, long gross, int qty) {
+    return switch (d) {                                         // expression: must be exhaustive
+        case null                       -> gross;               // without this, null throws NPE
+        case FixedOff(int c) when c >= gross -> 0;              // guarded case first…
+        case FixedOff(int c)            -> gross - c;           // …then the unguarded one
+        case PercentOff(int pct)        -> gross * (100 - pct) / 100;
+        case BuyNGetOne(int n)          -> { long free = qty / (n + 1); yield gross - free * (gross / qty); }
+    };                                                          // no default: a new subtype is a compile error
+}
+  </pre>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Pattern forms</caption>
+      <thead><tr><th scope="col">Pattern</th><th scope="col">Example</th><th scope="col">Rule</th></tr></thead>
+      <tbody>
+        <tr><td>Type</td><td><code>case String s -&gt;</code></td><td>specific before general, or "dominated by a preceding case label"</td></tr>
+        <tr><td>Record</td><td><code>case FixedOff(int c) -&gt;</code></td><td>binds components by position; accessors run during matching</td></tr>
+        <tr><td>Nested record</td><td><code>case Line(Product(var sku, var p), int qty) -&gt;</code></td><td><code>var</code> infers each component</td></tr>
+        <tr><td>Guard</td><td><code>case FixedOff(int c) when c &gt;= gross -&gt;</code></td><td>a guard is not a case: an unguarded one is still required</td></tr>
+        <tr><td>Null</td><td><code>case null -&gt;</code> / <code>case null, default -&gt;</code></td><td>otherwise a <code>null</code> selector throws</td></tr>
+        <tr><td><code>instanceof</code></td><td><code>if (o instanceof String s &amp;&amp; s.length() &gt; 3)</code></td><td>binding is in scope wherever the test must have passed</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Permitted subtypes must be <code>final</code>, <code>sealed</code> or <code>non-sealed</code>, in the same package or module. Exhaustiveness is checkable only for enums and sealed types. Sealed switch when types are fixed and operations grow; polymorphism when operations are fixed and types grow.</p>
+
+  <h3 class="mt-8 mb-3">Comparators <span class="lm-badge">§10</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Comparator factory and chaining methods</caption>
+      <thead><tr><th scope="col">Want</th><th scope="col">Write</th></tr></thead>
+      <tbody>
+        <tr><td>by one key</td><td><code>comparing(Product::sku)</code> · <code>comparingInt(Product::priceInCents)</code></td></tr>
+        <tr><td>then a tie-breaker</td><td><code>.thenComparing(Product::sku)</code> · <code>.thenComparingInt(…)</code></td></tr>
+        <tr><td>one key descending, the rest ascending</td><td><code>comparing(Product::priceInCents, reverseOrder()).thenComparing(Product::sku)</code></td></tr>
+        <tr><td>everything so far reversed</td><td><code>.reversed()</code> — applies to the whole chain before it</td></tr>
+        <tr><td>tolerate nulls</td><td><code>nullsFirst(naturalOrder())</code> · <code>nullsLast(cmp)</code></td></tr>
+        <tr><td>a lambda key</td><td><code>comparing((Product p) -&gt; p.priceInCents())</code> — the type is needed before <code>.reversed()</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>Integer.compare(a, b)</code>, never <code>a - b</code>. <code>compareTo == 0</code> should mean <code>equals</code>: a <code>TreeSet</code> uses only the comparator and drops "equal" elements. Object sorts are stable TimSort; <code>Arrays.sort(int[])</code> is dual-pivot quicksort.</p>
+
+  <h3 class="mt-8 mb-3">View, copy, immutable <span class="lm-badge">§10</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Unmodifiable views versus immutable copies</caption>
+      <thead><tr><th scope="col">Call</th><th scope="col">Follows later changes to the source?</th><th scope="col">Writes through it</th><th scope="col">Nulls</th></tr></thead>
+      <tbody>
+        <tr><td><code>Collections.unmodifiableList(src)</code></td><td><strong>yes</strong> — it is a window</td><td>throw</td><td>allowed</td></tr>
+        <tr><td><code>List.copyOf(src)</code></td><td>no — a snapshot</td><td>throw</td><td>rejected</td></tr>
+        <tr><td><code>List.of(…)</code> / <code>Set.of</code> / <code>Map.of</code></td><td>n/a</td><td>throw</td><td>rejected; <code>Set.of</code>/<code>Map.of</code> randomise iteration order</td></tr>
+        <tr><td><code>new ArrayList&lt;&gt;(src)</code></td><td>no</td><td>allowed</td><td>allowed</td></tr>
+        <tr><td><code>Arrays.asList(arr)</code></td><td>yes — writes through to the array</td><td><code>set</code> works, <code>add</code> throws</td><td>allowed</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Immutable class: every field <code>private final</code>; copy mutable inputs in, copy or wrap on the way out; class <code>final</code>. <code>final</code> on a field fixes the reference, not the object.</p>
+
+  <h3 class="mt-8 mb-3">Collection internals: the numbers <span class="lm-badge">§11</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Constants that govern the core collections</caption>
+      <thead><tr><th scope="col">Structure</th><th scope="col">Constant</th><th scope="col">Meaning</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="5"><code>HashMap</code></td><td>initial capacity 16</td><td>bins; always a power of two, index is <code>(n − 1) &amp; hash</code></td></tr>
+        <tr><td>load factor 0.75</td><td>threshold = capacity × 0.75 = 12; the 13th entry doubles the table and rehashes every entry</td></tr>
+        <tr><td>treeify threshold 8</td><td>a bin with 8 entries becomes a red-black tree — only once the table has ≥ 64 bins</td></tr>
+        <tr><td>spread <code>h ^ (h &gt;&gt;&gt; 16)</code></td><td>folds high bits into the low bits the mask uses</td></tr>
+        <tr><td>key rule</td><td>a key whose <code>hashCode</code> changes after insertion is unreachable; iteration order changes on resize</td></tr>
+        <tr><td><code>ArrayList</code></td><td>growth 1.5×</td><td>amortised O(1) <code>add</code>; <code>add(0, x)</code> is O(n); never shrinks on its own</td></tr>
+        <tr><td><code>ArrayDeque</code></td><td>ring buffer, doubles</td><td>O(1) both ends; no index access; rejects <code>null</code></td></tr>
+        <tr><td><code>TreeMap</code></td><td>red-black tree</td><td>O(log n); <code>floorEntry</code>, <code>ceilingKey</code>, <code>headMap</code>, <code>subMap</code> views</td></tr>
+        <tr><td><code>LinkedHashMap</code></td><td>+ doubly linked list</td><td>insertion order, or access order with <code>(cap, lf, true)</code>; <code>removeEldestEntry</code> = LRU</td></tr>
+        <tr><td>iterators</td><td><code>modCount</code></td><td>fail-fast: <code>ConcurrentModificationException</code>; safe removal via <code>Iterator.remove</code>, <code>removeIf</code>, downward index loop</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">java.time <span class="lm-badge">§12</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">java.time types and when to use them</caption>
+      <thead><tr><th scope="col">Type</th><th scope="col">Zone</th><th scope="col">Use for</th></tr></thead>
+      <tbody>
+        <tr><td><code>Instant</code></td><td>UTC</td><td>when something <em>happened</em> — store and log this</td></tr>
+        <tr><td><code>LocalDate</code> / <code>LocalTime</code></td><td>none</td><td>a calendar day; a wall-clock time</td></tr>
+        <tr><td><code>LocalDateTime</code></td><td>none</td><td>a reading with no zone — never a stored event</td></tr>
+        <tr><td><code>ZonedDateTime</code></td><td>region rules</td><td>a future appointment in a place; display</td></tr>
+        <tr><td><code>OffsetDateTime</code></td><td>fixed offset</td><td>interchange; no DST ever applies</td></tr>
+        <tr><td><code>Duration</code></td><td>—</td><td>elapsed seconds: timeouts, "24 hours from now" — <code>plusHours</code> moves the instant</td></tr>
+        <tr><td><code>Period</code></td><td>—</td><td>calendar fields: "one month", "same time tomorrow" — <code>plusDays</code> keeps the wall clock</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Everything is immutable: use the return value. <code>ZoneId.of("Europe/London")</code>, never <code>"BST"</code>. Pattern formatters need a <code>Locale</code>; <code>yyyy</code> not <code>YYYY</code> (week-based year), <code>MM</code> month, <code>mm</code> minute, <code>HH</code> 0–23. Month arithmetic clamps (31 Jan + 1 month = 28 Feb). Inject a <code>Clock</code> to test. <code>ZonedDateTime.equals</code> compares zone and fields; use <code>isEqual</code> for the instant.</p>
+
+  <h3 class="mt-8 mb-3">Files <span class="lm-badge">§13</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">java.nio.file helpers</caption>
+      <thead><tr><th scope="col">Job</th><th scope="col">Call</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        <tr><td>small text file in</td><td><code>Files.readString(p, UTF_8)</code> · <code>readAllLines(p, UTF_8)</code></td><td>whole file in memory</td></tr>
+        <tr><td>large text file in</td><td><code>try (var lines = Files.lines(p, UTF_8))</code> · <code>newBufferedReader(p, UTF_8)</code></td><td>the stream holds the file open — close it</td></tr>
+        <tr><td>text out</td><td><code>Files.writeString(p, s, UTF_8, CREATE, APPEND)</code></td><td>default options truncate</td></tr>
+        <tr><td>bytes</td><td><code>readAllBytes</code> · <code>newInputStream</code> / <code>newOutputStream</code></td><td>wrap in <code>Buffered…</code> if you read byte by byte</td></tr>
+        <tr><td>directory</td><td><code>try (var s = Files.walk(dir))</code> · <code>Files.list(dir)</code></td><td>order unspecified — sort before printing</td></tr>
+        <tr><td>copy / move / delete</td><td><code>copy(a, b, REPLACE_EXISTING)</code> · <code>move</code> · <code>delete</code> / <code>deleteIfExists</code></td><td>delete children before parents</td></tr>
+        <tr><td>paths</td><td><code>Path.of("data", "stock.csv")</code> · <code>resolve</code> · <code>relativize</code> · <code>normalize</code> · <code>startsWith</code></td><td><code>resolve</code> of an absolute argument returns the argument; relative paths resolve from the launch directory</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Always pass a charset. <code>NoSuchFileException</code>, <code>FileAlreadyExistsException</code>, <code>AccessDeniedException</code>, <code>DirectoryNotEmptyException</code> and <code>MalformedInputException</code> are all <code>IOException</code>s — catch the specific one you can act on.</p>
+</section>

@@ -1,0 +1,11 @@
+{
+  "title": "Java Advanced",
+  "subtitle": "The runtime — threads and the memory model, locks and concurrent collections, executors, CompletableFuture and virtual threads, garbage collection, class loading, reflection, modules and performance measurement — as the warehouse becomes a concurrent reservation service that must stay correct and responsive under load.",
+  "level": "Advanced",
+  "tech": "Java 21 LTS",
+  "time": "10–12 hours",
+  "updated": "October 2026",
+  "accent": "sky",
+  "order": 3,
+  "prev": "Java Intermediate"
+}

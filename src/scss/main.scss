@@ -1,0 +1,6 @@
+// Pure Sass layer. Tailwind's preflight is prepended and Tailwind's utilities
+// are appended by tools/build.mjs, so utilities always win over components.
+@use 'tokens';
+@use 'base';
+@use 'components';
+@use 'print';

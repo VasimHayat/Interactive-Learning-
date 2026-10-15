@@ -1,0 +1,288 @@
+<section class="lm-section" id="optional" data-title="Optional" data-num="7">
+  <p class="lm-eyebrow">Section 7</p>
+  <h2 class="mb-4"><code>Optional</code></h2>
+
+  <p>Fundamentals §11 diagnosed the <code>NullPointerException</code> and §L's <code>findById</code> returned <code>null</code> for a miss, with a note that the modern alternative was coming. This is it. <code>Optional&lt;T&gt;</code> is a container that holds either one value or nothing, and its only real purpose is to make a <em>return type</em> say "this may be absent" so loudly that the caller cannot forget. A method returning <code>Product</code> might return <code>null</code> and you have to read the Javadoc to know. A method returning <code>Optional&lt;Product&gt;</code> has told you, in the signature, and the compiler will not let you treat the result as a <code>Product</code> without deciding what to do about the empty case.</p>
+
+  <p>That decision is the whole API. Every method on <code>Optional</code> is a different way of answering "and if it is empty?" — substitute a value, substitute another lookup, throw, do nothing, or carry the emptiness forward through a chain so the question is answered once, at the end.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Optionals.java" data-verify="Optionals" data-hi="15,16,17" data-bad="46">
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+public class Optionals {
+
+    record Product(String sku, int priceInCents, String supplierSku) { }   // supplierSku may be null
+
+    static final Map<String, Product> CATALOGUE = Map.of(
+        "BOLT-7", new Product("BOLT-7", 80, "ACME-0071"),
+        "NUT-3",  new Product("NUT-3", 25, null),
+        "FREE-1", new Product("FREE-1", 0, "ACME-0999"));
+
+    // The return type says it: a lookup may find nothing.
+    static Optional<Product> findBySku(String sku) {
+        return Optional.ofNullable(CATALOGUE.get(sku));
+    }
+
+    static Optional<String> supplierOf(Product p) {
+        return Optional.ofNullable(p.supplierSku());
+    }
+
+    static int fallbackPrice() {
+        System.out.println("  (fallbackPrice() was called)");
+        return 999;
+    }
+
+    public static void main(String[] args) {
+        // map transforms the content when present; an empty Optional just flows through
+        int bolt = findBySku("BOLT-7").map(Product::priceInCents).orElse(-1);
+        int nope = findBySku("NOPE").map(Product::priceInCents).orElse(-1);
+        System.out.println("BOLT-7 price = " + bolt + ", NOPE price = " + nope);
+
+        // flatMap for a step that itself returns an Optional (no Optional<Optional<String>>)
+        String s1 = findBySku("BOLT-7").flatMap(Optionals::supplierOf).orElse("no supplier");
+        String s2 = findBySku("NUT-3").flatMap(Optionals::supplierOf).orElse("no supplier");
+        System.out.println("suppliers    = " + s1 + " / " + s2);
+
+        // filter turns a present value that fails the test into empty
+        String priced = findBySku("FREE-1").filter(p -> p.priceInCents() > 0)
+                                           .map(Product::sku).orElse("not priced");
+        System.out.println("FREE-1       = " + priced);
+
+        // orElse evaluates its argument ALWAYS; orElseGet only when empty
+        System.out.println("orElse on a present value:");
+        int a = findBySku("BOLT-7").map(Product::priceInCents).orElse(fallbackPrice());
+        System.out.println("orElseGet on a present value:");
+        int b = findBySku("BOLT-7").map(Product::priceInCents).orElseGet(Optionals::fallbackPrice);
+        System.out.println("both gave " + a + " and " + b);
+
+        // or() supplies an alternative Optional; orElseThrow names the failure
+        Product p = findBySku("NOPE").or(() -> findBySku("NUT-3"))
+                                     .orElseThrow(() -> new IllegalStateException("no product"));
+        System.out.println("fallback     = " + p.sku());
+
+        // ifPresentOrElse replaces the isPresent()/get() pair
+        findBySku("CAM-9").ifPresentOrElse(
+            x -> System.out.println("found " + x.sku()),
+            () -> System.out.println("CAM-9 is not in the catalogue"));
+
+        // Optional.stream(): keep only the hits, no isPresent() filter needed
+        List<String> found = List.of("BOLT-7", "NOPE", "NUT-3").stream()
+            .flatMap(sku -> findBySku(sku).stream())
+            .map(Product::sku)
+            .toList();
+        System.out.println("found        = " + found);
+
+        // of() refuses null; ofNullable() is the one that maps null to empty
+        try {
+            Optional.of(CATALOGUE.get("NOPE"));
+        } catch (NullPointerException e) {
+            System.out.println("Optional.of(null) threw NullPointerException");
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Optionals">
+BOLT-7 price = 80, NOPE price = -1
+suppliers    = ACME-0071 / no supplier
+FREE-1       = not priced
+orElse on a present value:
+  (fallbackPrice() was called)
+orElseGet on a present value:
+both gave 80 and 80
+fallback     = NUT-3
+CAM-9 is not in the catalogue
+found        = [BOLT-7, NUT-3]
+Optional.of(null) threw NullPointerException
+  </pre>
+
+  <p>The line marked in red is the one people get wrong in production. <code>orElse(fallbackPrice())</code> is an ordinary method call: Java evaluates the argument <em>before</em> calling <code>orElse</code>, whether or not the <code>Optional</code> is empty — so <code>fallbackPrice()</code> ran and printed its trace even though <code>BOLT-7</code> was found. <code>orElseGet</code> takes a <code>Supplier</code>, and only invokes it when needed. For a constant, <code>orElse</code> is fine and reads better; for anything that does work — a database query, a default built from a file, logging — it must be <code>orElseGet</code>.</p>
+
+  <h3 class="mt-8 mb-3">Watch a chain evaluate</h3>
+
+  <p>The same four-step chain run three times: once for a product that exists, once for a SKU that does not, and once for a product that exists but fails the filter. Watch what the <code>Optional</code> contains after each stage.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of an Optional chain">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Empty flows through</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="optional-chain"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">State</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="optional-chain">
+    {
+      "lang": "java",
+      "code": "Optional<Product> found = findBySku(sku);\n\nint price = found\n    .map(Product::priceInCents)\n    .filter(p -> p > 0)\n    .orElse(0);\n\nSystem.out.println(sku + \" -> \" + price);",
+      "steps": [
+        { "line": 1, "vars": { "sku": "\"BOLT-7\"", "found": "Optional[Product[BOLT-7, 80, …]]" }, "out": "",
+          "note": "Run 1. The catalogue has BOLT-7, so ofNullable wraps the Product in a present Optional." },
+        { "line": 4, "vars": { "sku": "\"BOLT-7\"", "found": "Optional[Product[…]]", "after map": "Optional[80]" }, "out": "",
+          "note": "map applies the function to the content and wraps the result. The type changed from Optional<Product> to Optional<Integer>." },
+        { "line": 5, "vars": { "sku": "\"BOLT-7\"", "after map": "Optional[80]", "after filter": "Optional[80]" }, "out": "",
+          "note": "filter runs the predicate on 80. It passes, so the Optional is returned unchanged." },
+        { "line": 6, "vars": { "sku": "\"BOLT-7\"", "after filter": "Optional[80]", "price": "80" }, "out": "",
+          "note": "orElse finds a value present and returns it. The 0 was evaluated anyway — harmless for a literal." },
+        { "line": 8, "vars": { "sku": "\"BOLT-7\"", "price": "80" }, "out": "BOLT-7 -> 80",
+          "note": "First run complete." },
+        { "line": 1, "vars": { "sku": "\"NOPE\"", "found": "Optional.empty" }, "out": "BOLT-7 -> 80",
+          "note": "Run 2. CATALOGUE.get returns null; ofNullable turns null into the empty Optional. No exception — that is the point." },
+        { "line": 4, "vars": { "sku": "\"NOPE\"", "found": "Optional.empty", "after map": "Optional.empty" }, "out": "BOLT-7 -> 80",
+          "note": "map on an empty Optional does NOT call the function. Product::priceInCents is never invoked, so there is no null to dereference. Empty flows through." },
+        { "line": 5, "vars": { "sku": "\"NOPE\"", "after map": "Optional.empty", "after filter": "Optional.empty" }, "out": "BOLT-7 -> 80",
+          "note": "filter on empty is also a no-op. The predicate never runs." },
+        { "line": 6, "vars": { "sku": "\"NOPE\"", "after filter": "Optional.empty", "price": "0" }, "out": "BOLT-7 -> 80",
+          "note": "orElse is where the empty case is finally decided: the default is returned. One decision, at the end, instead of a null check at every step." },
+        { "line": 8, "vars": { "sku": "\"NOPE\"", "price": "0" }, "out": "BOLT-7 -> 80\nNOPE -> 0",
+          "note": "Second run complete." },
+        { "line": 1, "vars": { "sku": "\"FREE-1\"", "found": "Optional[Product[FREE-1, 0, …]]" }, "out": "BOLT-7 -> 80\nNOPE -> 0",
+          "note": "Run 3. FREE-1 exists, so this starts out present." },
+        { "line": 4, "vars": { "sku": "\"FREE-1\"", "found": "Optional[Product[…]]", "after map": "Optional[0]" }, "out": "BOLT-7 -> 80\nNOPE -> 0",
+          "note": "map extracts the price: zero." },
+        { "line": 5, "vars": { "sku": "\"FREE-1\"", "after map": "Optional[0]", "after filter": "Optional.empty" }, "out": "BOLT-7 -> 80\nNOPE -> 0",
+          "note": "filter runs p > 0 on 0, which is false, so it returns EMPTY. A present Optional became empty mid-chain — filter is the only method that does that." },
+        { "line": 6, "vars": { "sku": "\"FREE-1\"", "after filter": "Optional.empty", "price": "0" }, "out": "BOLT-7 -> 80\nNOPE -> 0",
+          "note": "orElse supplies the default. Note the caller cannot tell a missing product from a zero-priced one here — if that distinction matters, the chain needs a different shape." },
+        { "line": 8, "vars": { "sku": "\"FREE-1\"", "price": "0" }, "out": "BOLT-7 -> 80\nNOPE -> 0\nFREE-1 -> 0",
+          "note": "Three runs, one chain, zero null checks." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">The API, by the question it answers</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Optional methods grouped by purpose</caption>
+      <thead><tr><th scope="col">Question</th><th scope="col">Method</th><th scope="col">Notes</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3">How do I make one?</td><td><code>Optional.of(value)</code></td><td>Throws <code>NullPointerException</code> on <code>null</code> — use it when <code>null</code> would be a bug.</td></tr>
+        <tr><td><code>Optional.ofNullable(value)</code></td><td>Maps <code>null</code> to empty. The bridge from <code>Map.get</code>, legacy APIs and nullable fields.</td></tr>
+        <tr><td><code>Optional.empty()</code></td><td>A shared singleton; <code>==</code> on empties is true but do not rely on it.</td></tr>
+        <tr><td rowspan="3">How do I transform the content?</td><td><code>map(fn)</code></td><td>Applies <code>fn</code> when present; a <code>null</code> result from <code>fn</code> becomes empty.</td></tr>
+        <tr><td><code>flatMap(fn)</code></td><td>For an <code>fn</code> that itself returns <code>Optional</code>; avoids <code>Optional&lt;Optional&lt;T&gt;&gt;</code>.</td></tr>
+        <tr><td><code>filter(predicate)</code></td><td>Present and passes → unchanged; present and fails → empty.</td></tr>
+        <tr><td rowspan="5">And if it is empty?</td><td><code>orElse(value)</code></td><td>Argument is evaluated eagerly. Fine for constants.</td></tr>
+        <tr><td><code>orElseGet(supplier)</code></td><td>Supplier runs only when empty. Use for anything that costs.</td></tr>
+        <tr><td><code>orElseThrow()</code> / <code>orElseThrow(supplier)</code></td><td>The no-argument form throws <code>NoSuchElementException</code>; the supplier form lets you name the failure. Prefer this over <code>get()</code>, which does the same thing with a misleading name.</td></tr>
+        <tr><td><code>or(supplier)</code></td><td>Supplies another <code>Optional</code>: "try this lookup, then that one". Java 9+.</td></tr>
+        <tr><td><code>ifPresent(consumer)</code> / <code>ifPresentOrElse(consumer, runnable)</code></td><td>Side-effect forms. Replace the <code>if (o.isPresent()) o.get()</code> pair.</td></tr>
+        <tr><td rowspan="2">How do I get out of it?</td><td><code>stream()</code></td><td>Zero or one element. Inside <code>flatMap</code> it drops the empties for free. Java 9+.</td></tr>
+        <tr><td><code>isPresent()</code> / <code>isEmpty()</code></td><td>Legitimate in a condition that does something other than unwrap. A sign of trouble right before <code>get()</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted"><code>OptionalInt</code>, <code>OptionalLong</code> and <code>OptionalDouble</code> are what the primitive streams return from <code>max()</code>, <code>average()</code> and <code>findFirst()</code>. They avoid boxing, and have the same methods with primitive names — <code>getAsInt</code>, <code>orElse(int)</code> — but no <code>map</code> or <code>filter</code>. Convert with <code>stream().boxed()</code> if you need the full API.</p>
+
+  <h3 class="mt-8 mb-3">Where <code>Optional</code> must not go</h3>
+
+  <p>Its designers were explicit: <code>Optional</code> is for return types. Everywhere else it adds an allocation, a level of indirection and a second way to be empty (the <code>Optional</code> reference itself can still be <code>null</code>) without adding information.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Places Optional does not belong and what to use instead</caption>
+      <thead><tr><th scope="col">Do not write</th><th scope="col">Why</th><th scope="col">Instead</th></tr></thead>
+      <tbody>
+        <tr><td>A field: <code>private Optional&lt;String&gt; supplier;</code></td><td>It is not <code>Serializable</code>, it doubles the memory of every nullable field, and the field can still be <code>null</code>.</td><td>A nullable field with an accessor that returns <code>Optional</code>: <code>Optional&lt;String&gt; supplier() { return Optional.ofNullable(supplier); }</code></td></tr>
+        <tr><td>A parameter: <code>void price(Optional&lt;Discount&gt; d)</code></td><td>Every caller must wrap, and the method still has to handle a <code>null</code> argument.</td><td>Two overloads, or a nullable parameter documented as such.</td></tr>
+        <tr><td><code>Optional&lt;List&lt;Product&gt;&gt;</code></td><td>An empty list already means "none". Two ways to say nothing means two checks.</td><td>Return the empty list.</td></tr>
+        <tr><td>As a collection element or map value</td><td><code>Map.get</code> then returns <code>null</code> for a missing key and <code>Optional.empty</code> for a present-but-empty one — a distinction nobody wants.</td><td>Store the value or nothing; <code>Map.get</code> and <code>Optional.ofNullable</code> at the read site.</td></tr>
+        <tr><td><code>Optional.of(x).map(…).orElse(…)</code> on a value you know is present</td><td>It is a verbose ternary.</td><td><code>x == null ? d : f(x)</code>, or just <code>f(x)</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Optional gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>get()</code> is <code>orElseThrow()</code> with a friendly name.</strong> It throws <code>NoSuchElementException</code> on empty, so <code>findBySku(s).get()</code> is a <code>NullPointerException</code> with a different class. If you must unwrap unconditionally, write <code>orElseThrow()</code> so the intent is visible.</li>
+        <li><strong><code>isPresent()</code> then <code>get()</code> is a null check in costume.</strong> It is exactly <code>if (x != null) use(x)</code> with more characters. The chain methods exist so that you never write it.</li>
+        <li><strong><code>orElse(expensive())</code> always runs <code>expensive()</code>.</strong> Shown above. A logging statement inside the default method is the usual way this is discovered.</li>
+        <li><strong>Returning <code>null</code> from a method typed <code>Optional</code> is the worst of both worlds.</strong> The caller trusted the signature and will call <code>.map</code> on <code>null</code>. Return <code>Optional.empty()</code>, always.</li>
+        <li><strong><code>Optional</code> is a value-based class.</strong> Do not synchronise on it, compare it with <code>==</code>, or use it as a map key. Equality is by content: <code>Optional.of(1).equals(Optional.of(1))</code> is <code>true</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-optional-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>loadDefault()</code> reads a configuration file and prints "loading" when it runs. What does <code>findBySku("BOLT-7").map(Product::priceInCents).orElse(loadDefault())</code> print when <code>BOLT-7</code> exists?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-optional-1"><span>Nothing — the value is present, so the default is not needed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-optional-1"><span>It does not compile — <code>orElse</code> needs a <code>Supplier</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-optional-1"><span>"loading" — the argument is evaluated before <code>orElse</code> is even called <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-optional-1"><span>"loading" twice — once for <code>map</code> and once for <code>orElse</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>orElse</code> is a normal method, and Java evaluates every argument before entering a method. The file is read, "loading" is printed, and then the value is thrown away because the <code>Optional</code> was present. <code>orElseGet(Optionals::loadDefault)</code> is the fix.</p>
+        <p class="mb-0"><strong>A</strong> is what people expect, and is exactly the behaviour of <code>orElseGet</code>, not <code>orElse</code>. <strong>B</strong> is backwards: <code>orElseGet</code> takes the <code>Supplier</code>; <code>orElse</code> takes a plain value, which is why it is eager. <strong>D</strong> is wrong because <code>map</code> never sees <code>loadDefault</code> at all.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-optional-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>supplierOf</code> returns <code>Optional&lt;String&gt;</code>. What is the type of <code>findBySku("NUT-3").map(Optionals::supplierOf)</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-optional-2"><span><code>Optional&lt;String&gt;</code> — <code>map</code> flattens automatically <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-optional-2"><span><code>Optional&lt;Optional&lt;String&gt;&gt;</code> — it should have been <code>flatMap</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-optional-2"><span>It does not compile — <code>map</code> rejects a function returning <code>Optional</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-optional-2"><span><code>String</code> — <code>map</code> unwraps the result <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>map</code> wraps whatever the function returns, and the function returns an <code>Optional</code>, so you get an <code>Optional</code> inside an <code>Optional</code>. It compiles, and then <code>.orElse("none")</code> fails to compile because the outer content is not a <code>String</code>. <code>flatMap</code> is defined for exactly this: its function must return an <code>Optional</code>, and that <code>Optional</code> is used as the result directly.</p>
+        <p class="mb-0"><strong>A</strong> describes <code>flatMap</code>. <strong>C</strong> is wrong because <code>map</code> accepts any function; it has no idea <code>Optional</code> is special. <strong>D</strong> is wrong because no <code>Optional</code> method silently unwraps — that is the entire design.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-optional-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which uses of <code>Optional</code> are considered correct by its own designers? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A return type: <code>Optional&lt;Product&gt; findBySku(String sku)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A field in a <code>Serializable</code> entity: <code>Optional&lt;String&gt; supplierSku</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Inside a stream: <code>.flatMap(sku -&gt; findBySku(sku).stream())</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A parameter so callers can pass "no discount": <code>int price(Product p, Optional&lt;Discount&gt; d)</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> A return type is the intended use, and <code>Optional.stream()</code> was added in Java 9 precisely so that a lookup returning <code>Optional</code> composes with <code>flatMap</code> to drop the misses.</p>
+        <p class="mb-0"><strong>B</strong> fails twice: <code>Optional</code> is not <code>Serializable</code>, so the entity will not serialise, and the field itself can still be <code>null</code>. <strong>D</strong> forces every caller to wrap — <code>price(p, Optional.empty())</code> — and the method must still guard against a <code>null</code> argument; an overload <code>price(Product)</code> is the idiom.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="optional"> Mark this section complete
+  </label>
+</section>

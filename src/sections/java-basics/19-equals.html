@@ -1,0 +1,198 @@
+<section class="lm-section" id="equals" data-title="equals, hashCode, toString" data-num="10">
+  <p class="lm-eyebrow">Section 10</p>
+  <h2 class="mb-4"><code>equals</code>, <code>hashCode</code>, <code>toString</code></h2>
+
+  <p>Every class inherits these three from <code>Object</code>, and the inherited versions are almost never what you want. <code>equals</code> defaults to reference identity, <code>hashCode</code> to a value derived from the object's identity, and <code>toString</code> to a class name and a hex hash.</p>
+
+  <p>The critical rule is that <strong><code>equals</code> and <code>hashCode</code> are one contract, not two methods</strong>: if two objects are <code>equals</code>, they <em>must</em> return the same <code>hashCode</code>. Override one without the other and every hash-based collection in the JDK starts giving wrong answers — quietly, with no exception.</p>
+
+  <h3 class="mt-8 mb-3">See the buckets</h3>
+
+  <div class="lm-card" data-sandbox="hash-buckets">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10M15 10v10"/></svg>
+      A <code>HashSet</code> receiving two equal parts and one different one
+    </div>
+    <label class="lm-check mb-3">
+      <input type="checkbox" data-sb-override checked> <code>hashCode()</code> overridden consistently with <code>equals</code>
+    </label>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p><code>BadPart</code> below overrides both methods — but derives the hash from a per-instance <code>id</code> that <code>equals</code> never looks at. That is a contract violation, and it fails deterministically.</p>
+
+  <pre data-code data-lang="java" data-file="EqualsContract.java" data-verify="EqualsContract" data-bad="12">
+import java.util.HashSet;
+import java.util.Set;
+
+public class EqualsContract {
+
+    static final class BadPart {
+        private static int counter = 0;
+        private final String sku;
+        private final int id = ++counter;
+
+        BadPart(String sku) { this.sku = sku; }
+
+        @Override public int hashCode() { return id; }   // NOT derived from sku
+        @Override public boolean equals(Object o) {
+            return o instanceof BadPart other && sku.equals(other.sku);
+        }
+    }
+
+    static final class GoodPart {
+        private final String sku;
+
+        GoodPart(String sku) { this.sku = sku; }
+
+        @Override public int hashCode() { return sku.hashCode(); }
+        @Override public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof GoodPart other)) return false;
+            return sku.equals(other.sku);
+        }
+        @Override public String toString() { return "GoodPart[sku=" + sku + "]"; }
+    }
+
+    public static void main(String[] args) {
+        Set<BadPart> bad = new HashSet<>();
+        bad.add(new BadPart("BOLT-7"));
+        bad.add(new BadPart("BOLT-7"));
+        System.out.println("bad  equals    -> " + new BadPart("X").equals(new BadPart("X")));
+        System.out.println("bad  set size  -> " + bad.size());
+        System.out.println("bad  contains  -> " + bad.contains(new BadPart("BOLT-7")));
+
+        Set<GoodPart> good = new HashSet<>();
+        good.add(new GoodPart("BOLT-7"));
+        good.add(new GoodPart("BOLT-7"));
+        System.out.println("good equals    -> " + new GoodPart("X").equals(new GoodPart("X")));
+        System.out.println("good set size  -> " + good.size());
+        System.out.println("good contains  -> " + good.contains(new GoodPart("BOLT-7")));
+        System.out.println("good toString  -> " + new GoodPart("BOLT-7"));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="EqualsContract">
+bad  equals    -> true
+bad  set size  -> 2
+bad  contains  -> false
+good equals    -> true
+good set size  -> 1
+good contains  -> true
+good toString  -> GoodPart[sku=BOLT-7]
+  </pre>
+
+  <p>Read the first three lines together: the two <code>BadPart</code>s <em>are</em> equal, the set still holds both, and looking one up fails. A hash collection computes the hash first and only compares with <code>equals</code> inside the matching bucket — so unequal hashes mean <code>equals</code> is never even called. Omitting <code>hashCode</code> entirely produces the same failure, just non-deterministically, since identity hashes occasionally collide by luck.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">The <code>equals</code> contract</div>
+      <p class="mb-0">For non-null <code>x</code>, <code>y</code>, <code>z</code>: <strong>reflexive</strong> — <code>x.equals(x)</code>; <strong>symmetric</strong> — <code>x.equals(y)</code> implies <code>y.equals(x)</code>; <strong>transitive</strong>; <strong>consistent</strong> across repeated calls; and <code>x.equals(null)</code> is always <code>false</code>. Symmetry is the one subclassing breaks: if <code>equals</code> uses <code>getClass() != o.getClass()</code>, a subclass instance is never equal to a base instance; if it uses <code>instanceof</code>, a base instance can be equal to a subclass instance but not the reverse. Declaring value classes <code>final</code> — as above — sidesteps the whole problem.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Build a correct <code>equals</code></h3>
+
+  <p>Put these five lines in the right order. Aim for the version that is correct <em>and</em> exits early on the cheapest checks.</p>
+
+  <div class="lm-card lm-order-wrap" data-order data-solution="a,b,c,d,e">
+    <ol class="lm-order">
+      <li class="lm-order-item" data-id="d" data-shuffle="0">
+        <span class="lm-order-pos">1</span>
+        <span>    return sku.equals(other.sku);</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="b" data-shuffle="1">
+        <span class="lm-order-pos">2</span>
+        <span>    if (this == o) return true;</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="e" data-shuffle="2">
+        <span class="lm-order-pos">3</span>
+        <span>}</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="a" data-shuffle="3">
+        <span>@Override public boolean equals(Object o) {</span>
+        <span class="lm-order-pos">4</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+      <li class="lm-order-item" data-id="c" data-shuffle="4">
+        <span class="lm-order-pos">5</span>
+        <span>    if (!(o instanceof GoodPart other)) return false;</span>
+        <button type="button" class="lm-iconbtn" data-up aria-label="Move line up">↑</button>
+        <button type="button" class="lm-iconbtn" data-down aria-label="Move line down">↓</button>
+      </li>
+    </ol>
+    <div class="flex gap-2 mt-3">
+      <button type="button" class="lm-btn lm-btn--primary" data-order-check>Check order</button>
+      <button type="button" class="lm-btn" data-order-reset>Reset</button>
+    </div>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">Correct. The identity check first because it is a single pointer comparison and is often true for repeated lookups. Then the <code>instanceof</code> pattern, which handles the wrong type <em>and</em> <code>null</code> in one test — <code>null instanceof Anything</code> is <code>false</code> — and binds <code>other</code> so no cast is needed. Only then the field comparison, which is the expensive part.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Wrong parameter type silently overloads.</strong> <code>public boolean equals(GoodPart o)</code> does not override anything — <code>Object.equals</code> still wins when a collection calls it. <code>@Override</code> catches this instantly.</li>
+        <li><strong>Never hash on a mutable field.</strong> Mutate a key after inserting it into a <code>HashMap</code> and it moves to a bucket nobody will look in. The entry is lost, and it still holds memory.</li>
+        <li><strong><code>Objects.equals</code> and <code>Objects.hash</code> handle null.</strong> <code>Objects.hash(sku, price)</code> is the readable default; for a hot path with one field, <code>sku.hashCode()</code> avoids the varargs array allocation.</li>
+        <li><strong>Write <code>toString</code> for humans, and never put secrets in it.</strong> It ends up in logs and exception messages. Tokens, passwords and full card numbers must not.</li>
+        <li><strong>A <code>record</code> gives you all three, correctly, for free.</strong> If the class is a transparent carrier of data, use one — Java Intermediate covers them.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-eq-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A <code>Product</code> overrides <code>equals</code> on <code>sku</code> but not <code>hashCode</code>. Two products with the same SKU go into a <code>HashSet</code>. What is most likely observed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-eq-1"><span>Size 1 — <code>equals</code> deduplicates them <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-eq-1"><span>An exception when the second is added <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-eq-1"><span>Size 2, and <code>contains</code> with an equal product returns <code>false</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-eq-1"><span>Size 2, but <code>contains</code> still returns <code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Different identity hashes almost always mean different buckets, so <code>equals</code> is never consulted and the duplicate is stored. A lookup with a third equal instance hashes somewhere else again and finds nothing.</p>
+        <p class="mb-0"><strong>A</strong> is what you would get if <code>hashCode</code> were also overridden. <strong>B</strong> never happens — the JDK cannot detect the violation, which is the whole problem. <strong>D</strong> is self-contradictory: the same hash mismatch that allowed the duplicate also breaks the lookup. Note "most likely" — with luck the two identity hashes land in the same bucket and you get size 1, which is worse still, because the bug then appears only intermittently.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-eq-2" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Is <code>hashCode() { return 1; }</code> — the same value for every instance — a violation of the contract?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-eq-2"><span>No, it is legal but terrible: every entry collides into one bucket, degrading lookups to O(n) <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-eq-2"><span>Yes — unequal objects are required to have unequal hash codes <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-eq-2"><span>Yes — <code>hashCode</code> must be derived from the fields used by <code>equals</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-eq-2"><span>No, and it performs identically because <code>equals</code> is checked anyway <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> The contract only requires that <em>equal</em> objects share a hash code. A constant satisfies that trivially and is therefore correct — just pathologically slow, since a hash map degenerates to a single bucket. (Modern <code>HashMap</code> treeifies large buckets, softening it to O(log n) for comparable keys, but it is still the wrong thing to ship.)</p>
+        <p class="mb-0"><strong>B</strong> states the converse, which is not required and cannot be — there are more possible objects than <code>int</code> values, so collisions are unavoidable. <strong>C</strong> is excellent advice and the practical way to satisfy the contract, but it is not itself the rule. <strong>D</strong> gets the verdict right and the reasoning wrong: <code>equals</code> is only reached for entries already in the same bucket, so the collisions are precisely what costs you.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="equals"> Mark this section complete
+  </label>
+</section>

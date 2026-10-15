@@ -1,0 +1,47 @@
+<section class="lm-section" id="prerequisites" data-title="Prerequisites" data-num="ii">
+  <p class="lm-eyebrow">Before you begin</p>
+  <h2 class="mb-4">Prerequisites</h2>
+
+  <p>This module assumes you already program in <em>some</em> language. It does not assume you have written Java. Each item below is something you should already be able to do without looking it up:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Prerequisite skills and what they are needed for</caption>
+      <thead>
+        <tr><th scope="col">You should already be able to…</th><th scope="col">Because this module…</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Read a <code>for</code> loop and an <code>if</code>/<code>else</code> in any C-family language</td><td>spends its time on Java's <em>semantics</em>, not on what a loop is</td></tr>
+        <tr><td>Explain the difference between a variable and the value it holds</td><td>leans hard on that distinction for references, <code>==</code>, and the string pool</td></tr>
+        <tr><td>Run a command in a terminal and know what a working directory is</td><td>asks you to run <code>javac</code> and <code>java</code> yourself in the lab</td></tr>
+        <tr><td>Describe what a function parameter and a return value are</td><td>builds on that for overloading, varargs, and dispatch</td></tr>
+        <tr><td>Recognise that computers store numbers in a fixed number of bits</td><td>shows you exactly what happens when an <code>int</code> runs out of them</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">What you need installed</div>
+      <p class="mb-2">A JDK 21 or newer, and nothing else. No IDE is required — every example in this module compiles from the command line.</p>
+      <pre data-code data-lang="bash" data-nobar>
+java -version    # expect: openjdk version "21.x" or newer
+javac -version   # the compiler ships with the JDK, not the JRE
+      </pre>
+      <p class="mb-0 text-sm">If <code>javac</code> is missing but <code>java</code> works, you have a JRE rather than a JDK. Section 1 explains the difference and why it matters.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">If you are coming from a specific language</div>
+      <ul class="mb-0">
+        <li><strong>Python or JavaScript:</strong> the biggest adjustment is static typing and the primitive/object split (sections 2 and 3). Expect the compiler to reject things your old language happily ran.</li>
+        <li><strong>C or C++:</strong> there are no pointers you can dereference, no destructors, and no manual <code>free</code>. But there <em>are</em> references, and the distinction between a reference and the object it points to matters constantly.</li>
+        <li><strong>C#:</strong> the languages rhyme, but Java's generics are erased rather than reified (section 13), and <code>==</code> on objects never means value equality (section 10).</li>
+      </ul>
+    </div>
+  </div>
+</section>

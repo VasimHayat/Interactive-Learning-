@@ -1,0 +1,26 @@
+<section class="lm-section" id="objectives" data-title="Learning objectives" data-num="iii">
+  <p class="lm-eyebrow">The contract</p>
+  <h2 class="mb-4">Learning objectives</h2>
+
+  <p>By the end of this module you will be able to do each of the following without reaching for a reference. The final quiz tests exactly these.</p>
+
+  <ol class="max-w-prose">
+    <li><strong>Trace</strong> a <code>.java</code> file through <code>javac</code>, class loading, and JIT compilation, and say which artefact the JDK, JRE and JVM each own.</li>
+    <li><strong>Predict</strong> the result of integer arithmetic that overflows, of <code>==</code> on boxed values, and of division and modulo on negative operands.</li>
+    <li><strong>Explain</strong> why <code>String</code> is immutable, when two string literals share one object, and what <code>intern()</code> changes.</li>
+    <li><strong>Choose</strong> the right collection for a stated access pattern, and justify it in terms of the cost of the operations you actually perform.</li>
+    <li><strong>Implement</strong> <code>equals</code> and <code>hashCode</code> as a matched pair, and diagnose the failure that follows from overriding only one.</li>
+    <li><strong>Distinguish</strong> checked from unchecked exceptions, and write a <code>try</code>-with-resources block that closes its resources in the correct order.</li>
+    <li><strong>Resolve</strong> an overloaded method call by hand, in the same three phases the compiler uses.</li>
+    <li><strong>Diagnose</strong> a <code>NullPointerException</code>, a <code>ClassCastException</code> from a raw type, and a <code>ConcurrentModificationException</code> from their stack traces and fix each at its cause.</li>
+    <li><strong>Apply</strong> the four access levels correctly, and state which one a member gets when you write no modifier at all.</li>
+  </ol>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Deliberately out of scope</div>
+      <p class="mb-0">Lambdas, streams, concurrency, records, sealed types, pattern matching, the module system and reflection all belong to <em>Java Intermediate</em>. They are mentioned here only where a beginner would otherwise be confused by seeing them in real code. Generics appear, but only as far as declaring and consuming <code>List&lt;Product&gt;</code> — wildcards and erasure edge cases are the advanced module's job.</p>
+    </div>
+  </div>
+</section>

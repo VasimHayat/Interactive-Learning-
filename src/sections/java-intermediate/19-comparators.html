@@ -1,0 +1,369 @@
+<section class="lm-section" id="comparators" data-title="Comparable, Comparator and immutability" data-num="10">
+  <p class="lm-eyebrow">Section 10</p>
+  <h2 class="mb-4">Comparable, Comparator and immutability</h2>
+
+  <p>Two ideas that look unrelated and are not. Ordering is a contract: <code>compareTo</code> promises things about every pair of values, and <code>TreeSet</code>, <code>TreeMap</code> and every sort rely on those promises without checking them. Immutability is the strongest way to keep such contracts true, because a value that cannot change cannot drift out of the order it was inserted under, cannot be mutated by one caller behind another's back, and can be shared and cached without a second thought. The warehouse reports in §5 and §6 sort products and group them; this section is what makes that safe.</p>
+
+  <h3 class="mt-8 mb-3">Comparable: the natural order</h3>
+
+  <p>A class implements <code>Comparable&lt;T&gt;</code> to say "my instances have one obvious ordering". <code>String</code> compares lexicographically, <code>Integer</code> numerically, <code>LocalDate</code> chronologically. The method returns a negative number, zero or a positive number, and must obey three rules for every <code>a</code>, <code>b</code> and <code>c</code>:</p>
+
+  <ul>
+    <li><strong>Antisymmetry:</strong> <code>sgn(a.compareTo(b)) == -sgn(b.compareTo(a))</code>. If <code>a &lt; b</code> then <code>b &gt; a</code>.</li>
+    <li><strong>Transitivity:</strong> <code>a &lt; b</code> and <code>b &lt; c</code> imply <code>a &lt; c</code>. A sort that gets inconsistent answers may loop or throw <code>IllegalArgumentException: Comparison method violates its general contract</code>.</li>
+    <li><strong>Consistency with equals</strong>, strongly recommended: <code>a.compareTo(b) == 0</code> exactly when <code>a.equals(b)</code>. Sorted collections use <code>compareTo</code> to decide duplicates, so when the two disagree, a <code>TreeSet</code> and a <code>HashSet</code> hold different elements for the same input.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Sorting.java" data-verify="Sorting" data-hi="29,32,35" data-bad="43,44">
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+
+public class Sorting {
+
+    static final class Product implements Comparable<Product> {
+        private final String sku;
+        private final int priceInCents;
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+        @Override public int compareTo(Product o) { return sku.compareTo(o.sku); }   // natural order: by SKU
+        @Override public String toString() { return sku + "@" + priceInCents; }
+    }
+
+    public static void main(String[] args) {
+        List<Product> cart = new ArrayList<>(List.of(
+                new Product("NUT-3", 25), new Product("BOLT-7", 80),
+                new Product("CAM-9", 80), new Product("ROD-4", 300)));
+
+        Collections.sort(cart);                                      // natural order via compareTo
+        System.out.println("natural           " + cart);
+
+        cart.sort(Comparator.comparingInt(Product::priceInCents));   // stable: BOLT-7 stays before CAM-9
+        System.out.println("by price (stable) " + cart);
+
+        cart.sort(Comparator.comparing(Product::priceInCents).thenComparing(Product::sku).reversed());
+        System.out.println("(price,sku) rev   " + cart);
+
+        cart.sort(Comparator.comparing(Product::priceInCents, Comparator.reverseOrder()).thenComparing(Product::sku));
+        System.out.println("price desc, sku   " + cart);
+
+        List<String> skus = new ArrayList<>(Arrays.asList("NUT-3", null, "BOLT-7"));
+        skus.sort(Comparator.nullsFirst(Comparator.naturalOrder()));
+        System.out.println("nulls first       " + skus);
+
+        // a comparator inconsistent with equals: the set treats equal-priced products as duplicates
+        Set<Product> byPrice = new TreeSet<>(Comparator.comparingInt(Product::priceInCents));
+        byPrice.addAll(cart);
+        System.out.println("TreeSet by price  " + byPrice + "  size=" + byPrice.size() + " of " + cart.size());
+
+        int a = Integer.MAX_VALUE, b = -1;
+        System.out.println("a - b             " + (a - b) + "  (overflow: wrong sign)");
+        System.out.println("Integer.compare   " + Integer.compare(a, b));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Sorting">
+natural           [BOLT-7@80, CAM-9@80, NUT-3@25, ROD-4@300]
+by price (stable) [NUT-3@25, BOLT-7@80, CAM-9@80, ROD-4@300]
+(price,sku) rev   [ROD-4@300, CAM-9@80, BOLT-7@80, NUT-3@25]
+price desc, sku   [ROD-4@300, BOLT-7@80, CAM-9@80, NUT-3@25]
+nulls first       [null, BOLT-7, NUT-3]
+TreeSet by price  [NUT-3@25, BOLT-7@80, ROD-4@300]  size=3 of 4
+a - b             -2147483648  (overflow: wrong sign)
+Integer.compare   1
+  </pre>
+
+  <p>Line 29 shows a <strong>stable</strong> sort: <code>BOLT-7</code> and <code>CAM-9</code> both cost 80, and they keep the relative order they had before. Every object sort in the JDK is stable, which is what makes "sort by category, then by price" achievable as two successive sorts as well as one chained comparator. Lines 32 and 35 produce different results from what look like the same ingredients; the reason is the gotcha below. Line 43 silently drops <code>CAM-9</code>: the comparator says it is "equal" to <code>BOLT-7</code>, and a set keeps one of each. The last two lines are why you never write <code>return a - b</code> in a comparator: the subtraction overflows, and <code>Integer.compare</code> does not.</p>
+
+  <h3 class="mt-8 mb-3">Building comparators</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Comparator factory and combinator methods</caption>
+      <thead><tr><th scope="col">Method</th><th scope="col">Produces</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        <tr><td><code>Comparator.comparing(keyFn)</code></td><td>order by a <code>Comparable</code> key</td><td><code>comparing(Product::sku)</code></td></tr>
+        <tr><td><code>comparing(keyFn, keyCmp)</code></td><td>order by a key using a second comparator</td><td>the clean way to say "price descending, then sku ascending"</td></tr>
+        <tr><td><code>comparingInt / Long / Double</code></td><td>primitive key, no boxing</td><td>prefer for numeric fields</td></tr>
+        <tr><td><code>.thenComparing(…)</code></td><td>tie-breaker applied only when the previous compare returned 0</td><td>chains indefinitely; also has <code>thenComparingInt</code></td></tr>
+        <tr><td><code>.reversed()</code></td><td>the opposite of <strong>everything built so far</strong></td><td>see the gotcha</td></tr>
+        <tr><td><code>Comparator.naturalOrder() / reverseOrder()</code></td><td>the element's own <code>compareTo</code>, or its reverse</td><td>typed; needs a <code>Comparable</code> element</td></tr>
+        <tr><td><code>nullsFirst(cmp) / nullsLast(cmp)</code></td><td>a comparator that tolerates nulls</td><td>everything else throws <code>NullPointerException</code> on a null element</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title"><code>reversed()</code> reverses the whole chain, not the last key</div>
+      <p><code>comparing(price).thenComparing(sku).reversed()</code> means "the reverse of (price, then sku)": price descending <em>and</em> sku descending, which is why line 32 printed <code>CAM-9</code> before <code>BOLT-7</code>. It is a method on the comparator you have built so far, so it cannot know you meant only the last key. To reverse one key, reverse that key's comparator: <code>comparing(price, reverseOrder()).thenComparing(sku)</code>, as on line 35.</p>
+      <p class="mb-0">A second trap in the same family: <code>Comparator.comparing(Product::priceInCents).reversed()</code> compiles, but <code>Comparator.comparing(p -> p.priceInCents()).reversed()</code> does not. With a lambda the compiler cannot infer <code>p</code>'s type before it sees <code>reversed()</code>, which gives it nothing to go on. A method reference carries the type; a lambda needs <code>Comparator.comparing((Product p) -> …)</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Where sorting happens</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Sorting entry points">
+      <button type="button" class="lm-tab" role="tab" id="tab-comparators-list" aria-controls="panel-comparators-list" aria-selected="true" tabindex="0">Lists</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-comparators-arrays" aria-controls="panel-comparators-arrays" aria-selected="false" tabindex="-1">Arrays</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-comparators-streams" aria-controls="panel-comparators-streams" aria-selected="false" tabindex="-1">Streams and sorted collections</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-comparators-list" aria-labelledby="tab-comparators-list" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+cart.sort(null);                       // natural order (List.sort, Java 8+): sorts in place
+cart.sort(byPrice);                    // same, with a comparator
+Collections.sort(cart);                // the older spelling; delegates to list.sort
+      </pre>
+      <p class="mb-0">Both sort <em>in place</em> using TimSort: a stable merge sort that runs in O(n) on already-sorted or nearly-sorted input and O(n log n) otherwise. An immutable list (<code>List.of</code>) throws <code>UnsupportedOperationException</code>; copy it first.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-comparators-arrays" aria-labelledby="tab-comparators-arrays" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+int[] prices = { 300, 25, 80, 80 };
+Arrays.sort(prices);                   // dual-pivot quicksort: fast, NOT stable, primitives only
+
+Product[] items = …;
+Arrays.sort(items, byPrice);           // TimSort: stable, any Comparator
+Arrays.parallelSort(items, byPrice);   // splits across cores; worth it from ~10⁴ elements
+      </pre>
+      <p class="mb-0">Stability is meaningless for primitives, since two equal <code>int</code>s are indistinguishable, so the JDK uses a faster unstable algorithm for them. For objects it must preserve order among "equal" elements and uses TimSort.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-comparators-streams" aria-labelledby="tab-comparators-streams" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+List<Product> cheapest = cart.stream().sorted(byPrice).limit(3).toList();   // a new list; source untouched
+
+Set<Product> ordered = new TreeSet<>(byPrice);     // kept sorted on every insert, O(log n) each
+Map<String, Integer> stock = new TreeMap<>();      // sorted by key; needs Comparable keys or a comparator
+      </pre>
+      <p class="mb-0"><code>sorted()</code> on a stream is a <em>stateful</em> operation: it must see every element before it can emit the first one, so it buffers the whole stream (§5). A <code>TreeSet</code> keeps its order incrementally and is the right choice when elements arrive over time and you repeatedly need the smallest, the largest, or a range.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Immutability: unmodifiable is not immutable</h3>
+
+  <p>Java has two ideas that are easy to confuse. An <strong>unmodifiable view</strong> is a wrapper that refuses writes <em>through itself</em> but shows whatever its underlying collection currently holds. An <strong>immutable collection</strong> owns its elements, has no underlying collection, and cannot change through any reference. The difference is invisible until someone keeps a reference to the original.</p>
+
+  <pre data-code data-lang="java" data-file="Immutable.java" data-verify="Immutable" data-hi="15,16,18,20,21">
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class Immutable {
+
+    static final class Order {
+        private final List<String> skus;                          // final reference to a mutable object
+        Order(List<String> skus) { this.skus = new ArrayList<>(skus); }        // defensive copy in
+        List<String> skus() { return Collections.unmodifiableList(skus); }     // read-only view out
+    }
+
+    public static void main(String[] args) {
+        List<String> source = new ArrayList<>(List.of("BOLT-7", "NUT-3"));
+        List<String> view = Collections.unmodifiableList(source);
+        List<String> copy = List.copyOf(source);
+
+        source.add("CAM-9");
+        System.out.println("source " + source);
+        System.out.println("view   " + view + "   a view: it follows the source");
+        System.out.println("copy   " + copy + "   a snapshot: fixed at copy time");
+
+        try { view.add("ROD-4"); }
+        catch (UnsupportedOperationException e) { System.out.println("view.add            -> UnsupportedOperationException"); }
+
+        try { List.of("BOLT-7", null); }
+        catch (NullPointerException e) { System.out.println("List.of(.., null)   -> NullPointerException"); }
+
+        List<String> input = new ArrayList<>(List.of("PIN-2"));
+        Order order = new Order(input);
+        input.add("HUB-8");                                       // the caller keeps mutating its own list
+        System.out.println("order  " + order.skus() + "   unaffected: the constructor copied");
+
+        try { order.skus().add("HUB-8"); }
+        catch (UnsupportedOperationException e) { System.out.println("order.skus().add    -> UnsupportedOperationException"); }
+
+        System.out.println("List.copyOf(copy) == copy ? " + (List.copyOf(copy) == copy) + "   already immutable, so no new object");
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Immutable">
+source [BOLT-7, NUT-3, CAM-9]
+view   [BOLT-7, NUT-3, CAM-9]   a view: it follows the source
+copy   [BOLT-7, NUT-3]   a snapshot: fixed at copy time
+view.add            -> UnsupportedOperationException
+List.of(.., null)   -> NullPointerException
+order  [PIN-2]   unaffected: the constructor copied
+order.skus().add    -> UnsupportedOperationException
+List.copyOf(copy) == copy ? true   already immutable, so no new object
+  </pre>
+
+  <h3 class="mt-8 mb-3">Watch the three references diverge</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a view versus a copy">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">View, copy, and the source they came from</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="view-vs-copy"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What each reference sees</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="view-vs-copy">
+    {
+      "lang": "java",
+      "code": "List<String> source = new ArrayList<>(List.of(\"BOLT-7\", \"NUT-3\"));\nList<String> view   = Collections.unmodifiableList(source);\nList<String> copy   = List.copyOf(source);\n\nsource.add(\"CAM-9\");\nSystem.out.println(view);\nSystem.out.println(copy);\n\nview.add(\"ROD-4\");\ncopy.add(\"ROD-4\");",
+      "steps": [
+        { "line": 1, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3]" }, "out": "",
+          "note": "One real list on the heap, call it #1. It is an ArrayList: growable, mutable." },
+        { "line": 2, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3]", "view": "UnmodifiableList#2 -> wraps #1" }, "out": "",
+          "note": "The view is a second object that holds a reference to #1. It stores no elements of its own; every read is forwarded to #1, and every write method throws." },
+        { "line": 3, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3]", "view": "UnmodifiableList#2 -> wraps #1", "copy": "ImmutableList#3 [BOLT-7, NUT-3]" }, "out": "",
+          "note": "List.copyOf walks #1 once and builds a third object with its own element storage. From here on #3 has no connection to #1 at all." },
+        { "line": 5, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3, CAM-9]", "view": "UnmodifiableList#2 -> wraps #1", "copy": "ImmutableList#3 [BOLT-7, NUT-3]" }, "out": "",
+          "note": "Only #1 changed. But the view forwards to #1, so anything that reads through the view will see CAM-9 too." },
+        { "line": 6, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3, CAM-9]", "view": "UnmodifiableList#2 -> wraps #1", "copy": "ImmutableList#3 [BOLT-7, NUT-3]" }, "out": "[BOLT-7, NUT-3, CAM-9]",
+          "note": "The view prints three elements. Nobody wrote through it; it is simply a window onto a list that someone else wrote to. 'Unmodifiable' describes the window, not the room." },
+        { "line": 7, "vars": { "source": "ArrayList#1 [BOLT-7, NUT-3, CAM-9]", "view": "UnmodifiableList#2 -> wraps #1", "copy": "ImmutableList#3 [BOLT-7, NUT-3]" }, "out": "[BOLT-7, NUT-3, CAM-9]\n[BOLT-7, NUT-3]",
+          "note": "The copy prints two. It is a snapshot of the moment copyOf ran, and no reference anywhere can change it." },
+        { "line": 9, "vars": { "view.add(...)": "throws UnsupportedOperationException" }, "out": "[BOLT-7, NUT-3, CAM-9]\n[BOLT-7, NUT-3]",
+          "note": "Writes through the view are refused. This is the guarantee the view does give: callers holding only the view cannot change #1. Callers holding #1 itself still can." },
+        { "line": 10, "vars": { "copy.add(...)": "throws UnsupportedOperationException" }, "out": "[BOLT-7, NUT-3, CAM-9]\n[BOLT-7, NUT-3]",
+          "note": "The copy refuses too, and because nothing else references its storage, it is immutable in the full sense. Hand out copies when callers must not see later changes; hand out views when they should." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">The three rules of an immutable class</h3>
+
+  <ol>
+    <li><strong>Every field is <code>private final</code> and set once, in the constructor.</strong> <code>final</code> on a field means the <em>reference</em> cannot be reassigned. It says nothing about the object at the other end, which is why rule 2 exists.</li>
+    <li><strong>Mutable inputs are copied on the way in, and either copied or wrapped on the way out.</strong> The <code>Order</code> above copies the list in its constructor, so a caller who keeps mutating their own list cannot reach inside. Its accessor returns an unmodifiable view, which is safe here precisely because nobody else holds the private list. A <code>Date</code> or an array needs the same treatment; a <code>String</code>, a record of primitives, or a <code>List.copyOf</code> result does not, because they are already immutable.</li>
+    <li><strong>The class is <code>final</code>, or its constructors are private.</strong> Otherwise a subclass can add mutable state and override methods, and code that trusts "an <code>Order</code> never changes" is trusting something a subclass can break. Records satisfy all three rules by construction, which is why §8 recommends them for this job.</li>
+  </ol>
+
+  <p>Immutable collections from <code>List.of</code>, <code>Set.of</code>, <code>Map.of</code> and the <code>copyOf</code> methods add three behaviours of their own: they <strong>reject <code>null</code></strong> elements and keys, they are <strong>value-based</strong> (never compare them with <code>==</code>; the JDK may return the same instance or a new one as it sees fit, as the last line of the program shows), and <code>Set.of</code> and <code>Map.of</code> deliberately <strong>randomise iteration order</strong> per JVM run so that no code can accidentally depend on it.</p>
+
+  <h3 class="mt-8 mb-3">Match the need to the API</h3>
+
+  <div class="lm-card">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag an API onto the situation it solves, or click one then the other
+    </div>
+    <div class="lm-match" data-match>
+      <div class="lm-match-pool" role="group" aria-label="APIs to place">
+        <button type="button" class="lm-chip" data-chip="copyof"><code>List.copyOf(list)</code></button>
+        <button type="button" class="lm-chip" data-chip="unmod"><code>Collections.unmodifiableList(list)</code></button>
+        <button type="button" class="lm-chip" data-chip="nulls"><code>Comparator.nullsLast(naturalOrder())</code></button>
+        <button type="button" class="lm-chip" data-chip="keycmp"><code>comparing(key, reverseOrder())</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Situations">
+        <button type="button" class="lm-slot" data-slot="copyof" data-label="a snapshot that later changes to the source must not affect"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">A snapshot: later changes to the source must not show through</span></button>
+        <button type="button" class="lm-slot" data-slot="unmod" data-label="a live read-only window onto a list the class keeps updating"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">A live, read-only window onto a list this class keeps updating</span></button>
+        <button type="button" class="lm-slot" data-slot="nulls" data-label="sort a list that may contain null elements"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">Sort a list that may contain <code>null</code> elements without throwing</span></button>
+        <button type="button" class="lm-slot" data-slot="keycmp" data-label="one key descending while the tie-breaker stays ascending"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">One key descending while the tie-breaker stays ascending</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. The two list APIs differ only in whether the result follows the source; the two comparator APIs are the fixes for the two most common comparator bugs, a <code>NullPointerException</code> from a null element and a <code>reversed()</code> that reversed too much.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas worth a second read</div>
+      <ul class="mb-0">
+        <li><strong>A sorted collection with a comparator inconsistent with <code>equals</code> loses elements.</strong> <code>TreeSet</code> asks the comparator, never <code>equals</code>, whether two elements are the same. If you want "sort by price but keep every product", sort a list; if you need a set, give the comparator a tie-breaker that only returns 0 for genuinely equal elements: <code>comparingInt(price).thenComparing(sku)</code>.</li>
+        <li><strong>Mutating an element after inserting it into a <code>TreeSet</code> corrupts the tree.</strong> The element sits where its old key put it; lookups by the new key miss, and the set may now contain "duplicates". The same disease as a mutable <code>HashMap</code> key (§11), and the same cure: immutable keys.</li>
+        <li><strong><code>final</code> is not immutability.</strong> <code>private final List&lt;String&gt; skus = new ArrayList&lt;&gt;()</code> prevents <code>skus = other</code> and nothing else. <code>skus.add(…)</code> still compiles and still runs.</li>
+        <li><strong><code>Arrays.asList</code> is fixed-size but not immutable.</strong> <code>set</code> works and writes through to the array; <code>add</code> throws. It is neither a copy nor a true view in the sense above.</li>
+        <li><strong>Equal by <code>compareTo</code>, unequal by <code>equals</code> breaks <code>Collections.sort</code> expectations too.</strong> <code>BigDecimal</code> is the famous case: <code>new BigDecimal("1.0")</code> and <code>new BigDecimal("1.00")</code> compare as 0 but are not <code>equals</code>, so a <code>HashSet</code> holds both and a <code>TreeSet</code> holds one.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-comparators-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>You want products ordered by price <em>descending</em>, and among equal prices by SKU <em>ascending</em>. Which comparator does that?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-comparators-1"><span><code>comparing(Product::priceInCents).thenComparing(Product::sku).reversed()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-comparators-1"><span><code>comparing(Product::priceInCents).reversed().thenComparing(Product::sku).reversed()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-comparators-1"><span><code>comparing(Product::priceInCents, reverseOrder()).thenComparing(Product::sku)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-comparators-1"><span><code>comparing(Product::sku).thenComparing(Product::priceInCents).reversed()</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Reverse the price key alone by giving <code>comparing</code> a reversed key comparator, then add the ascending tie-breaker. Nothing after it is affected.</p>
+        <p class="mb-0"><strong>A</strong> reverses both keys: price descending, sku descending. <strong>B</strong> reverses twice, which puts price back to ascending and sku to descending, the exact opposite of what was asked. <strong>D</strong> sorts primarily by sku, with price as the tie-breaker, and then reverses both.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-comparators-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>Order</code> stores <code>private final List&lt;String&gt; skus</code>, assigned straight from the constructor parameter, and exposes it with <code>return skus;</code>. A caller does <code>List&lt;String&gt; mine = new ArrayList&lt;&gt;(); Order o = new Order(mine); mine.add("X");</code>. What does <code>o.skus()</code> now contain, and what is the fix?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-comparators-2"><span>Nothing; <code>final</code> froze the list at construction. No fix needed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-comparators-2"><span><code>[X]</code>; copy the list in the constructor and return a view or copy from the accessor <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-comparators-2"><span><code>[X]</code>; wrap the field in <code>Collections.unmodifiableList</code> in the constructor <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-comparators-2"><span>It throws <code>ConcurrentModificationException</code> on the next read <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The field and the caller's variable point at the same <code>ArrayList</code>. The defensive copy on the way in gives <code>Order</code> its own list; the view or copy on the way out stops callers writing to it.</p>
+        <p class="mb-0"><strong>A</strong> is the classic misunderstanding: <code>final</code> fixes the reference, not the object. <strong>C</strong> wraps the <em>caller's</em> list in a view, so the caller's later <code>add</code> still shows through; a view protects against writes through itself only. <strong>D</strong> confuses this with iterator fail-fast behaviour, which needs an iteration in progress.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-comparators-3" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Four products are added to <code>new TreeSet&lt;&gt;(comparingInt(Product::priceInCents))</code>. Two of them cost 80. What is the set's size and why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-comparators-3"><span>4: a set deduplicates with <code>equals</code>, and the products are distinct <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-comparators-3"><span>4: the comparator only orders; it never decides membership <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-comparators-3"><span>It throws <code>IllegalArgumentException</code> because the comparator violates its contract <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-comparators-3"><span>3: a <code>TreeSet</code> treats elements the comparator calls equal as duplicates <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> A sorted set has no hash table and never calls <code>equals</code> or <code>hashCode</code>. Its only notion of "same element" is a comparator result of zero, so the second 80-cent product is silently not added. This is what "consistent with equals" guards against.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>B</strong> both assume <code>equals</code> is consulted; it is not. <strong>C</strong>: the comparator is perfectly valid. Returning 0 for distinct objects is allowed by the contract; it is merely inconsistent with <code>equals</code>, which the documentation warns about but cannot detect.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="comparators"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,276 @@
+<section class="lm-section" id="lab" data-title="Hands-on lab" data-num="L">
+  <p class="lm-eyebrow">Put it together</p>
+  <h2 class="mb-4">Hands-on lab: build the <code>InventoryService</code></h2>
+
+  <p>Six steps, each exercising something from the sections above. Write each one before opening the solution — reading a solution you have not attempted teaches almost nothing. Work in a single directory; every step compiles on its own with <code>javac *.java</code>.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Starter</div>
+      <pre data-code data-lang="bash" data-nobar>
+mkdir inventory-lab &amp;&amp; cd inventory-lab
+# create Part.java, InventoryService.java and Lab.java as you go
+javac *.java &amp;&amp; java Lab
+      </pre>
+      <p class="mb-0 text-sm">Everything is in the default package to keep the lab to three files. Real code would use <code>package com.acme.inventory;</code> and matching directories.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Step 1 — an encapsulated value type <span class="lm-badge">§8, §14</span></h3>
+  <p>Write <code>Part</code> with a <code>String sku</code> and an <code>int priceInCents</code>. Both <code>private final</code>. The constructor must reject a null or blank SKU and a negative price with <code>IllegalArgumentException</code>. Expose read accessors, no setters.</p>
+  <details class="lm-reveal"><summary>Solution — step 1</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+public final class Part {
+    private final String sku;
+    private final int priceInCents;
+
+    public Part(String sku, int priceInCents) {
+        if (sku == null || sku.isBlank())
+            throw new IllegalArgumentException("sku must not be blank");
+        if (priceInCents &lt; 0)
+            throw new IllegalArgumentException("price must not be negative: " + priceInCents);
+        this.sku = sku;
+        this.priceInCents = priceInCents;
+    }
+
+    public String sku() { return sku; }
+    public int priceInCents() { return priceInCents; }
+}
+    </pre>
+    <p class="mb-0 text-sm">Validating in the constructor means a <code>Part</code> can never exist in an invalid state — far stronger than checking at every use site. <code>final</code> on the class blocks the subclass that would break <code>equals</code> symmetry in step 2.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 2 — the equality contract <span class="lm-badge">§10</span></h3>
+  <p>Two <code>Part</code>s are the same part when their SKUs match; price is not part of identity. Implement <code>equals</code>, <code>hashCode</code> and <code>toString</code> accordingly.</p>
+  <details class="lm-reveal"><summary>Solution — step 2</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Override public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Part other)) return false;
+    return sku.equals(other.sku);
+}
+
+@Override public int hashCode() { return sku.hashCode(); }
+
+@Override public String toString() {
+    return "Part[" + sku + ", " + priceInCents + "c]";
+}
+    </pre>
+    <p class="mb-0 text-sm">Hash on exactly the field <code>equals</code> uses, and no other. Because <code>sku</code> is <code>final</code>, the hash can never drift after the part is used as a map key.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 3 — pick the right collections <span class="lm-badge">§12</span></h3>
+  <p><code>InventoryService</code> needs stock levels keyed by SKU, and a record of which SKUs have been picked this run, in the order picked. Choose both types and justify the choice to yourself before revealing.</p>
+  <details class="lm-reveal"><summary>Solution — step 3</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+private final Map&lt;String, Integer&gt; onHand = new HashMap&lt;&gt;();
+private final Set&lt;String&gt; pickedThisRun = new LinkedHashSet&lt;&gt;();
+    </pre>
+    <p class="mb-0 text-sm"><code>HashMap</code> for O(1) keyed lookup where iteration order is irrelevant. <code>LinkedHashSet</code> because the picks must be unique <em>and</em> reportable in order — a <code>HashSet</code> would lose the order and a <code>List</code> would allow the same SKU twice.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 4 — a domain exception <span class="lm-badge">§11</span></h3>
+  <p>Add <code>reserve(String sku, int qty)</code>. Throw <code>IllegalArgumentException</code> for a non-positive quantity, and a custom <code>OutOfStockException</code> when the request exceeds stock. Decide whether it should be checked or unchecked, and be able to defend it.</p>
+  <details class="lm-reveal"><summary>Solution — step 4</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+public class OutOfStockException extends Exception {   // CHECKED
+    private final String sku;
+    public OutOfStockException(String sku, int requested, int available) {
+        super("cannot reserve " + requested + " of " + sku + "; only " + available + " on hand");
+        this.sku = sku;
+    }
+    public String sku() { return sku; }
+}
+
+public void reserve(String sku, int qty) throws OutOfStockException {
+    if (qty &lt;= 0) throw new IllegalArgumentException("qty must be positive: " + qty);
+    int available = onHand.getOrDefault(sku, 0);
+    if (qty &gt; available) throw new OutOfStockException(sku, qty, available);
+    onHand.put(sku, available - qty);
+    pickedThisRun.add(sku);
+}
+    </pre>
+    <p class="mb-0 text-sm"><strong>Checked</strong>, because running out of stock is a normal business outcome the caller must decide about — back-order, substitute, or refuse — not a programming mistake. The bad quantity is <strong>unchecked</strong>, because that is a caller bug. Note <code>getOrDefault</code> rather than <code>get</code>: an unknown SKU is zero stock, and <code>get</code> would return <code>null</code> and throw on unboxing.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 5 — try-with-resources <span class="lm-badge">§11</span></h3>
+  <p>Add <code>loadFrom(Path)</code> that reads lines of <code>SKU,QTY</code> and populates <code>onHand</code>, using try-with-resources so the reader always closes. Skip blank lines and lines starting with <code>#</code>.</p>
+  <details class="lm-reveal"><summary>Solution — step 5</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+public void loadFrom(Path file) throws IOException {
+    try (BufferedReader in = Files.newBufferedReader(file)) {
+        String line;
+        while ((line = in.readLine()) != null) {
+            line = line.strip();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            String[] parts = line.split(",");
+            if (parts.length != 2)
+                throw new IOException("malformed line: " + line);
+            onHand.put(parts[0].strip(), Integer.parseInt(parts[1].strip()));
+        }
+    }
+}
+    </pre>
+    <p class="mb-0 text-sm">The reader closes whether the loop finishes, throws, or returns early. <code>strip()</code> rather than <code>trim()</code> so a non-breaking space in an exported file does not survive into a SKU. <code>IOException</code> is declared, not swallowed — the caller decides what a corrupt file means.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 6 — make it generic <span class="lm-badge">§13</span></h3>
+  <p>Extract a <code>Repository&lt;T&gt;</code> interface with <code>save(T)</code>, <code>findById(String)</code> and <code>count()</code>, then have a <code>PartRepository</code> implement <code>Repository&lt;Part&gt;</code>.</p>
+  <details class="lm-reveal"><summary>Solution — step 6</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+public interface Repository&lt;T&gt; {
+    void save(T item);
+    T findById(String id);
+    int count();
+}
+
+public class PartRepository implements Repository&lt;Part&gt; {
+    private final Map&lt;String, Part&gt; byS_ku = new HashMap&lt;&gt;();
+    @Override public void save(Part item) { byS_ku.put(item.sku(), item); }
+    @Override public Part findById(String id) { return byS_ku.get(id); }
+    @Override public int count() { return byS_ku.size(); }
+}
+    </pre>
+    <p class="mb-0 text-sm">Callers get <code>Part</code> back with no cast and no possibility of a <code>ClassCastException</code>. <code>findById</code> returning <code>null</code> for a miss is the conventional shape here; <code>Optional&lt;Part&gt;</code> is the modern alternative and is covered in Java Intermediate.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">The finished thing</h3>
+
+  <p>All six steps assembled. This program is compiled and executed during the build of this page, so the output below is what it really prints.</p>
+
+  <pre data-code data-lang="java" data-file="Lab.java" data-verify="Lab">
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+public class Lab {
+
+    static final class Part {
+        private final String sku;
+        private final int priceInCents;
+
+        Part(String sku, int priceInCents) {
+            if (sku == null || sku.isBlank())
+                throw new IllegalArgumentException("sku must not be blank");
+            if (priceInCents < 0)
+                throw new IllegalArgumentException("price must not be negative: " + priceInCents);
+            this.sku = sku;
+            this.priceInCents = priceInCents;
+        }
+
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+
+        @Override public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof Part other)) return false;
+            return sku.equals(other.sku);
+        }
+        @Override public int hashCode() { return sku.hashCode(); }
+        @Override public String toString() { return "Part[" + sku + ", " + priceInCents + "c]"; }
+    }
+
+    static class OutOfStockException extends Exception {
+        OutOfStockException(String sku, int requested, int available) {
+            super("cannot reserve " + requested + " of " + sku + "; only " + available + " on hand");
+        }
+    }
+
+    interface Repository<T> {
+        void save(T item);
+        T findById(String id);
+        int count();
+    }
+
+    static final class PartRepository implements Repository<Part> {
+        private final Map<String, Part> bySku = new HashMap<>();
+        @Override public void save(Part item) { bySku.put(item.sku(), item); }
+        @Override public Part findById(String id) { return bySku.get(id); }
+        @Override public int count() { return bySku.size(); }
+    }
+
+    static final class InventoryService {
+        private final Map<String, Integer> onHand = new HashMap<>();
+        private final Set<String> pickedThisRun = new LinkedHashSet<>();
+
+        void stock(String sku, int qty) { onHand.put(sku, onHand.getOrDefault(sku, 0) + qty); }
+
+        void reserve(String sku, int qty) throws OutOfStockException {
+            if (qty <= 0) throw new IllegalArgumentException("qty must be positive: " + qty);
+            int available = onHand.getOrDefault(sku, 0);
+            if (qty > available) throw new OutOfStockException(sku, qty, available);
+            onHand.put(sku, available - qty);
+            pickedThisRun.add(sku);
+        }
+
+        int onHand(String sku) { return onHand.getOrDefault(sku, 0); }
+        Set<String> picked() { return Set.copyOf(pickedThisRun); }
+        String pickedInOrder() { return String.join(", ", pickedThisRun); }
+    }
+
+    public static void main(String[] args) {
+        PartRepository repo = new PartRepository();
+        repo.save(new Part("BOLT-7", 80));
+        repo.save(new Part("NUT-3", 25));
+        repo.save(new Part("BOLT-7", 90));          // same sku: replaces, does not duplicate
+        System.out.println("repo count      = " + repo.count());
+        System.out.println("lookup          = " + repo.findById("BOLT-7"));
+        System.out.println("equal by sku    = " + new Part("BOLT-7", 1).equals(new Part("BOLT-7", 999)));
+
+        InventoryService inv = new InventoryService();
+        inv.stock("BOLT-7", 10);
+        inv.stock("NUT-3", 4);
+
+        try {
+            inv.reserve("BOLT-7", 3);
+            inv.reserve("NUT-3", 4);
+            inv.reserve("BOLT-7", 2);
+            inv.reserve("NUT-3", 1);                 // NUT-3 is exhausted
+        } catch (OutOfStockException e) {
+            System.out.println("caught          = " + e.getMessage());
+        }
+
+        try {
+            inv.reserve("BOLT-7", 0);
+        } catch (IllegalArgumentException e) {
+            System.out.println("bad qty         = " + e.getMessage());
+        } catch (OutOfStockException e) {
+            System.out.println("unreachable");
+        }
+
+        System.out.println("BOLT-7 on hand  = " + inv.onHand("BOLT-7"));
+        System.out.println("picked in order = " + inv.pickedInOrder());
+        System.out.println("unknown sku     = " + inv.onHand("NOPE"));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Lab">
+repo count      = 2
+lookup          = Part[BOLT-7, 90c]
+equal by sku    = true
+caught          = cannot reserve 1 of NUT-3; only 0 on hand
+bad qty         = qty must be positive: 0
+BOLT-7 on hand  = 5
+picked in order = BOLT-7, NUT-3
+unknown sku     = 0
+  </pre>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Extensions worth attempting</div>
+      <ul class="mb-0">
+        <li>Add <code>release(sku, qty)</code> that returns stock and removes the SKU from <code>pickedThisRun</code> only when nothing of it remains reserved. You will need a second map — think about what breaks if you forget it.</li>
+        <li>Make <code>reserve</code> atomic across several SKUs: either all succeed or none do. What has to happen to <code>pickedThisRun</code> on rollback?</li>
+        <li>Give <code>Part</code> a <code>Category</code> enum and group the repository by it. Which <code>Map</code> type gives you categories in declaration order?</li>
+      </ul>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lab"> Mark this section complete
+  </label>
+</section>

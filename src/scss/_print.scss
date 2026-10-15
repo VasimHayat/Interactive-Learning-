@@ -1,0 +1,54 @@
+@media print {
+  // force the light palette — dark backgrounds waste toner and print grey
+  :root, :root[data-theme='dark'] {
+    --lm-bg: #ffffff; --lm-surface: #ffffff; --lm-surface-2: #f6f6f4;
+    --lm-border: #cccccc; --lm-border-strong: #999999;
+    --lm-text: #000000; --lm-text-muted: #333333; --lm-text-subtle: #666666;
+    --lm-accent: #7a3d06; --lm-accent-weak: #fdf3e0;
+    --lm-shadow-sm: none; --lm-shadow-md: none; --lm-shadow-lg: none;
+    color-scheme: light;
+  }
+
+  @page { margin: 16mm 14mm; }
+
+  .lm-header,
+  .lm-sidebar,
+  .lm-toc-toggle,
+  .lm-iconbtn,
+  .lm-btn,
+  .lm-stepper-foot,
+  .lm-controls,
+  .lm-flash,
+  .lm-notes,
+  .lm-check,
+  .lm-progress-track,
+  [data-print='hide'] { display: none !important; }
+
+  .lm-shell { display: block; max-width: none; padding: 0; }
+  .lm-main { padding: 0; }
+
+  body { font-size: 10.5pt; line-height: 1.45; }
+  h1 { font-size: 20pt; } h2 { font-size: 15pt; } h3 { font-size: 12.5pt; }
+
+  // everything hidden behind a disclosure must print open
+  .lm-reveal { border: 1px solid var(--lm-border); }
+  .lm-reveal > summary { list-style: none; font-weight: 650; }
+  .lm-reveal-body,
+  .lm-explain,
+  .lm-tabpanel { display: block !important; }
+  details:not([open]) > *:not(summary) { display: revert !important; }
+
+  // code must wrap rather than clip at the page edge
+  .lm-code-body, .lm-scroll-x, .lm-table-wrap, .lm-output pre { overflow: visible !important; }
+  .cl { white-space: pre-wrap; word-break: break-word; }
+  .lm-order-item { white-space: pre-wrap; }
+
+  .lm-section, .lm-card, .lm-callout, .lm-code, .lm-quiz, .lm-table-wrap { break-inside: avoid; }
+  h1, h2, h3, h4 { break-after: avoid; }
+  .lm-section + .lm-section { break-before: page; }
+
+  .lm-table-wrap th { position: static; }
+
+  a[href^='http']::after { content: ' (' attr(href) ')'; font-size: 0.8em; color: var(--lm-text-subtle); word-break: break-all; }
+  a[href^='#']::after { content: ''; }
+}

@@ -1,0 +1,215 @@
+<section class="lm-section" id="oop" data-title="Classes, inheritance, polymorphism" data-num="8">
+  <p class="lm-eyebrow">Section 8</p>
+  <h2 class="mb-4">Classes, inheritance, and polymorphism</h2>
+
+  <p>A class bundles state with the operations allowed on it. <strong>Encapsulation</strong> means the state is private and the operations enforce the rules, so an object cannot be put into an invalid condition from outside. Everything else in object-oriented Java rests on that.</p>
+
+  <p><strong>Polymorphism</strong> is the payoff: code written against a supertype runs against any subtype, and the method that actually executes is chosen at runtime from the object's real class — not from the type of the variable holding it. That runtime choice is <em>dynamic dispatch</em>, and it is the exact opposite of the compile-time overload resolution in the previous section.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Dispatch.java" data-verify="Dispatch" data-hi="27,28">
+public class Dispatch {
+
+    static abstract class Product {
+        private final String sku;               // private: nobody outside can corrupt it
+        private int priceInCents;
+
+        Product(String sku, int priceInCents) {
+            if (sku == null || sku.isBlank()) throw new IllegalArgumentException("sku required");
+            if (priceInCents < 0) throw new IllegalArgumentException("price must not be negative");
+            this.sku = sku;
+            this.priceInCents = priceInCents;
+        }
+
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+
+        abstract int shippingInCents();          // no body: every subclass must decide
+
+        int totalInCents() { return priceInCents + shippingInCents(); }
+    }
+
+    static class Bolt extends Product {
+        Bolt(int priceInCents) { super("BOLT-7", priceInCents); }
+        @Override int shippingInCents() { return 150; }
+    }
+
+    static class Girder extends Product {
+        Girder(int priceInCents) { super("GIRD-1", priceInCents); }
+        @Override int shippingInCents() { return 9_500; }
+        @Override int totalInCents() { return super.totalInCents() + 250; }  // crane surcharge
+    }
+
+    public static void main(String[] args) {
+        Product[] cart = { new Bolt(80), new Girder(120_000) };
+        for (Product p : cart) {
+            System.out.printf("%-8s price=%6d ship=%5d total=%6d%n",
+                    p.sku(), p.priceInCents(), p.shippingInCents(), p.totalInCents());
+        }
+
+        Product p = new Girder(100);
+        System.out.println("static type is Product, runtime type is " + p.getClass().getSimpleName());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Dispatch">
+BOLT-7   price=    80 ship=  150 total=   230
+GIRD-1   price=120000 ship= 9500 total=129750
+static type is Product, runtime type is Girder
+  </pre>
+
+  <p>The loop variable is declared <code>Product</code>, yet each iteration runs a different <code>shippingInCents</code>. The compiler only verified that <em>some</em> <code>shippingInCents()</code> exists on <code>Product</code>; the JVM picked the implementation from the object's actual class. <code>Girder</code> also overrides <code>totalInCents</code> and calls <code>super.totalInCents()</code> to reuse the base calculation before adding its surcharge.</p>
+
+  <h3 class="mt-8 mb-3">Watch dispatch resolve</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of dynamic dispatch">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Which method runs</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="dispatch"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Resolution</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="dispatch">
+    {
+      "lang": "java",
+      "code": "Product p = new Girder(120_000);\n\nint ship = p.shippingInCents();\n\nint total = p.totalInCents();\n\n// inside Girder.totalInCents():\n//   return super.totalInCents() + 250;\n//   -> Product.totalInCents() runs\n//      return priceInCents + shippingInCents();",
+      "steps": [
+        { "line": 1, "vars": { "static type": "Product", "runtime type": "Girder" }, "out": "",
+          "note": "The variable is DECLARED Product but the object CREATED is a Girder. Those two types are what the next steps play off against each other." },
+        { "line": 3, "vars": { "static type": "Product", "runtime type": "Girder", "compiler checks": "Product has shippingInCents()" }, "out": "",
+          "note": "At compile time javac only verifies the method exists on the declared type. It does not and cannot know which body will run." },
+        { "line": 3, "vars": { "static type": "Product", "runtime type": "Girder", "JVM selects": "Girder.shippingInCents", "ship": "9500" }, "out": "",
+          "note": "At runtime the JVM looks up the method in the object's actual class first. Girder overrides it, so Girder's body runs. This is dynamic dispatch." },
+        { "line": 5, "vars": { "runtime type": "Girder", "JVM selects": "Girder.totalInCents", "ship": "9500" }, "out": "",
+          "note": "Same rule again: Girder overrides totalInCents, so the subclass version is entered rather than Product's." },
+        { "line": 8, "vars": { "runtime type": "Girder", "now running": "Girder.totalInCents", "ship": "9500" }, "out": "",
+          "note": "super.totalInCents() is the one case that does NOT dispatch dynamically — it is a direct, statically bound call to the superclass implementation. Without it you would recurse forever." },
+        { "line": 10, "vars": { "runtime type": "Girder", "now running": "Product.totalInCents", "ship": "9500" }, "out": "",
+          "note": "Inside Product's body, the call to shippingInCents() dispatches dynamically AGAIN — back down to Girder's override, not Product's abstract declaration." },
+        { "line": 10, "vars": { "runtime type": "Girder", "priceInCents": "120000", "shippingInCents()": "9500", "subtotal": "129500", "total": "129750" }, "out": "total = 129750",
+          "note": "129500 from Product's body, plus Girder's 250 surcharge. A superclass method calling an overridden method is how template-method designs work — and why calling an overridable method from a constructor is dangerous." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Abstract class or interface?</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Abstract class versus interface">
+      <button type="button" class="lm-tab" role="tab" id="tab-ab" aria-controls="panel-ab" aria-selected="true" tabindex="0">Abstract class</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-if" aria-controls="panel-if" aria-selected="false" tabindex="-1">Interface</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-pick" aria-controls="panel-pick" aria-selected="false" tabindex="-1">Which to choose</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-ab" aria-labelledby="tab-ab" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+abstract class Product {
+    private final String sku;           // state
+    Product(String sku) { this.sku = sku; }
+    String sku() { return sku; }        // shared implementation
+    abstract int shippingInCents();     // subclass must supply
+}
+      </pre>
+      <ul class="mb-0">
+        <li>May hold <strong>instance fields</strong> and constructors</li>
+        <li>May have <code>private</code> and <code>protected</code> members</li>
+        <li>A class extends <strong>exactly one</strong></li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-if" aria-labelledby="tab-if" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+interface Shippable {
+    int shippingInCents();                                  // implicitly public abstract
+    default boolean isFreeShipping() {                      // Java 8+
+        return shippingInCents() == 0;
+    }
+    static Shippable free() { return () -> 0; }
+}
+      </pre>
+      <ul class="mb-0">
+        <li><strong>No instance state</strong> — fields are implicitly <code>public static final</code></li>
+        <li>A class may implement <strong>many</strong></li>
+        <li><code>default</code> methods allow adding behaviour without breaking implementers</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-pick" aria-labelledby="tab-pick" tabindex="0" hidden>
+      <p><strong>Default to an interface.</strong> It describes a capability, permits multiple inheritance of type, and keeps implementations free to sit anywhere in the hierarchy.</p>
+      <p class="mb-0"><strong>Reach for an abstract class</strong> only when subclasses must share <em>state</em> or constructor logic — as <code>Product</code> does with its validated <code>sku</code> and <code>priceInCents</code>. A common pattern is both: a public interface for the contract, plus an <code>AbstractProduct</code> that implements the tedious parts for subclasses that want them.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Inheritance gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Always write <code>@Override</code>.</strong> It is optional to the compiler but it turns a typo into a compile error. Without it, <code>shippingInCent()</code> silently becomes a brand-new method and the base implementation keeps running.</li>
+        <li><strong><code>static</code> methods are hidden, not overridden.</strong> They are bound at compile time from the declared type, so a <code>static</code> "override" is dispatched the opposite way to what you expect.</li>
+        <li><strong>Never call an overridable method from a constructor.</strong> The subclass override runs before the subclass's own fields are initialised, so it sees them as <code>null</code> or <code>0</code>.</li>
+        <li><strong>Fields are not polymorphic.</strong> Accessing a field through a superclass-typed reference gets the superclass's field. Only methods dispatch dynamically — another reason to keep fields <code>private</code>.</li>
+        <li><strong>Prefer composition to inheritance.</strong> <code>extends</code> couples you to the superclass's implementation, and a change there can break you silently. Inherit to be substitutable for a supertype, not merely to reuse code.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-oop-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A subclass declares <code>int shippingInCent() { return 0; }</code> — note the missing <code>s</code> — without <code>@Override</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-oop-1"><span>Compile error: no such method to override <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-oop-1"><span>Runtime error the first time shipping is calculated <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-oop-1"><span>It compiles as an unrelated new method; if the parent is abstract the class fails to compile for a different reason, and if the parent had a body that body keeps running <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-oop-1"><span>The JVM matches methods by similarity and calls it anyway <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> A differently named method is simply a different method. With an <code>abstract</code> parent you get a clear error about not implementing the abstract member. With a concrete parent you get no diagnostic at all — the inherited body keeps running and your new method is dead code. That silent case is exactly what <code>@Override</code> exists to catch.</p>
+        <p class="mb-0"><strong>A</strong> only happens <em>if</em> you wrote <code>@Override</code>. <strong>B</strong> is wrong: nothing fails at runtime, which is what makes it insidious. <strong>D</strong> is invented — dispatch matches on exact name and erased parameter types.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-oop-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You need a type shared by <code>Product</code>, <code>GiftCard</code> and <code>ServicePlan</code> — three classes with no common ancestor and no shared fields — expressing only "this can be priced". What should it be?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-oop-2"><span>An abstract class <code>Priceable</code> that all three extend <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-oop-2"><span>An interface <code>Priceable</code> with a single <code>priceInCents()</code> method <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-oop-2"><span>A utility class with an overloaded <code>priceOf</code> per type <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-oop-2"><span>Give all three a common superclass by refactoring the hierarchy <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> There is no shared state and the three are otherwise unrelated, so this is a capability, not a family. An interface adds the type without constraining anyone's inheritance.</p>
+        <p class="mb-0"><strong>A</strong> burns each class's single <code>extends</code> slot on a type carrying no state — and would be impossible if any of them already extends something. <strong>C</strong> gives up polymorphism entirely: every new type means editing the utility, and dispatch happens at compile time from the declared type, so a <code>Priceable</code>-typed variable would not resolve correctly. <strong>D</strong> forces an artificial "is-a" between a physical product and a service plan purely to share one method — the classic inheritance-for-reuse mistake.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="oop"> Mark this section complete
+  </label>
+</section>

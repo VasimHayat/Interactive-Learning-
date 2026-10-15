@@ -1,0 +1,320 @@
+<section class="lm-section" id="collectors" data-title="Collectors and grouping" data-num="6">
+  <p class="lm-eyebrow">Section 6</p>
+  <h2 class="mb-4">Collectors and grouping</h2>
+
+  <p>A terminal operation has to put the elements <em>somewhere</em>. <code>collect</code> is the general-purpose one, and a <code>Collector</code> is its recipe: how to create a container, how to add one element to it, how to merge two containers (for parallel streams), and how to finish. You will almost never write one — the <code>Collectors</code> class ships every recipe a report needs, and they compose: a <code>groupingBy</code> takes a <em>downstream</em> collector that decides what happens to the elements inside each group.</p>
+
+  <p>That composition is the whole skill. Once you can read <code>groupingBy(classifier, mapFactory, downstream)</code> as "bucket by this, into that kind of map, then do this to each bucket", every report in the warehouse is a one-liner, and you stop writing the nested-loop-and-temporary-map code that §11 of Fundamentals was full of.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Seven collectors against the stock list. Every line of the output below was produced by running this program during the build.</p>
+
+  <pre data-code data-lang="java" data-file="Grouping.java" data-verify="Grouping" data-hi="25,26,27" data-bad="66">
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
+
+public class Grouping {
+
+    enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    record Product(String sku, Category category, int priceInCents, int onHand) {
+        long stockValueInCents() { return (long) priceInCents * onHand; }
+    }
+
+    public static void main(String[] args) {
+        List<Product> stock = List.of(
+            new Product("BOLT-7", Category.FASTENER,        80,  400),
+            new Product("NUT-3",  Category.FASTENER,        25, 1200),
+            new Product("PIN-2",  Category.FASTENER,        15,    6),
+            new Product("GIRD-1", Category.STRUCTURAL, 120_000,    3),
+            new Product("ROD-4",  Category.STRUCTURAL,   4_500,   40),
+            new Product("CAM-9",  Category.MOTION,       2_300,    2));
+
+        // 1. groupingBy with a map factory and a downstream: stock value per category
+        Map<Category, Long> valueByCategory = stock.stream()
+            .collect(Collectors.groupingBy(Product::category, TreeMap::new,
+                     Collectors.summingLong(Product::stockValueInCents)));
+        System.out.println("value by category = " + valueByCategory);
+
+        // 2. partitioningBy: always exactly two keys, even when one side is empty
+        Map<Boolean, List<String>> lowStock = stock.stream()
+            .collect(Collectors.partitioningBy(p -> p.onHand() < 10,
+                     Collectors.mapping(Product::sku, Collectors.toList())));
+        System.out.println("low stock         = " + lowStock.get(true));
+        System.out.println("healthy           = " + lowStock.get(false));
+
+        // 3. collectingAndThen unwraps the Optional that maxBy produces
+        Map<Category, String> priciest = stock.stream()
+            .collect(Collectors.groupingBy(Product::category, TreeMap::new,
+                     Collectors.collectingAndThen(
+                         Collectors.maxBy(Comparator.comparingInt(Product::priceInCents)),
+                         opt -> opt.map(Product::sku).orElse("-"))));
+        System.out.println("priciest per cat  = " + priciest);
+
+        // 4. joining with a separator, prefix and suffix
+        String skus = stock.stream().map(Product::sku).sorted()
+            .collect(Collectors.joining(", ", "[", "]"));
+        System.out.println("all skus          = " + skus);
+
+        // 5. toMap with a merge function: three FASTENER prices collide on one key
+        Map<Category, Integer> cheapest = stock.stream()
+            .collect(Collectors.toMap(Product::category, Product::priceInCents,
+                     Math::min, TreeMap::new));
+        System.out.println("cheapest per cat  = " + cheapest);
+
+        // 6. teeing: two collectors over one pass, merged into one result
+        String summary = stock.stream()
+            .collect(Collectors.teeing(
+                Collectors.counting(),
+                Collectors.summingLong(Product::stockValueInCents),
+                (count, total) -> count + " products worth " + total + "c"));
+        System.out.println("summary           = " + summary);
+
+        // 7. toMap WITHOUT a merge function throws on the first duplicate key
+        try {
+            stock.stream().collect(Collectors.toMap(Product::category, Product::sku));
+        } catch (IllegalStateException e) {
+            System.out.println("no merge fn       = " + e.getMessage());
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Grouping">
+value by category = {FASTENER=62090, STRUCTURAL=540000, MOTION=4600}
+low stock         = [PIN-2, GIRD-1, CAM-9]
+healthy           = [BOLT-7, NUT-3, ROD-4]
+priciest per cat  = {FASTENER=BOLT-7, STRUCTURAL=GIRD-1, MOTION=CAM-9}
+all skus          = [BOLT-7, CAM-9, GIRD-1, NUT-3, PIN-2, ROD-4]
+cheapest per cat  = {FASTENER=15, STRUCTURAL=4500, MOTION=2300}
+summary           = 6 products worth 606690c
+no merge fn       = Duplicate key FASTENER (attempted merging values BOLT-7 and NUT-3)
+  </pre>
+
+  <p>Three things to notice. The highlighted <code>groupingBy</code> has three arguments — classifier, map factory, downstream — and the two-argument form <code>groupingBy(classifier, downstream)</code> is the same thing with a <code>HashMap</code>, which is why the output would be in an unspecified order without <code>TreeMap::new</code>. <code>maxBy</code> returns an <code>Optional</code> because a collector cannot know its group will be non-empty, so <code>collectingAndThen</code> exists to apply one last function to the finished container. And the final line is the error you get from the two-argument <code>toMap</code>: it does not pick a winner, it refuses — the merge function in step 5 is what tells it how.</p>
+
+  <h3 class="mt-8 mb-3">The catalogue</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Collector families">
+      <button type="button" class="lm-tab" role="tab" id="tab-collectors-to" aria-controls="panel-collectors-to" aria-selected="true" tabindex="0">Into a collection</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collectors-agg" aria-controls="panel-collectors-agg" aria-selected="false" tabindex="-1">Aggregating</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collectors-grp" aria-controls="panel-collectors-grp" aria-selected="false" tabindex="-1">Grouping</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-collectors-down" aria-controls="panel-collectors-down" aria-selected="false" tabindex="-1">Downstream adapters</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collectors-to" aria-labelledby="tab-collectors-to" tabindex="0">
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Collectors that build a collection</caption>
+          <thead><tr><th scope="col">Collector</th><th scope="col">Produces</th><th scope="col">Worth knowing</th></tr></thead>
+          <tbody>
+            <tr><td><code>toList()</code></td><td>a mutable <code>List</code> (in practice an <code>ArrayList</code>, but not guaranteed)</td><td>Since Java 16 prefer <code>stream.toList()</code>, which returns an <em>unmodifiable</em> list and reads better.</td></tr>
+            <tr><td><code>toUnmodifiableList()</code> / <code>toUnmodifiableSet()</code></td><td>an immutable collection</td><td>Throws <code>NullPointerException</code> if any element is <code>null</code>, like <code>List.of</code>.</td></tr>
+            <tr><td><code>toSet()</code></td><td>a <code>HashSet</code>, order unspecified</td><td>Use <code>toCollection(TreeSet::new)</code> or <code>LinkedHashSet::new</code> when order matters.</td></tr>
+            <tr><td><code>toCollection(supplier)</code></td><td>whatever you construct</td><td>The escape hatch for any <code>Collection</code> type.</td></tr>
+            <tr><td><code>toMap(keyFn, valueFn)</code></td><td>a <code>HashMap</code></td><td><strong>Throws <code>IllegalStateException</code> on a duplicate key.</strong> Also throws <code>NullPointerException</code> on a <code>null</code> value, unlike <code>HashMap.put</code>.</td></tr>
+            <tr><td><code>toMap(keyFn, valueFn, mergeFn)</code></td><td>a <code>HashMap</code></td><td>The merge function receives the existing and the new value for a colliding key and returns the one to keep: <code>Math::min</code>, <code>(a, b) -&gt; a</code>, <code>Integer::sum</code>.</td></tr>
+            <tr><td><code>toMap(keyFn, valueFn, mergeFn, mapSupplier)</code></td><td>whatever map you construct</td><td><code>TreeMap::new</code> for sorted keys, <code>LinkedHashMap::new</code> to keep encounter order, <code>() -&gt; new EnumMap&lt;&gt;(Category.class)</code> for enum keys.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collectors-agg" aria-labelledby="tab-collectors-agg" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Collectors that reduce to one value</caption>
+          <thead><tr><th scope="col">Collector</th><th scope="col">Produces</th><th scope="col">Worth knowing</th></tr></thead>
+          <tbody>
+            <tr><td><code>counting()</code></td><td><code>Long</code></td><td>Always <code>Long</code>, never <code>Integer</code> — a frequent compile error inside <code>groupingBy</code>.</td></tr>
+            <tr><td><code>summingInt / summingLong / summingDouble(fn)</code></td><td><code>Integer</code> / <code>Long</code> / <code>Double</code></td><td>Pick the width before the overflow, not after: stock value in cents times quantity needs <code>summingLong</code>.</td></tr>
+            <tr><td><code>averagingInt / Long / Double(fn)</code></td><td><code>Double</code></td><td>Returns <code>0.0</code> for an empty group, which is indistinguishable from a real zero average.</td></tr>
+            <tr><td><code>summarizingInt / Long / Double(fn)</code></td><td><code>IntSummaryStatistics</code> etc.</td><td>Count, sum, min, average and max in one pass. The right answer when you need more than one of them.</td></tr>
+            <tr><td><code>minBy / maxBy(comparator)</code></td><td><code>Optional&lt;T&gt;</code></td><td>Optional because a collector cannot promise the group is non-empty. Unwrap with <code>collectingAndThen</code>.</td></tr>
+            <tr><td><code>joining()</code>, <code>joining(sep)</code>, <code>joining(sep, prefix, suffix)</code></td><td><code>String</code></td><td>Only accepts a <code>Stream&lt;CharSequence&gt;</code> — <code>map(Object::toString)</code> or <code>map(Product::sku)</code> first.</td></tr>
+            <tr><td><code>reducing(identity, mapper, op)</code></td><td>whatever <code>op</code> returns</td><td>A general fold as a collector, so it can sit downstream of <code>groupingBy</code>. For a bare stream, <code>reduce</code> is clearer.</td></tr>
+            <tr><td><code>teeing(c1, c2, merger)</code></td><td>whatever <code>merger</code> returns</td><td>Java 12+. Runs two collectors over the same elements in one pass and combines their results — count and sum, min and max.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collectors-grp" aria-labelledby="tab-collectors-grp" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Grouping collectors</caption>
+          <thead><tr><th scope="col">Collector</th><th scope="col">Produces</th><th scope="col">Worth knowing</th></tr></thead>
+          <tbody>
+            <tr><td><code>groupingBy(classifier)</code></td><td><code>Map&lt;K, List&lt;T&gt;&gt;</code> in a <code>HashMap</code></td><td>Shorthand for <code>groupingBy(classifier, toList())</code>. Keys only appear for values that occurred.</td></tr>
+            <tr><td><code>groupingBy(classifier, downstream)</code></td><td><code>Map&lt;K, D&gt;</code> in a <code>HashMap</code></td><td>The one you want most of the time. <code>D</code> is whatever the downstream produces.</td></tr>
+            <tr><td><code>groupingBy(classifier, mapFactory, downstream)</code></td><td><code>Map&lt;K, D&gt;</code> in the map you construct</td><td>Note the argument order: factory in the <em>middle</em>, unlike <code>toMap</code> where it is last.</td></tr>
+            <tr><td><code>partitioningBy(predicate)</code></td><td><code>Map&lt;Boolean, List&lt;T&gt;&gt;</code></td><td><strong>Always has both keys.</strong> <code>groupingBy(p -&gt; p.onHand() &lt; 10)</code> would omit <code>true</code> when nothing is low — then <code>get(true)</code> returns <code>null</code>.</td></tr>
+            <tr><td><code>partitioningBy(predicate, downstream)</code></td><td><code>Map&lt;Boolean, D&gt;</code></td><td>Same composition rule as <code>groupingBy</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-collectors-down" aria-labelledby="tab-collectors-down" tabindex="0" hidden>
+      <p>These wrap another collector and change what it sees or what it returns. They are pointless on a bare stream — <code>map</code> and <code>filter</code> do that — and essential inside a group, where there is no stream to call <code>map</code> on.</p>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Downstream adapter collectors</caption>
+          <thead><tr><th scope="col">Collector</th><th scope="col">Does</th><th scope="col">Stream equivalent, if it were a stream</th></tr></thead>
+          <tbody>
+            <tr><td><code>mapping(fn, downstream)</code></td><td>transforms each element before the downstream sees it</td><td><code>.map(fn)</code></td></tr>
+            <tr><td><code>filtering(pred, downstream)</code></td><td>drops elements the downstream never sees — but the <em>group key still appears</em>, possibly with an empty result</td><td><code>.filter(pred)</code>, except the key survives</td></tr>
+            <tr><td><code>flatMapping(fn, downstream)</code></td><td>explodes each element into a stream of elements for the downstream</td><td><code>.flatMap(fn)</code></td></tr>
+            <tr><td><code>collectingAndThen(downstream, finisher)</code></td><td>applies one function to the downstream's final result</td><td>there is none — this is the only way to post-process a group's value</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0 text-sm text-ink-muted">That <code>filtering</code> subtlety is the common one: <code>groupingBy(Product::category, filtering(p -&gt; p.onHand() &lt; 10, toList()))</code> gives you every category, some mapped to an empty list. <code>filter(…)</code> <em>before</em> the <code>collect</code> gives you only the categories that have a low-stock item. Both are correct; they answer different questions.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Build a grouping</h3>
+
+  <p>Six products, three choices. The expression updates as you change them, and the map below it is what that expression would produce — including the order you would see when you print it.</p>
+
+  <div class="lm-card" data-sandbox="grouping-builder">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M8 3v18"/></svg>
+      groupingBy, assembled
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Classifier (the key)</span>
+        <select data-sb-classifier>
+          <option value="category" selected>Product::category</option>
+          <option value="initial">first letter of the SKU</option>
+          <option value="band">price band: cheap / dear</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Downstream (the value)</span>
+        <select data-sb-downstream>
+          <option value="toList" selected>toList()</option>
+          <option value="counting">counting()</option>
+          <option value="summing">summingInt(price)</option>
+          <option value="mapping">mapping(sku, joining("|"))</option>
+          <option value="maxBy">maxBy(price)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Map factory</span>
+        <select data-sb-map>
+          <option value="hash" selected>default (HashMap)</option>
+          <option value="tree">TreeMap::new</option>
+          <option value="linked">LinkedHashMap::new</option>
+        </select>
+      </label>
+    </div>
+    <div class="mb-3" data-sb-expr></div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Match the need to the collector</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a collector onto its slot, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Each report line below has exactly one collector that produces it directly.</p>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Collectors to place">
+        <button type="button" class="lm-chip" data-chip="part"><code>partitioningBy(p -&gt; p.onHand() == 0)</code></button>
+        <button type="button" class="lm-chip" data-chip="tee"><code>teeing(minBy(…), maxBy(…), …)</code></button>
+        <button type="button" class="lm-chip" data-chip="tomap"><code>toMap(Product::sku, Product::onHand, Integer::sum)</code></button>
+        <button type="button" class="lm-chip" data-chip="stats"><code>summarizingInt(Product::priceInCents)</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Slots">
+        <button type="button" class="lm-slot" data-slot="part" data-label="out-of-stock versus in-stock, both lists always present"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">out-of-stock versus in-stock, both lists always present</span></button>
+        <button type="button" class="lm-slot" data-slot="tee" data-label="cheapest and dearest product in one pass"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">cheapest and dearest product in one pass</span></button>
+        <button type="button" class="lm-slot" data-slot="tomap" data-label="total on-hand per SKU when a SKU can appear on several lines"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">total on-hand per SKU, when a SKU can appear on several lines</span></button>
+        <button type="button" class="lm-slot" data-slot="stats" data-label="count, min, max and average price together"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">count, min, max and average price together</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four. <code>partitioningBy</code> is the only grouping that guarantees both keys. <code>teeing</code> is the only way to run two collectors over one pass. <code>toMap</code> with a merge function is the idiom for "sum into a map by key"; without <code>Integer::sum</code> the second line for a SKU would throw. And <code>summarizingInt</code> is one pass for all four statistics, where <code>counting</code> plus <code>averagingInt</code> plus <code>minBy</code> plus <code>maxBy</code> would be four.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">When a loop is clearer</h3>
+
+  <p>Collectors earn their place when the shape of the result is a standard one — a map of groups, a joined string, a summary. They stop earning it when you find yourself nesting three downstreams deep to express a rule that is two <code>if</code> statements in a loop, or when the "collector" needs to update two unrelated structures at once. The test is whether a colleague can read the result type and know what it contains: <code>Map&lt;Category, Map&lt;Boolean, Long&gt;&gt;</code> is still readable; <code>Map&lt;Category, Map&lt;Boolean, Map&lt;String, Optional&lt;Product&gt;&gt;&gt;&gt;</code> is a sign to write a small record and a plain loop.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Collector gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>toMap</code> throws on duplicates and on <code>null</code> values.</strong> The duplicate rule is deliberate — silently keeping one would hide a data problem — but it surprises everyone once. The <code>null</code> value rule differs from <code>HashMap.put</code>, which accepts <code>null</code>; use <code>Optional</code> or a sentinel, or fall back to a loop.</li>
+        <li><strong><code>counting()</code> returns <code>Long</code>.</strong> <code>Map&lt;Category, Integer&gt; n = … groupingBy(…, counting())</code> does not compile. Declare <code>Long</code>, or use <code>summingInt(p -&gt; 1)</code> if you genuinely need an <code>Integer</code>.</li>
+        <li><strong><code>groupingBy</code> rejects <code>null</code> keys.</strong> A classifier that returns <code>null</code> — a product with no category — throws <code>NullPointerException</code> mid-collection. Map it to a sentinel first, or filter it out and report it separately.</li>
+        <li><strong>The map you get back is mutable but unspecified.</strong> <code>groupingBy</code> and <code>toMap</code> promise a <code>Map</code>, not a <code>HashMap</code>; do not cast, and do not rely on its iteration order unless you supplied the factory.</li>
+        <li><strong><code>Collectors.toList()</code> is not <code>Stream.toList()</code>.</strong> The collector gives a list you may modify (today it is an <code>ArrayList</code>; the Javadoc does not promise it). The Java 16 stream method gives an unmodifiable list. Code that adds to the result after collecting works with one and throws <code>UnsupportedOperationException</code> with the other.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-collectors-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>No product has zero stock. What does <code>stock.stream().collect(groupingBy(p -&gt; p.onHand() == 0)).get(true)</code> return, and what does the same with <code>partitioningBy</code> return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-collectors-1"><span>Both return an empty list <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-collectors-1"><span>Both return <code>null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-collectors-1"><span><code>groupingBy</code> returns <code>null</code>; <code>partitioningBy</code> returns an empty list <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-collectors-1"><span><code>groupingBy</code> throws <code>NoSuchElementException</code>; <code>partitioningBy</code> returns an empty list <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>groupingBy</code> only creates a key when an element maps to it, so with no out-of-stock products the key <code>true</code> never exists and <code>Map.get</code> returns <code>null</code>. <code>partitioningBy</code> is specified to always contain both <code>true</code> and <code>false</code>, so the answer is an empty list — safe to iterate without a null check.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>B</strong> assume the two behave alike; the difference is the entire reason <code>partitioningBy</code> exists. <strong>D</strong> is wrong because <code>Map.get</code> never throws for a missing key — that is what makes the <code>null</code> dangerous.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-collectors-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You want the total <code>onHand</code> per SKU. The stream contains two lines for <code>BOLT-7</code>. Which call is correct?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-collectors-2"><span><code>toMap(Product::sku, Product::onHand)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-collectors-2"><span><code>toMap(Product::sku, Product::onHand, Integer::sum)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-collectors-2"><span><code>groupingBy(Product::sku, counting())</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-collectors-2"><span><code>toMap(Product::sku, Product::onHand, (a, b) -&gt; b)</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The merge function receives the value already in the map and the new value for the same key, and <code>Integer::sum</code> adds them. <code>groupingBy(Product::sku, summingInt(Product::onHand))</code> would also be correct and is arguably clearer.</p>
+        <p class="mb-0"><strong>A</strong> throws <code>IllegalStateException: Duplicate key BOLT-7</code> the moment the second line arrives. <strong>C</strong> counts lines per SKU, not quantity — it would say <code>2</code> for <code>BOLT-7</code> regardless of stock. <strong>D</strong> compiles and runs, but keeps only the <em>last</em> value for each SKU, silently discarding the first line's quantity.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-collectors-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these statements about <code>groupingBy(Product::category, filtering(p -&gt; p.onHand() &lt; 10, toList()))</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Every category present in the stream appears as a key <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It is identical to <code>filter(p -&gt; p.onHand() &lt; 10).collect(groupingBy(Product::category))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>The resulting map is a <code>TreeMap</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A category with no low-stock product maps to an empty list <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> The classifier runs on every element, so every category becomes a key; the downstream <code>filtering</code> then decides what goes <em>into</em> each bucket, which can be nothing.</p>
+        <p class="mb-0"><strong>B</strong> is the trap: filtering before the collect removes whole categories whose products are all healthy, so those keys never appear. <strong>C</strong> is wrong because the two-argument <code>groupingBy</code> uses a <code>HashMap</code>; you would need the three-argument form with <code>TreeMap::new</code>.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="collectors"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,141 @@
+<section class="lm-section" id="methods" data-title="Methods, overloading, varargs" data-num="7">
+  <p class="lm-eyebrow">Section 7</p>
+  <h2 class="mb-4">Methods, overloading, and varargs</h2>
+
+  <p>Java dispatches on the <em>compile-time</em> types of the arguments. Which overload runs is decided entirely by <code>javac</code> before your program starts, using a three-phase algorithm. Knowing those phases turns overload puzzles from guesswork into a lookup.</p>
+
+  <h3 class="mt-8 mb-3">How the compiler picks</h3>
+
+  <div class="lm-diagram">
+    <svg viewBox="0 0 700 150" role="img" aria-labelledby="ovl-t ovl-d">
+      <title id="ovl-t">The three phases of overload resolution</title>
+      <desc id="ovl-d">Phase one considers only exact matches and widening reference or primitive conversions, with no boxing and no varargs. If no candidate applies, phase two additionally permits boxing and unboxing. If still none applies, phase three additionally permits variable-arity invocation. The first phase that finds any applicable method wins, and varargs is therefore always the last resort.</desc>
+      <defs><marker id="ovl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="var(--lm-border-strong)"/></marker></defs>
+      <g font-family="ui-sans-serif, system-ui, sans-serif" font-size="11.5">
+        <rect x="6" y="34" width="200" height="62" rx="8" fill="var(--lm-ok-weak)" stroke="var(--lm-ok)"/>
+        <text x="106" y="55" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Phase 1</text>
+        <text x="106" y="72" text-anchor="middle" fill="var(--lm-text-muted)">exact + widening only</text>
+        <text x="106" y="87" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">no boxing, no varargs</text>
+
+        <line x1="212" y1="65" x2="240" y2="65" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#ovl-a)"/>
+        <text x="226" y="56" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="9.5">none?</text>
+
+        <rect x="246" y="34" width="200" height="62" rx="8" fill="var(--lm-warn-weak)" stroke="var(--lm-warn)"/>
+        <text x="346" y="55" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Phase 2</text>
+        <text x="346" y="72" text-anchor="middle" fill="var(--lm-text-muted)">+ boxing / unboxing</text>
+        <text x="346" y="87" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">still no varargs</text>
+
+        <line x1="452" y1="65" x2="480" y2="65" stroke="var(--lm-border-strong)" stroke-width="1.5" marker-end="url(#ovl-a)"/>
+        <text x="466" y="56" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="9.5">none?</text>
+
+        <rect x="486" y="34" width="200" height="62" rx="8" fill="var(--lm-bad-weak)" stroke="var(--lm-bad)"/>
+        <text x="586" y="55" text-anchor="middle" font-weight="700" fill="var(--lm-text)">Phase 3</text>
+        <text x="586" y="72" text-anchor="middle" fill="var(--lm-text-muted)">+ varargs</text>
+        <text x="586" y="87" text-anchor="middle" fill="var(--lm-text-subtle)" font-size="10">the last resort</text>
+
+        <text x="346" y="122" text-anchor="middle" fill="var(--lm-text-muted)" font-size="11">The first phase with any applicable candidate wins. Within a phase, the most specific candidate is chosen.</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Overloads.java" data-verify="Overloads">
+public class Overloads {
+    static String f(int x)     { return "int"; }
+    static String f(long x)    { return "long"; }
+    static String f(Integer x) { return "Integer"; }
+    static String f(Object x)  { return "Object"; }
+    static String f(int... x)  { return "varargs"; }
+
+    public static void main(String[] args) {
+        byte b = 1;
+        System.out.println("f(1)           -> " + f(1));
+        System.out.println("f(b)  byte     -> " + f(b));
+        System.out.println("f(1L)          -> " + f(1L));
+        System.out.println("f((Integer) 1) -> " + f((Integer) 1));
+        System.out.println("f(1, 2)        -> " + f(1, 2));
+        System.out.println("f(\"x\")         -> " + f("x"));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Overloads">
+f(1)           -> int
+f(b)  byte     -> int
+f(1L)          -> long
+f((Integer) 1) -> Integer
+f(1, 2)        -> varargs
+f("x")         -> Object
+  </pre>
+
+  <p>Reading those in phase order:</p>
+  <ul>
+    <li><code>f(1)</code> — phase 1 finds <code>f(int)</code> exactly. <code>f(Integer)</code> would need boxing, which phase 1 forbids.</li>
+    <li><code>f(b)</code> with a <code>byte</code> — no <code>f(byte)</code> exists, but widening <code>byte</code>→<code>int</code> is allowed in phase 1. <code>int</code> is more specific than <code>long</code>, so <code>f(int)</code> wins.</li>
+    <li><code>f((Integer) 1)</code> — the argument's compile-time type is now <code>Integer</code>, matching <code>f(Integer)</code> exactly in phase 1. The cast changed the answer without changing the value.</li>
+    <li><code>f(1, 2)</code> — nothing takes two arguments, so phases 1 and 2 find nothing and phase 3 reaches the varargs form.</li>
+    <li><code>f("x")</code> — only <code>f(Object)</code> accepts a <code>String</code>.</li>
+  </ul>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Overloading gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Java is pass-by-value, always.</strong> For a reference type the <em>reference</em> is copied, so a method can mutate the object you passed but cannot make your variable point somewhere else. Reassigning the parameter inside the method is invisible to the caller.</li>
+        <li><strong><code>list.remove(1)</code> vs <code>list.remove(Integer.valueOf(1))</code>.</strong> On a <code>List&lt;Integer&gt;</code> the first removes <em>index</em> 1 and the second removes the <em>value</em> 1, because phase 1 finds <code>remove(int)</code> before boxing is ever considered.</li>
+        <li><strong>Return type is not part of the signature.</strong> Two methods differing only in return type do not compile.</li>
+        <li><strong>Varargs must be last, and one per method.</strong> <code>f(String... a, int b)</code> is a compile error. Calling <code>f()</code> with no arguments gives an empty array, not <code>null</code> — but <code>f(null)</code> passes <code>null</code> <em>as the array</em>, so a length check throws.</li>
+        <li><strong>Overloading is compile-time; overriding is runtime.</strong> They are unrelated mechanisms that beginners routinely conflate. Section 8 covers the runtime half.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-m-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>What does this print?</span></p>
+      <pre data-code data-lang="java" data-nobar>
+static void swap(String a, String b) { String t = a; a = b; b = t; }
+
+String x = "BOLT-7", y = "NUT-3";
+swap(x, y);
+System.out.println(x + " " + y);
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-m-1"><span><code>NUT-3 BOLT-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-m-1"><span><code>BOLT-7 NUT-3</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-m-1"><span><code>null null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-m-1"><span>It does not compile <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Unchanged. <code>a</code> and <code>b</code> are copies of the references; reassigning them rebinds only the local parameters. The caller's variables still point where they always did. Java has no way to write a working <code>swap</code> for two variables.</p>
+        <p class="mb-0"><strong>A</strong> assumes pass-by-reference, which Java does not have for variables. <strong>C</strong> and <strong>D</strong> have no basis — the code is valid and nothing becomes null. Note the distinction: had the method called a <em>mutator</em> on the object rather than reassigning the parameter, the caller would see that change.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-m-2" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Given <code>f(int)</code>, <code>f(Integer)</code> and <code>f(int...)</code>, which runs for the call <code>f(7)</code>, and why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-m-2"><span><code>f(int)</code> — phase 1 matches it exactly, before boxing or varargs are considered <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-m-2"><span><code>f(Integer)</code> — literals are boxed before dispatch <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-m-2"><span><code>f(int...)</code> — varargs accepts any arity including one <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-m-2"><span>Ambiguous — it does not compile <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> The literal <code>7</code> has compile-time type <code>int</code>, so phase 1 finds <code>f(int)</code> and resolution stops there.</p>
+        <p class="mb-0"><strong>B</strong> would require boxing, which phase 1 excludes — it is only reached in phase 2, and phase 2 never runs because phase 1 succeeded. <strong>C</strong> is true of varargs in general but it is the phase 3 candidate, evaluated last. <strong>D</strong> is wrong precisely because the phase ordering exists to break these ties deterministically; ambiguity errors happen between two candidates in the <em>same</em> phase.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="methods"> Mark this section complete
+  </label>
+</section>

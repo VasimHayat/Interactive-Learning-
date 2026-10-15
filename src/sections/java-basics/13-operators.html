@@ -1,0 +1,177 @@
+<section class="lm-section" id="operators" data-title="Operators and precedence" data-num="4">
+  <p class="lm-eyebrow">Section 4</p>
+  <h2 class="mb-4">Operators and precedence</h2>
+
+  <p>Most of Java's operators do what you would guess. The handful that do not are responsible for a disproportionate share of quiet, wrong-answer bugs: integer division that truncates, <code>%</code> that returns negatives, and <code>+</code> that changes meaning as soon as a <code>String</code> enters the expression.</p>
+
+  <h3 class="mt-8 mb-3">Precedence, highest first</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Java operator precedence from highest to lowest, with associativity</caption>
+      <thead><tr><th scope="col">Tier</th><th scope="col">Operators</th><th scope="col">Associativity</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>()</code> <code>[]</code> <code>.</code> <code>x++</code> <code>x--</code> (postfix)</td><td>left → right</td></tr>
+        <tr><td>2</td><td><code>++x</code> <code>--x</code> <code>+x</code> <code>-x</code> <code>!</code> <code>~</code> <code>(cast)</code> <code>new</code></td><td>right → left</td></tr>
+        <tr><td>3</td><td><code>*</code> <code>/</code> <code>%</code></td><td>left → right</td></tr>
+        <tr><td>4</td><td><code>+</code> <code>-</code></td><td>left → right</td></tr>
+        <tr><td>5</td><td><code>&lt;&lt;</code> <code>&gt;&gt;</code> <code>&gt;&gt;&gt;</code></td><td>left → right</td></tr>
+        <tr><td>6</td><td><code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code> <code>instanceof</code></td><td>left → right</td></tr>
+        <tr><td>7</td><td><code>==</code> <code>!=</code></td><td>left → right</td></tr>
+        <tr><td>8–10</td><td><code>&amp;</code> then <code>^</code> then <code>|</code></td><td>left → right</td></tr>
+        <tr><td>11</td><td><code>&amp;&amp;</code></td><td>left → right</td></tr>
+        <tr><td>12</td><td><code>||</code></td><td>left → right</td></tr>
+        <tr><td>13</td><td><code>? :</code></td><td>right → left</td></tr>
+        <tr><td>14</td><td><code>=</code> <code>+=</code> <code>-=</code> <code>*=</code> <code>/=</code> <code>%=</code> …</td><td>right → left</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">You do not need to memorise this. You need to recognise the three rows that bite — tier 3 above tier 4, tier 7 below tier 6, and <code>&amp;&amp;</code> above <code>||</code> — and reach for parentheses everywhere else.</p>
+
+  <h3 class="mt-8 mb-3">Evaluate an expression</h3>
+
+  <div class="lm-card" data-sandbox="precedence">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h7"/></svg>
+      Step through the evaluation
+    </div>
+    <label class="lm-field mb-3">
+      <span>Expression</span>
+      <select data-sb-expr>
+        <option>a + b * c</option>
+        <option>(a + b) * c</option>
+        <option>a + b + "!"</option>
+        <option>"!" + a + b</option>
+        <option>a++ + ++b</option>
+        <option>-7 / 2</option>
+        <option>-7 % 2</option>
+      </select>
+    </label>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <pre data-code data-lang="java" data-file="Operators.java" data-verify="Operators">
+public class Operators {
+    public static void main(String[] args) {
+        System.out.println("7 / 2        = " + (7 / 2));
+        System.out.println("-7 / 2       = " + (-7 / 2));
+        System.out.println("-7 % 2       = " + (-7 % 2));
+        System.out.println("floorMod     = " + Math.floorMod(-7, 2));
+        System.out.println("7 / 2.0      = " + (7 / 2.0));
+
+        System.out.println("2 + 3 + \"!\"  = " + (2 + 3 + "!"));
+        System.out.println("\"!\" + 2 + 3  = " + ("!" + 2 + 3));
+
+        int i = 2;
+        System.out.println("i++ + ++i    = " + (i++ + ++i));
+        System.out.println("i is now     = " + i);
+
+        int total = 0, count = 0;
+        System.out.println("avg guarded  = " + (count > 0 && total / count > 5));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Operators">
+7 / 2        = 3
+-7 / 2       = -3
+-7 % 2       = -1
+floorMod     = 1
+7 / 2.0      = 3.5
+2 + 3 + "!"  = 5!
+"!" + 2 + 3  = !23
+i++ + ++i    = 6
+i is now     = 4
+avg guarded  = false
+</pre>
+
+  <ul>
+    <li><strong><code>7 / 2</code> is <code>3</code>, not <code>3.5</code>.</strong> When both operands are integers, the result is an integer and the fraction is discarded. To get a real quotient, make one side floating point: <code>7 / 2.0</code>, or <code>(double) total / count</code>. Writing <code>(double)(total / count)</code> is too late — the truncation already happened.</li>
+    <li><strong><code>-7 / 2</code> is <code>-3</code>, not <code>-4</code>.</strong> Java truncates toward zero rather than flooring. <code>-7 % 2</code> is <code>-1</code>, because the sign of <code>%</code> follows the dividend. If you are using <code>%</code> to wrap an array index, a negative input produces a negative index and an <code>ArrayIndexOutOfBoundsException</code> — use <code>Math.floorMod</code>, which always returns a non-negative result for a positive modulus.</li>
+    <li><strong><code>2 + 3 + "!"</code> is <code>5!</code> but <code>"!" + 2 + 3</code> is <code>!23</code>.</strong> <code>+</code> is left-associative and switches from addition to concatenation the moment one operand is a <code>String</code>. This is why log messages sometimes show <code>id: 12</code> when you meant <code>id: 3</code>.</li>
+    <li><strong><code>&amp;&amp;</code> short-circuits, and that is load-bearing.</strong> The last line never divides by zero, because <code>count &gt; 0</code> is <code>false</code> and the right operand is not evaluated at all. Swap in <code>&amp;</code> and the same line throws <code>ArithmeticException</code>. The same pattern guards null: <code>if (o != null &amp;&amp; o.isPaid())</code>.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Match each operator to its tier</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a term onto its slot, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Which binds <em>tighter</em> in each pair? Place the operator that wins.</p>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Operators to place">
+        <button type="button" class="lm-chip" data-chip="mul"><code>*</code> — multiplicative</button>
+        <button type="button" class="lm-chip" data-chip="rel"><code>&lt;</code> — relational</button>
+        <button type="button" class="lm-chip" data-chip="and"><code>&amp;&amp;</code> — conditional AND</button>
+        <button type="button" class="lm-chip" data-chip="post"><code>x++</code> — postfix</button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Slots">
+        <button type="button" class="lm-slot" data-slot="mul" data-label="beats + additive"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">beats <code>+</code></span></button>
+        <button type="button" class="lm-slot" data-slot="rel" data-label="beats == equality"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">beats <code>==</code></span></button>
+        <button type="button" class="lm-slot" data-slot="and" data-label="beats || conditional OR"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">beats <code>||</code></span></button>
+        <button type="button" class="lm-slot" data-slot="post" data-label="beats unary minus"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">beats unary <code>-</code></span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. The consequences: <code>a + b * c</code> multiplies first; <code>a &lt; b == c</code> parses as <code>(a &lt; b) == c</code>; <code>a || b &amp;&amp; c</code> parses as <code>a || (b &amp;&amp; c)</code>; and <code>-x++</code> parses as <code>-(x++)</code>.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Two that the compiler will not save you from</div>
+      <ul class="mb-0">
+        <li><strong>Compound assignment hides a cast.</strong> <code>byte b = 10; b += 300;</code> compiles, because <code>+=</code> performs an implicit narrowing cast. <code>b = b + 300;</code> does not compile. The convenient form is the one that silently truncates.</li>
+        <li><strong><code>x == y</code> on <code>double</code> is unreliable.</strong> Rounding means <code>0.1 + 0.2 == 0.3</code> is <code>false</code>. Compare with a tolerance — <code>Math.abs(x - y) &lt; 1e-9</code> — or avoid floating point for the value entirely.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-op-1" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>An average is computed as <code>int avg = total / count;</code> with <code>total = 7</code> and <code>count = 2</code>, and reports <code>3</code>. Which fix produces <code>3.5</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-op-1"><span><code>double avg = total / count;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-op-1"><span><code>double avg = (double)(total / count);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-op-1"><span><code>int avg = (double) total / count;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-op-1"><span><code>double avg = (double) total / count;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> The cast must apply to an operand <em>before</em> the division, so the division is performed in floating point. Casting one side promotes the other automatically.</p>
+        <p class="mb-0"><strong>A</strong> still divides two <code>int</code>s — the truncation to 3 happens first, and widening 3 to <code>3.0</code> afterwards cannot recover the lost fraction. <strong>B</strong> is the same mistake made explicit: the parentheses cast the <em>result</em>, not the operand. <strong>C</strong> does the division correctly but then fails to compile, because <code>double</code> cannot be assigned to <code>int</code> without an explicit narrowing cast.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-op-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A ring buffer indexes with <code>items[i % items.length]</code>. It works for months, then throws <code>ArrayIndexOutOfBoundsException: Index -3</code>. What happened, and what is the fix?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-op-2"><span><code>items.length</code> became 0; guard against an empty array <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-op-2"><span><code>i</code> went negative — probably an overflowed counter — and <code>%</code> keeps the dividend's sign; use <code>Math.floorMod(i, items.length)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-op-2"><span><code>%</code> has lower precedence than <code>[]</code>, so it needs parentheses <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-op-2"><span>Arrays cannot be indexed by an expression; assign to a local first <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The message names index <code>-3</code>, so the modulo returned a negative value, which only happens when <code>i</code> is negative. A monotonically increasing <code>int</code> counter that overflows past <code>Integer.MAX_VALUE</code> wraps to a large negative number — which is exactly why this appears after months of uptime rather than in testing. <code>Math.floorMod</code> returns a non-negative result for a positive modulus.</p>
+        <p class="mb-0"><strong>A</strong> would give <code>ArithmeticException: / by zero</code>, not a negative index. <strong>C</strong> is false — the expression inside <code>[]</code> is delimited by the brackets, so precedence is not involved. <strong>D</strong> is simply not a Java rule.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="operators"> Mark this section complete
+  </label>
+</section>

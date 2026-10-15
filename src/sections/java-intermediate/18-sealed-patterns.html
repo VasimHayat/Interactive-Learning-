@@ -1,0 +1,341 @@
+<section class="lm-section" id="sealed-patterns" data-title="Sealed types, switch expressions and pattern matching" data-num="9">
+  <p class="lm-eyebrow">Section 9</p>
+  <h2 class="mb-4">Sealed types, switch expressions and pattern matching</h2>
+
+  <p>Fundamentals §8 taught the object-oriented answer to "the behaviour depends on the type": put the method on the type and let dynamic dispatch choose. That works beautifully when the set of <em>operations</em> is fixed and the set of <em>types</em> keeps growing. The warehouse's pricing rules are the opposite shape: there are three kinds of <code>Discount</code> and there will be three next year, but the operations on them multiply — price a line, describe it on a receipt, decide whether two offers may stack, export it to the accounting system. Putting all of those on each record class scatters one business concept across many files.</p>
+
+  <p>Java 21 gives you the other answer. A <strong>sealed</strong> type declares exactly which subtypes exist, and a <strong>pattern-matching switch</strong> handles each one in a single place, with the compiler proving that no case has been forgotten. This section is about that pair, and about the <code>switch</code> expression and pattern syntax that make it work.</p>
+
+  <h3 class="mt-8 mb-3">Sealing a hierarchy</h3>
+
+  <pre data-code data-lang="java" data-nobar>
+sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne {}
+
+record PercentOff(int percent) implements Discount {}       // records are implicitly final
+record FixedOff(int cents)     implements Discount {}
+record BuyNGetOne(int n)       implements Discount {}
+
+sealed class Shipment permits Parcel, Freight {}
+final class Parcel extends Shipment {}                      // a permitted subclass must say what it is:
+non-sealed class Freight extends Shipment {}                // final, sealed, or non-sealed (open again)
+  </pre>
+
+  <ul>
+    <li>Every permitted subtype must be <code>final</code>, <code>sealed</code> or <code>non-sealed</code>. A record or enum is already final.</li>
+    <li>The permitted subtypes must live in the same package as the sealed type (or the same named module). If they are all in the same source file you may omit <code>permits</code> and the compiler infers it.</li>
+    <li>Sealing says nothing about <em>instances</em>: there may be a million <code>PercentOff</code> objects. It constrains the set of <em>classes</em>, which is what exhaustiveness checking needs.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Pricing a line under any discount, plus a nested record pattern that takes an <code>OrderLine</code> and the <code>Product</code> inside it apart in one expression.</p>
+
+  <pre data-code data-lang="java" data-file="SealedSwitch.java" data-verify="SealedSwitch" data-hi="19,20,21,22,23">
+import java.util.List;
+
+public class SealedSwitch {
+
+    record Product(String sku, int priceInCents) {}
+    record Line(Product product, int qty) {}
+
+    sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne {}
+    record PercentOff(int percent) implements Discount {
+        PercentOff {
+            if (percent < 0 || percent > 100) throw new IllegalArgumentException("percent out of range: " + percent);
+        }
+    }
+    record FixedOff(int cents) implements Discount {}
+    record BuyNGetOne(int n) implements Discount {}
+
+    static int lineTotal(Line line, Discount discount) {
+        int gross = line.product().priceInCents() * line.qty();
+        return switch (discount) {                              // no default: the compiler knows every case
+            case PercentOff(int pct)                     -> gross - gross * pct / 100;
+            case FixedOff(int cents) when cents >= gross -> 0;  // guard: a voucher never goes negative
+            case FixedOff(int cents)                     -> gross - cents;
+            case BuyNGetOne(int n)                       -> gross - (line.qty() / (n + 1)) * line.product().priceInCents();
+        };
+    }
+
+    static String describe(Line line) {
+        // a nested record pattern takes the line AND the product inside it apart in one go
+        if (line instanceof Line(Product(String sku, int price), int qty) && qty > 1) {
+            return qty + " x " + sku + " @ " + price + "c";
+        }
+        return "single " + line.product().sku();
+    }
+
+    public static void main(String[] args) {
+        Line bolts = new Line(new Product("BOLT-7", 80), 10);
+        List<Discount> offers = List.of(new PercentOff(10), new FixedOff(100), new FixedOff(5_000), new BuyNGetOne(4));
+        for (Discount d : offers) {
+            System.out.printf("%-20s -> %4d%n", d, lineTotal(bolts, d));
+        }
+        System.out.println(describe(bolts));
+        System.out.println(describe(new Line(new Product("GIRD-1", 120_000), 1)));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="SealedSwitch">
+PercentOff[percent=10] ->  720
+FixedOff[cents=100]  ->  700
+FixedOff[cents=5000] ->    0
+BuyNGetOne[n=4]      ->  640
+10 x BOLT-7 @ 80c
+single GIRD-1
+  </pre>
+
+  <p>Four things to notice in <code>lineTotal</code>. It is a switch <strong>expression</strong>: it produces the value that <code>return</code> hands back, so there is no mutable <code>result</code> variable and no way to forget an assignment. Each <code>case</code> is a <strong>record pattern</strong>: <code>PercentOff(int pct)</code> both tests the type and binds the component, so the body never calls an accessor. The <code>when</code> clause is a <strong>guard</strong>: the first <code>FixedOff</code> case applies only when the voucher is worth more than the line, and because it comes first, the second <code>FixedOff</code> case is reached only when the guard failed. And there is <strong>no <code>default</code></strong>, which is not laziness but the whole point.</p>
+
+  <h3 class="mt-8 mb-3">Exhaustiveness: let the compiler count</h3>
+
+  <p>A switch expression must yield a value for every possible input, so the compiler checks that the cases cover the type. For an <code>int</code> or a <code>String</code> that is impossible without <code>default</code>. For an <code>enum</code> or a <code>sealed</code> type the compiler knows the complete set of values or subtypes and can verify coverage itself. Try breaking it:</p>
+
+  <div class="lm-card" data-sandbox="switch-exhaustive">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h7l3 5-3 5H4M14 7h6M14 17h6"/></svg>
+      What javac says about this switch
+    </div>
+    <div class="lm-controls">
+      <fieldset class="lm-field"><legend class="text-sm font-semibold mb-1">Cases present</legend>
+        <label class="lm-check"><input type="checkbox" data-sb-case="PercentOff" checked> <code>PercentOff</code></label>
+        <label class="lm-check"><input type="checkbox" data-sb-case="FixedOff" checked> <code>FixedOff</code></label>
+        <label class="lm-check"><input type="checkbox" data-sb-case="BuyNGetOne" checked> <code>BuyNGetOne</code></label>
+        <label class="lm-check"><input type="checkbox" data-sb-case="Clearance"> <code>Clearance</code> <span class="text-caption text-ink-subtle">(only exists if added below)</span></label>
+      </fieldset>
+      <fieldset class="lm-field"><legend class="text-sm font-semibold mb-1">Hierarchy and fallback</legend>
+        <label class="lm-check"><input type="checkbox" data-sb-newtype> Add a <code>Clearance</code> subtype to the sealed interface</label>
+        <label class="lm-check"><input type="checkbox" data-sb-default> Include a <code>default</code> branch</label>
+      </fieldset>
+    </div>
+    <div data-sb-src class="mb-3"></div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>The lesson the sandbox is making: a <code>default</code> on a sealed switch does not add safety, it <em>removes</em> it. Without one, adding a subtype breaks every switch that needs updating, at compile time, with the file and line. With one, the new subtype silently takes the fallback path in production.</p>
+
+  <h3 class="mt-8 mb-3">Switch: statement, expression, and the pattern forms</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Switch forms">
+      <button type="button" class="lm-tab" role="tab" id="tab-sealed-patterns-stmt" aria-controls="panel-sealed-patterns-stmt" aria-selected="true" tabindex="0">Statement vs expression</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-sealed-patterns-arrow" aria-controls="panel-sealed-patterns-arrow" aria-selected="false" tabindex="-1">Arrow, colon and yield</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-sealed-patterns-pat" aria-controls="panel-sealed-patterns-pat" aria-selected="false" tabindex="-1">Pattern kinds</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sealed-patterns-stmt" aria-labelledby="tab-sealed-patterns-stmt" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+// statement: does things, yields nothing, need not be exhaustive (unless it uses patterns)
+switch (sku) {
+    case "BOLT-7", "NUT-3" -> band = "small";
+    default                -> band = "standard";
+}
+
+// expression: IS a value, must be exhaustive, every branch yields the same kind of thing
+String band = switch (sku) {
+    case "BOLT-7", "NUT-3" -> "small";
+    default                -> "standard";
+};
+      </pre>
+      <p class="mb-0">Prefer the expression whenever the switch exists to compute something. It cannot forget a branch, cannot leave a variable unassigned, and reads as the single thing it is. One subtlety: a switch <em>statement</em> that uses patterns (type or record patterns, or <code>case null</code>) must also be exhaustive, so the old "it compiles with cases missing" behaviour applies only to the legacy constant forms.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sealed-patterns-arrow" aria-labelledby="tab-sealed-patterns-arrow" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+int days = switch (category) {
+    case FASTENER   -> 1;                 // arrow: one expression, no fall-through, no break
+    case STRUCTURAL -> 14;
+    case TOOLING    -> {                  // arrow with a block: must yield
+        int base = 3;
+        yield base * 2;
+    }
+};
+
+int legacy = switch (category) {          // colon form in an expression: fall-through still exists
+    case FASTENER:
+    case STRUCTURAL: yield 7;             // both labels reach this yield
+    default:         yield 0;
+};
+      </pre>
+      <p class="mb-0">Use the arrow form. Fall-through, the reason every C-family language has a "forgot the break" bug, is impossible with arrows: each case is a self-contained expression or block. <code>yield</code> exists only to get a value out of a block; it is not <code>return</code> and will not leave the enclosing method.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-sealed-patterns-pat" aria-labelledby="tab-sealed-patterns-pat" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Pattern kinds and what they bind</caption>
+          <thead><tr><th scope="col">Pattern</th><th scope="col">Example</th><th scope="col">Binds</th></tr></thead>
+          <tbody>
+            <tr><td>Type pattern</td><td><code>case String s -></code></td><td><code>s</code>, the value cast to <code>String</code></td></tr>
+            <tr><td>Record pattern</td><td><code>case FixedOff(int cents) -></code></td><td>each component, by position</td></tr>
+            <tr><td>Nested record pattern</td><td><code>case Line(Product(var sku, var p), int qty) -></code></td><td>components at every level; <code>var</code> infers the type</td></tr>
+            <tr><td>Guarded pattern</td><td><code>case FixedOff(int c) when c >= gross -></code></td><td>as above, only if the guard is true</td></tr>
+            <tr><td>Null case</td><td><code>case null -></code> or <code>case null, default -></code></td><td>nothing; without it a null selector throws <code>NullPointerException</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0">A type pattern on <code>instanceof</code> works the same way: <code>if (o instanceof String s)</code> tests and binds in one step, and <code>s</code> is in scope wherever the compiler can prove the test passed, including after an early <code>return</code> in the negated form.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Patterns outside the sealed case</h3>
+
+  <p>Patterns are not only for sealed types. The same machinery handles <code>Object</code>, enums, strings and primitives, with dominance rules that decide which case may come first.</p>
+
+  <pre data-code data-lang="java" data-file="Patterns.java" data-verify="Patterns" data-hi="7,8,9">
+public class Patterns {
+
+    enum Category { FASTENER, STRUCTURAL, TOOLING }
+
+    static String classify(Object o) {
+        return switch (o) {
+            case null                 -> "null, handled as a case: no NullPointerException";
+            case Integer i when i < 0 -> "negative int " + i;
+            case Integer i            -> "int " + i;
+            case String s             -> "string of length " + s.length();
+            case int[] arr            -> "int array of " + arr.length;
+            default                   -> "something else: " + o.getClass().getSimpleName();
+        };
+    }
+
+    static int leadTimeDays(Category c) {
+        return switch (c) {                 // exhaustive over the enum: no default needed
+            case FASTENER   -> 1;
+            case STRUCTURAL -> 14;
+            case TOOLING    -> {            // a block body must yield its value
+                int base = 3;
+                yield base * 2;
+            }
+        };
+    }
+
+    static String shippingBand(String sku) {
+        switch (sku) {                      // the statement form: no value, no exhaustiveness check
+            case "BOLT-7", "NUT-3" -> { return "small"; }
+            case "GIRD-1"          -> { return "freight"; }
+            default                -> { return "standard"; }
+        }
+    }
+
+    static String label(Object o) {
+        if (!(o instanceof String s)) return "not a string";
+        return "string " + s.toUpperCase();   // s is in scope: the compiler saw the early return
+    }
+
+    public static void main(String[] args) {
+        System.out.println(classify(null));
+        System.out.println(classify(-4));
+        System.out.println(classify(42));
+        System.out.println(classify("BOLT-7"));
+        System.out.println(classify(new int[3]));
+        System.out.println(classify(3.5));
+        for (Category c : Category.values()) System.out.println(c + " -> " + leadTimeDays(c) + " days");
+        System.out.println(shippingBand("NUT-3") + ", " + shippingBand("GIRD-1") + ", " + shippingBand("CAM-9"));
+        System.out.println(label("rod-4") + " / " + label(7));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Patterns">
+null, handled as a case: no NullPointerException
+negative int -4
+int 42
+string of length 6
+int array of 3
+something else: Double
+FASTENER -> 1 days
+STRUCTURAL -> 14 days
+TOOLING -> 6 days
+small, freight, standard
+string ROD-4 / not a string
+  </pre>
+
+  <p>The order of the two <code>Integer</code> cases is not a style choice. A case that would match everything a later case matches <strong>dominates</strong> it, and the compiler rejects the program: swap them and you get <code>error: this case label is dominated by a preceding case label</code>, because the guarded case could never be reached. The same rule puts <code>case CharSequence cs</code> after <code>case String s</code>, never before. <code>default</code> is exempt and may appear anywhere, though convention keeps it last.</p>
+
+  <p>In <code>label</code>, the pattern variable <code>s</code> is usable on the line <em>after</em> the <code>if</code>. The compiler reasons about flow: the only way past that statement is for the <code>instanceof</code> to have succeeded, so the binding is in scope. The same reasoning allows <code>o instanceof String s &amp;&amp; s.length() &gt; 3</code>, because <code>&amp;&amp;</code> evaluates its right side only when the left was true, and forbids <code>o instanceof String s || s.isEmpty()</code>, where the right side runs exactly when <code>s</code> does <em>not</em> exist.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Five ways this goes wrong</div>
+      <ul class="mb-0">
+        <li><strong>A pattern switch throws on <code>null</code> unless you say otherwise.</strong> The legacy forms did too, but a <code>case Object o</code> looks like it would catch anything and does not. Write <code>case null</code> explicitly, or <code>case null, default</code> to merge the two.</li>
+        <li><strong>A guard is not a case.</strong> <code>case FixedOff(int c) when c >= gross</code> covers <em>some</em> <code>FixedOff</code> values. You still need an unguarded <code>FixedOff</code> case, or the switch is not exhaustive and the error message names the type you thought you had handled.</li>
+        <li><strong>Exhaustiveness is checked at compile time against the classes the compiler saw.</strong> If a sealed interface is recompiled with a new subtype but a dependent jar is not, the old switch is still exhaustive as far as its bytecode knows. At runtime the JVM throws <code>MatchException</code> from the switch, which is the correct, loud failure; just do not mistake "it compiled last year" for proof.</li>
+        <li><strong>Record patterns match on <em>type</em>, not on accessor calls.</strong> <code>case Product(String sku, int price)</code> invokes the accessors to bind, so an accessor you overrode to compute something runs during matching. Keep accessors cheap and side-effect free.</li>
+        <li><strong><code>yield</code> inside a lambda inside a switch block does not yield from the switch.</strong> It is a statement with its own scope rules; the compiler will tell you, but the error is confusing until you know why.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Sealed switch or polymorphic method?</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">When to prefer a sealed switch over a polymorphic method</caption>
+      <thead><tr><th scope="col">The situation</th><th scope="col">Reach for</th><th scope="col">Because</th></tr></thead>
+      <tbody>
+        <tr><td>Types keep being added; the operations are few and stable (shapes in a drawing app)</td><td>Polymorphism: an abstract method on the supertype</td><td>A new type is one new class, and nothing else changes</td></tr>
+        <tr><td>Types are fixed and known; operations keep being added (discount kinds; AST nodes; messages)</td><td>A sealed type and pattern switches</td><td>A new operation is one new method, and the compiler lists every switch when a type <em>is</em> eventually added</td></tr>
+        <tr><td>The operation needs data from several types at once (do these two offers stack?)</td><td>A switch over a record of both, or nested patterns</td><td>Dispatch on one receiver cannot see the other's concrete type</td></tr>
+        <tr><td>The behaviour belongs to the type's own invariants (validation, formatting of itself)</td><td>A method on the record</td><td>It changes when the record changes, and nowhere else</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Both tools solve one axis of the <em>expression problem</em>, which is the observation that no single design makes both adding types and adding operations cheap. The practical rule: ask which one will change more often in <em>this</em> hierarchy, and put the compiler's checking on that axis.</p>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-sealed-patterns-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A switch expression over <code>sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne</code> has cases for all three and no <code>default</code>. A colleague adds <code>record Clearance() implements Discount</code> and <code>Clearance</code> to the <code>permits</code> list. What happens to the switch?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-sealed-patterns-1"><span>It still compiles; a <code>Clearance</code> at runtime throws <code>MatchException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-sealed-patterns-1"><span>It fails to compile: the switch no longer covers all possible input values <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-sealed-patterns-1"><span>It compiles with a warning and treats <code>Clearance</code> as the last case <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-sealed-patterns-1"><span>It compiles because records are implicitly handled by their interface <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> That compile error is the feature. The sealed type tells the compiler the complete set of subtypes; the switch expression must cover it; the new subtype is uncovered; the build fails at every switch that needs a <code>Clearance</code> rule, with file and line.</p>
+        <p class="mb-0"><strong>A</strong> is what happens only in the separate-compilation case, when the switch's class file predates the new subtype and is not rebuilt; a normal build recompiles it. <strong>C</strong> invents a warning; exhaustiveness is an error, never a warning. <strong>D</strong> confuses the interface, which has no behaviour, with a case label.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-sealed-patterns-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which of these fails to compile?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-sealed-patterns-2"><span><code>case Integer i when i > 0 -> …; case Integer i -> …;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-sealed-patterns-2"><span><code>case String s -> …; case CharSequence cs -> …;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-sealed-patterns-2"><span><code>case CharSequence cs -> …; case String s -> …;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-sealed-patterns-2"><span><code>case null, default -> …;</code> as the only case <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Every <code>String</code> is a <code>CharSequence</code>, so the first case matches everything the second could, and the second is unreachable. The compiler reports that the label is dominated by a preceding one.</p>
+        <p class="mb-0"><strong>A</strong> is the correct order for a guard: the narrower, guarded case first, the unguarded one as the catch-all for that type. <strong>B</strong> is the same pair as C in the legal order, specific before general. <strong>D</strong> is legal and is the idiom for "handle null together with anything I did not list".</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-sealed-patterns-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>For which of these can the compiler verify that a switch <em>expression</em> is exhaustive without a <code>default</code>? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>An <code>enum Category</code> with every constant listed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A <code>String</code> with every SKU the warehouse currently stocks listed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A non-sealed interface <code>Shippable</code> with cases for the three classes that implement it today <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A <code>sealed interface Discount</code> with a record pattern for each permitted record <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Exhaustiveness needs a closed set that the compiler can enumerate: an enum's constants, or a sealed type's permitted subtypes (recursively, if those are sealed too). Record patterns count as covering their record type when every component pattern is total, as <code>int cents</code> is.</p>
+        <p class="mb-0"><strong>B</strong>: the set of strings is infinite and the compiler has no idea which ones are "current SKUs"; a <code>default</code> is mandatory. <strong>C</strong>: an open interface may gain an implementation in any jar at any time, so three cases today prove nothing; the compiler will demand a <code>default</code>, which is also the hint that you may want to seal the interface.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="sealed-patterns"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,152 @@
+<section class="lm-section" id="primitives" data-title="Primitives, wrappers, autoboxing" data-num="2">
+  <p class="lm-eyebrow">Section 2</p>
+  <h2 class="mb-4">Primitives, wrappers, and autoboxing</h2>
+
+  <p>Java has two kinds of values and the split runs through everything else in the language. A <strong>primitive</strong> is a raw value of fixed width — <code>int</code>, <code>double</code>, <code>boolean</code> and five others. An <strong>object</strong> is something on the heap that you reach through a reference. Primitives are not objects, cannot be <code>null</code>, and cannot go into a collection.</p>
+
+  <p>That last restriction is why every primitive has a matching <strong>wrapper class</strong> — <code>Integer</code> for <code>int</code>, <code>Double</code> for <code>double</code>, and so on. Since Java 5 the compiler converts between the two automatically, which is convenient right up to the moment it silently changes what your code means.</p>
+
+  <h3 class="mt-8 mb-3">The eight primitives</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The eight Java primitive types with their widths, ranges, defaults and wrapper classes</caption>
+      <thead>
+        <tr><th scope="col">Type</th><th scope="col">Bits</th><th scope="col">Range</th><th scope="col">Default</th><th scope="col">Wrapper</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>byte</code></td><td>8</td><td>−128 … 127</td><td><code>0</code></td><td><code>Byte</code></td></tr>
+        <tr><td><code>short</code></td><td>16</td><td>−32,768 … 32,767</td><td><code>0</code></td><td><code>Short</code></td></tr>
+        <tr><td><code>int</code></td><td>32</td><td>−2,147,483,648 … 2,147,483,647</td><td><code>0</code></td><td><code>Integer</code></td></tr>
+        <tr><td><code>long</code></td><td>64</td><td>±9.22 × 10<sup>18</sup></td><td><code>0L</code></td><td><code>Long</code></td></tr>
+        <tr><td><code>float</code></td><td>32</td><td>≈ ±3.4 × 10<sup>38</sup>, ~7 digits</td><td><code>0.0f</code></td><td><code>Float</code></td></tr>
+        <tr><td><code>double</code></td><td>64</td><td>≈ ±1.8 × 10<sup>308</sup>, ~15 digits</td><td><code>0.0d</code></td><td><code>Double</code></td></tr>
+        <tr><td><code>char</code></td><td>16</td><td><code>0</code> … <code>65535</code> (unsigned, a UTF-16 code unit)</td><td><code>'\u0000'</code></td><td><code>Character</code></td></tr>
+        <tr><td><code>boolean</code></td><td>—</td><td><code>true</code> / <code>false</code></td><td><code>false</code></td><td><code>Boolean</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-sm text-ink-muted">The <em>defaults</em> column applies to fields and array elements only. A local variable has no default — the compiler refuses to read one before you assign it.</p>
+
+  <h3 class="mt-8 mb-3">Explore the ranges</h3>
+
+  <div class="lm-card" data-sandbox="primitives">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      What happens past the top of the range
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Type</span>
+        <select data-sb-type>
+          <option>byte</option><option>short</option><option selected>int</option><option>long</option><option>char</option>
+        </select>
+      </label>
+      <label class="lm-field grow">
+        <span>Add to MAX_VALUE <span class="lm-readout" data-sb-addout>+1</span></span>
+        <input type="range" data-sb-add min="0" max="10" value="1" step="1">
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Three behaviours that surprise people, in one program: silent integer overflow, the <code>Integer</code> cache, and binary floating point.</p>
+
+  <pre data-code data-lang="java" data-file="Primitives.java" data-verify="Primitives">
+public class Primitives {
+    public static void main(String[] args) {
+        int max = Integer.MAX_VALUE;
+        System.out.println("MAX_VALUE     = " + max);
+        System.out.println("MAX_VALUE + 1 = " + (max + 1));
+
+        Integer a = 127, b = 127;
+        Integer c = 128, d = 128;
+        System.out.println("127 == 127    -> " + (a == b));
+        System.out.println("128 == 128    -> " + (c == d));
+        System.out.println("128 .equals   -> " + c.equals(d));
+
+        System.out.println("0.1 + 0.2     = " + (0.1 + 0.2));
+        System.out.println("as BigDecimal = " + new java.math.BigDecimal("0.1").add(new java.math.BigDecimal("0.2")));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Primitives">
+MAX_VALUE     = 2147483647
+MAX_VALUE + 1 = -2147483648
+127 == 127    -> true
+128 == 128    -> false
+128 .equals   -> true
+0.1 + 0.2     = 0.30000000000000004
+as BigDecimal = 0.3
+  </pre>
+
+  <p>Every one of those lines is a bug source in real code:</p>
+
+  <ul>
+    <li><strong><code>max + 1</code> wraps to the most negative <code>int</code>.</strong> No exception, no warning. A quantity counter that overflows just starts reporting negative stock. Use <code>Math.addExact</code> when overflow would be a correctness problem — it throws <code>ArithmeticException</code> instead.</li>
+    <li><strong><code>127 == 127</code> is <code>true</code> but <code>128 == 128</code> is <code>false</code>.</strong> <code>Integer.valueOf</code> caches boxed values from −128 to 127 and returns the identical object for those; outside that range it allocates a new one each time. <code>==</code> on wrappers compares references, so the answer changes with the magnitude of the number. This is the single most notorious autoboxing trap.</li>
+    <li><strong><code>0.1 + 0.2</code> is not <code>0.3</code>.</strong> Neither operand is exactly representable in binary floating point, so the sum lands slightly high. Never use <code>double</code> for money — use <code>BigDecimal</code> constructed from a <em>String</em>, or count in integer minor units (cents).</li>
+  </ul>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Autoboxing gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Unboxing <code>null</code> throws.</strong> <code>Map&lt;String,Integer&gt; stock; int n = stock.get("MISSING");</code> compiles fine and throws <code>NullPointerException</code> at runtime, because <code>get</code> returned <code>null</code> and the compiler inserted <code>.intValue()</code> on it. The stack trace points at the assignment, not at the map.</li>
+        <li><strong>Boxing in a hot loop allocates.</strong> <code>Integer total = 0; for (int i = 0; i &lt; 1_000_000; i++) total += i;</code> creates a million <code>Integer</code> objects, because each <code>+=</code> unboxes, adds, and reboxes. Declaring <code>total</code> as <code>int</code> makes it roughly an order of magnitude faster and allocation-free.</li>
+        <li><strong>Overload resolution changes.</strong> Given both <code>remove(int)</code> and <code>remove(Object)</code> on <code>List&lt;Integer&gt;</code>, <code>list.remove(1)</code> removes the element at <em>index</em> 1, while <code>list.remove(Integer.valueOf(1))</code> removes the <em>value</em> 1. The compiler prefers the primitive overload without widening or boxing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-prim-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>What does this print?</span></p>
+      <pre data-code data-lang="java" data-nobar>
+Integer x = 1000;
+Integer y = 1000;
+System.out.println(x == y);
+System.out.println(x.equals(y));
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-prim-1"><span><code>true</code> then <code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-prim-1"><span><code>false</code> then <code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-prim-1"><span><code>true</code> then <code>false</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-prim-1"><span>It does not compile <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> 1000 is outside the <code>Integer</code> cache range of −128…127, so each boxing allocates a separate object and <code>==</code> compares two different references — <code>false</code>. <code>equals</code> compares the wrapped values, so it is <code>true</code>.</p>
+        <p class="mb-0"><strong>A</strong> would be right if the value were ≤ 127 — that inconsistency is exactly the trap. <strong>C</strong> inverts the two operators. <strong>D</strong> is wrong because the code is perfectly legal; that is the problem with it.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-prim-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>An inventory counter is declared <code>int onHand</code> and reaches 2,147,483,647. One more unit arrives and <code>onHand++</code> runs. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-prim-2"><span><code>ArithmeticException</code> is thrown <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-prim-2"><span>It saturates and stays at <code>Integer.MAX_VALUE</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-prim-2"><span>It silently becomes −2,147,483,648 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-prim-2"><span>It is automatically widened to <code>long</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Java uses two's-complement arithmetic that wraps around. Adding 1 to the largest <code>int</code> gives the smallest one, with no diagnostic of any kind.</p>
+        <p class="mb-0"><strong>A</strong> is what <code>Math.addExact(onHand, 1)</code> would do, and is what you want here. <strong>B</strong> is saturating arithmetic, which Java does not do. <strong>D</strong> never happens implicitly on assignment back into an <code>int</code> — the arithmetic is performed in 32 bits and the result truncated.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="primitives"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,323 @@
+<section class="lm-section" id="lab" data-title="Hands-on lab" data-num="L">
+  <p class="lm-eyebrow">Put it together</p>
+  <h2 class="mb-4">Hands-on lab: the pricing and reporting pipeline</h2>
+
+  <p>Six steps that turn the Fundamentals warehouse into a reporting system, each exercising something from this module. Write each step before opening its solution — the solutions are short, and reading one you have not attempted teaches almost nothing. The whole thing fits in one file; a real project would split the records, the discounts and the catalogue into their own.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Starter</div>
+      <pre data-code data-lang="bash" data-nobar>
+mkdir order-lab && cd order-lab
+# one file, OrderLab.java, grown step by step
+javac OrderLab.java && java OrderLab
+      </pre>
+      <p class="mb-0 text-sm">JDK 21 is required: record patterns in <code>switch</code> (step 2) were finalised in 21. Prices stay in cents as <code>long</code> — never <code>double</code> for money.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Step 1 — the domain as records <span class="lm-badge">§8</span></h3>
+  <p>Define a <code>Category</code> enum and three records: <code>Product(sku, name, category, priceInCents)</code>, <code>OrderLine(product, qty)</code> with a <code>subtotal()</code>, and <code>Order(id, placed, lines)</code> with a <code>subtotal()</code> that sums its lines. Validate in compact constructors: no blank SKU, no negative price, no non-positive quantity, no empty order. Make sure an <code>Order</code> cannot be changed by whoever still holds the list that was passed in.</p>
+  <details class="lm-reveal"><summary>Solution — step 1</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+enum Category { FASTENER, STRUCTURAL, MECHANICAL }
+
+record Product(String sku, String name, Category category, long priceInCents) {
+    Product {
+        if (sku == null || sku.isBlank()) throw new IllegalArgumentException("sku required");
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(category, "category");
+        if (priceInCents < 0) throw new IllegalArgumentException("price must not be negative: " + priceInCents);
+    }
+}
+
+record OrderLine(Product product, int qty) {
+    OrderLine {
+        Objects.requireNonNull(product, "product");
+        if (qty <= 0) throw new IllegalArgumentException("qty must be positive: " + qty);
+    }
+    long subtotal() { return product.priceInCents() * qty; }
+}
+
+record Order(String id, LocalDate placed, List<OrderLine> lines) {
+    Order {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(placed, "placed");
+        lines = List.copyOf(lines);                 // the record keeps its own immutable copy
+        if (lines.isEmpty()) throw new IllegalArgumentException("order " + id + " has no lines");
+    }
+    long subtotal() { return lines.stream().mapToLong(OrderLine::subtotal).sum(); }
+}
+    </pre>
+    <p class="mb-0 text-sm">A compact constructor runs before the fields are assigned, so reassigning the parameter <code>lines</code> is how a record normalises its input. <code>List.copyOf</code> gives an immutable, null-rejecting copy — without it, the caller's <code>ArrayList</code> is still reachable and a record that looks immutable is not. <code>equals</code>, <code>hashCode</code> and <code>toString</code> come free and are component-wise, which step 3 relies on when products become map keys.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 2 — a sealed discount family <span class="lm-badge">§9</span></h3>
+  <p>Model three discount kinds as a <code>sealed interface Discount</code> with record implementations: <code>PercentOff(percent)</code>, <code>FixedOff(cents)</code> and <code>BuyNGetOne(sku, n)</code> ("buy <em>n</em>, get one free" for a single SKU). Write <code>static long discountFor(Discount d, Order order)</code> as a <code>switch</code> expression using record patterns, with <strong>no <code>default</code> branch</strong>. A fixed discount must never exceed the order's subtotal.</p>
+  <details class="lm-reveal"><summary>Solution — step 2</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne {}
+record PercentOff(int percent) implements Discount {
+    PercentOff { if (percent < 0 || percent > 100) throw new IllegalArgumentException("percent out of range: " + percent); }
+}
+record FixedOff(long cents) implements Discount {}
+record BuyNGetOne(String sku, int n) implements Discount {}
+
+static long discountFor(Discount d, Order order) {
+    return switch (d) {
+        case PercentOff(int pct)           -> order.subtotal() * pct / 100;
+        case FixedOff(long cents)          -> Math.min(cents, order.subtotal());
+        case BuyNGetOne(String sku, int n) -> order.lines().stream()
+                .filter(l -> l.product().sku().equals(sku))
+                .mapToLong(l -> (long) (l.qty() / (n + 1)) * l.product().priceInCents())
+                .sum();
+    };
+}
+    </pre>
+    <p class="mb-0 text-sm">Because the interface is sealed, the compiler knows the three cases are all the cases and accepts the switch without a <code>default</code>. That is the point: add a fourth discount next quarter and this method stops compiling until it handles it, instead of silently returning zero. A <code>default</code> would have thrown that guarantee away. The record patterns pull the components straight out — no accessor calls, no casts.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 3 — the report <span class="lm-badge">§5, §6</span></h3>
+  <p>Given a <code>List&lt;Order&gt;</code>, produce three things with streams and collectors: revenue by <code>Category</code> as a <code>TreeMap</code>; the top three products by revenue as <code>"SKU=cents"</code> strings, ties broken by SKU; and a partition of order ids by whether the order's subtotal exceeds 10,000 cents. Every result must come out in a deterministic order.</p>
+  <details class="lm-reveal"><summary>Solution — step 3</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+Map<Category, Long> byCategory = orders.stream()
+        .flatMap(o -> o.lines().stream())
+        .collect(Collectors.groupingBy(l -> l.product().category(), TreeMap::new,
+                                       Collectors.summingLong(OrderLine::subtotal)));
+
+Map<String, Long> bySku = orders.stream()
+        .flatMap(o -> o.lines().stream())
+        .collect(Collectors.groupingBy(l -> l.product().sku(), Collectors.summingLong(OrderLine::subtotal)));
+List<String> top3 = bySku.entrySet().stream()
+        .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+        .limit(3)
+        .map(e -> e.getKey() + "=" + e.getValue())
+        .toList();
+
+Map<Boolean, List<String>> bigOrders = orders.stream()
+        .collect(Collectors.partitioningBy(o -> o.subtotal() > 10_000,
+                                           Collectors.mapping(Order::id, Collectors.toList())));
+    </pre>
+    <p class="mb-0 text-sm"><code>flatMap</code> turns a stream of orders into a stream of lines, which is the grain the first two reports need. The three-argument <code>groupingBy</code> chooses the map type; a <code>TreeMap</code> keyed by an enum iterates in declaration order, so the category report is stable. The top-three query groups into a plain <code>HashMap</code> — order there is irrelevant because the next line sorts — and the explicit type witness on <code>comparingByValue</code> is needed because <code>reversed()</code> breaks the inference chain. <code>partitioningBy</code> always produces both keys, so a report never has to guess whether <code>true</code> is present.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 4 — lookups that cannot NPE <span class="lm-badge">§7</span></h3>
+  <p>Write a <code>Catalogue</code> with <code>void add(Product)</code> and <code>Optional&lt;Product&gt; findBySku(String)</code>. Then, without calling <code>get()</code> or <code>isPresent()</code>, obtain the price of <code>CAM-9</code> (throwing <code>IllegalStateException</code> if absent) and the name of <code>NOPE-0</code> with a fallback string.</p>
+  <details class="lm-reveal"><summary>Solution — step 4</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+static final class Catalogue {
+    private final Map<String, Product> bySku = new HashMap<>();
+    void add(Product p) { bySku.put(p.sku(), p); }
+    Optional<Product> findBySku(String sku) { return Optional.ofNullable(bySku.get(sku)); }
+}
+
+long camPrice = catalogue.findBySku("CAM-9")
+        .map(Product::priceInCents)
+        .orElseThrow(() -> new IllegalStateException("CAM-9 not in catalogue"));
+String unknown = catalogue.findBySku("NOPE-0").map(Product::name).orElse("(unknown sku)");
+    </pre>
+    <p class="mb-0 text-sm"><code>Optional.ofNullable</code> is the bridge from a <code>Map.get</code> that returns <code>null</code> to an API that says so in its type. <code>map</code> carries the absence through, so the chain reads as the happy path and the fallback is stated once at the end. The exception supplier is a lambda so the message string is only built when it is needed; <code>orElse</code> is fine for a constant string but would be <code>orElseGet</code> if the fallback were expensive.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 5 — a composed ranking <span class="lm-badge">§10</span></h3>
+  <p>Rank the orders by subtotal, highest first, and for equal subtotals by the date placed, earliest first. Produce <code>"id(subtotal)"</code> strings. Build the <code>Comparator</code> from the static factories, not a hand-written <code>compare</code>.</p>
+  <details class="lm-reveal"><summary>Solution — step 5</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+List<String> ranked = orders.stream()
+        .sorted(Comparator.comparingLong(Order::subtotal).reversed().thenComparing(Order::placed))
+        .map(o -> o.id() + "(" + o.subtotal() + ")")
+        .toList();
+    </pre>
+    <p class="mb-0 text-sm"><code>comparingLong</code> avoids boxing every subtotal; <code>reversed()</code> flips only the key before it, so the tiebreak that follows still runs ascending. <code>LocalDate</code> is <code>Comparable</code>, which is what lets <code>thenComparing</code> take the accessor directly. <code>sorted</code> is a stateful operation — it must see every order before it can emit the first — which is fine for a list of orders and worth knowing about for a stream of a million lines.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 6 — a time window <span class="lm-badge">§12</span></h3>
+  <p>List the ids of orders placed in the seven days up to and including a reference date. Take the reference date as a parameter — <code>LocalDate.of(2026, 10, 15)</code> in <code>main</code> — rather than calling <code>LocalDate.now()</code>, so the method is testable and this page's output is reproducible.</p>
+  <details class="lm-reveal"><summary>Solution — step 6</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+LocalDate asOf = LocalDate.of(2026, 10, 15);
+LocalDate from = asOf.minusDays(7);
+List<String> recent = orders.stream()
+        .filter(o -> !o.placed().isBefore(from))
+        .map(Order::id)
+        .toList();
+    </pre>
+    <p class="mb-0 text-sm"><code>!isBefore(from)</code> is "on or after", the inclusive bound a window usually needs; <code>isAfter(from)</code> would silently drop orders placed exactly seven days ago. The reference date is a plain parameter here; in a service it would come from an injected <code>Clock</code>, which is the same idea with a type. Either way, "today" is an input, not something the method goes and fetches.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">The finished thing</h3>
+
+  <p>All six steps assembled. This program is compiled and executed during the build of this page, so the output below is what it really prints.</p>
+
+  <pre data-code data-lang="java" data-file="OrderLab.java" data-verify="OrderLab">
+import java.time.LocalDate;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
+
+public class OrderLab {
+
+    enum Category { FASTENER, STRUCTURAL, MECHANICAL }
+
+    // -- step 1: records with validating compact constructors -----------------
+    record Product(String sku, String name, Category category, long priceInCents) {
+        Product {
+            if (sku == null || sku.isBlank()) throw new IllegalArgumentException("sku required");
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(category, "category");
+            if (priceInCents < 0) throw new IllegalArgumentException("price must not be negative: " + priceInCents);
+        }
+    }
+
+    record OrderLine(Product product, int qty) {
+        OrderLine {
+            Objects.requireNonNull(product, "product");
+            if (qty <= 0) throw new IllegalArgumentException("qty must be positive: " + qty);
+        }
+        long subtotal() { return product.priceInCents() * qty; }
+    }
+
+    record Order(String id, LocalDate placed, List<OrderLine> lines) {
+        Order {
+            Objects.requireNonNull(id, "id");
+            Objects.requireNonNull(placed, "placed");
+            lines = List.copyOf(lines);                       // immutable, null-hostile, ours
+            if (lines.isEmpty()) throw new IllegalArgumentException("order " + id + " has no lines");
+        }
+        long subtotal() { return lines.stream().mapToLong(OrderLine::subtotal).sum(); }
+    }
+
+    // -- step 2: a sealed family consumed by an exhaustive switch -------------
+    sealed interface Discount permits PercentOff, FixedOff, BuyNGetOne {}
+    record PercentOff(int percent) implements Discount {
+        PercentOff { if (percent < 0 || percent > 100) throw new IllegalArgumentException("percent out of range: " + percent); }
+    }
+    record FixedOff(long cents) implements Discount {}
+    record BuyNGetOne(String sku, int n) implements Discount {}
+
+    static long discountFor(Discount d, Order order) {
+        return switch (d) {                                   // no default: the compiler checks coverage
+            case PercentOff(int pct)           -> order.subtotal() * pct / 100;
+            case FixedOff(long cents)          -> Math.min(cents, order.subtotal());
+            case BuyNGetOne(String sku, int n) -> order.lines().stream()
+                    .filter(l -> l.product().sku().equals(sku))
+                    .mapToLong(l -> (long) (l.qty() / (n + 1)) * l.product().priceInCents())
+                    .sum();
+        };
+    }
+
+    // -- step 4: an Optional-returning lookup ---------------------------------
+    static final class Catalogue {
+        private final Map<String, Product> bySku = new HashMap<>();
+        void add(Product p) { bySku.put(p.sku(), p); }
+        Optional<Product> findBySku(String sku) { return Optional.ofNullable(bySku.get(sku)); }
+    }
+
+    public static void main(String[] args) {
+        Product bolt   = new Product("BOLT-7", "M8 bolt",      Category.FASTENER,   80);
+        Product nut    = new Product("NUT-3",  "M8 nut",       Category.FASTENER,   25);
+        Product girder = new Product("GIRD-1", "Steel girder", Category.STRUCTURAL, 120_000);
+        Product cam    = new Product("CAM-9",  "Cam follower", Category.MECHANICAL, 1_450);
+
+        Catalogue catalogue = new Catalogue();
+        for (Product p : List.of(bolt, nut, girder, cam)) catalogue.add(p);
+
+        List<Order> orders = List.of(
+            new Order("A-100", LocalDate.of(2026, 10, 1),  List.of(new OrderLine(bolt, 40), new OrderLine(nut, 40))),
+            new Order("A-101", LocalDate.of(2026, 10, 9),  List.of(new OrderLine(girder, 1))),
+            new Order("A-102", LocalDate.of(2026, 10, 12), List.of(new OrderLine(cam, 6), new OrderLine(bolt, 10))),
+            new Order("A-103", LocalDate.of(2026, 10, 14), List.of(new OrderLine(cam, 2))));
+
+        // step 2 in action
+        Order a100 = orders.get(0);
+        System.out.println("A-100 subtotal        = " + a100.subtotal());
+        for (Discount d : List.of(new PercentOff(10), new FixedOff(5_000), new BuyNGetOne("BOLT-7", 3))) {
+            System.out.printf("  %-27s -> %d off%n", d, discountFor(d, a100));
+        }
+
+        // -- step 3: the report -------------------------------------------------
+        Map<Category, Long> byCategory = orders.stream()
+                .flatMap(o -> o.lines().stream())
+                .collect(Collectors.groupingBy(l -> l.product().category(), TreeMap::new,
+                                               Collectors.summingLong(OrderLine::subtotal)));
+        System.out.println("revenue by category   = " + byCategory);
+
+        Map<String, Long> bySku = orders.stream()
+                .flatMap(o -> o.lines().stream())
+                .collect(Collectors.groupingBy(l -> l.product().sku(), Collectors.summingLong(OrderLine::subtotal)));
+        List<String> top3 = bySku.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+                .limit(3)
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .toList();
+        System.out.println("top 3 products        = " + top3);
+
+        Map<Boolean, List<String>> bigOrders = orders.stream()
+                .collect(Collectors.partitioningBy(o -> o.subtotal() > 10_000,
+                                                   Collectors.mapping(Order::id, Collectors.toList())));
+        System.out.println("over 10,000 cents     = " + bigOrders);
+
+        // -- step 4: Optional without get() -------------------------------------
+        long camPrice = catalogue.findBySku("CAM-9")
+                .map(Product::priceInCents)
+                .orElseThrow(() -> new IllegalStateException("CAM-9 not in catalogue"));
+        String unknown = catalogue.findBySku("NOPE-0").map(Product::name).orElse("(unknown sku)");
+        System.out.println("CAM-9 price           = " + camPrice + ", NOPE-0 -> " + unknown);
+
+        // -- step 5: ranking with a composed Comparator -------------------------
+        List<String> ranked = orders.stream()
+                .sorted(Comparator.comparingLong(Order::subtotal).reversed().thenComparing(Order::placed))
+                .map(o -> o.id() + "(" + o.subtotal() + ")")
+                .toList();
+        System.out.println("ranked by total       = " + ranked);
+
+        // -- step 6: a time window against a fixed reference date ---------------
+        LocalDate asOf = LocalDate.of(2026, 10, 15);
+        LocalDate from = asOf.minusDays(7);
+        List<String> recent = orders.stream()
+                .filter(o -> !o.placed().isBefore(from))
+                .map(Order::id)
+                .toList();
+        System.out.println("placed since " + from + " = " + recent);
+    }
+}
+  </pre>
+
+  <pre data-output data-for="OrderLab">
+A-100 subtotal        = 4200
+  PercentOff[percent=10]      -> 420 off
+  FixedOff[cents=5000]        -> 4200 off
+  BuyNGetOne[sku=BOLT-7, n=3] -> 800 off
+revenue by category   = {FASTENER=5000, STRUCTURAL=120000, MECHANICAL=11600}
+top 3 products        = [GIRD-1=120000, CAM-9=11600, BOLT-7=4000]
+over 10,000 cents     = {false=[A-100, A-102, A-103], true=[A-101]}
+CAM-9 price           = 1450, NOPE-0 -> (unknown sku)
+ranked by total       = [A-101(120000), A-102(9500), A-100(4200), A-103(2900)]
+placed since 2026-10-08 = [A-101, A-102, A-103]
+  </pre>
+
+  <p>Two details in the output are worth a second look. The <code>TreeMap</code> lists <code>STRUCTURAL</code> before <code>MECHANICAL</code> — an enum's natural order is its <em>declaration</em> order, not alphabetical, which is exactly what a report usually wants and occasionally surprises. And the three discount lines are the record <code>toString</code> implementations, generated from the component names; a hand-written class would have needed three methods to print as clearly.</p>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Extensions worth attempting</div>
+      <ul class="mb-0">
+        <li>Add a fourth discount, <code>FreeShippingOver(long threshold)</code>, to the sealed interface and do nothing else. Read the compiler error carefully — it is telling you every switch that now needs a case. Then add a <code>Discount</code> that is itself a record of two discounts applied in sequence; what does the pattern look like?</li>
+        <li>Load the orders from a CSV file with <code>Files.lines</code> (§13) instead of constructing them in <code>main</code>. Decide what a malformed line should do to the import: skip it, stop, or collect the failures with <code>partitioningBy</code> and report them at the end.</li>
+        <li>Replace the <code>Catalogue</code>'s <code>HashMap</code> with a map keyed by <code>Product</code> itself, then change a product's price by creating a new <code>Product</code> record. Explain, before running it, why the old entry is still there — and why that is the correct behaviour for a value type.</li>
+      </ul>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lab"> Mark this section complete
+  </label>
+</section>

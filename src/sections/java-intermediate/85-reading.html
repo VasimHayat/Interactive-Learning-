@@ -1,0 +1,64 @@
+<section class="lm-section" id="reading" data-title="Further reading" data-num="R">
+  <p class="lm-eyebrow">Where to go next</p>
+  <h2 class="mb-4">Further reading</h2>
+
+  <p>Primary sources only — the specification chapters and JEPs that define each feature, the package summaries that document the library, and the books that are actually worth the shelf space. These are links, but nothing on this page loads them; the module remains fully offline.</p>
+
+  <h3 class="mt-8 mb-3">The Java Language Specification, SE 21</h3>
+  <p>The final word on every rule in this module. Each chapter below is short enough to read in one sitting.</p>
+  <ul>
+    <li><strong>§4.10 Subtyping</strong> and <strong>§4.5.1 Type arguments</strong> — invariance, wildcards and the capture conversion behind every <code>CAP#1</code> error message (§1).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-4.html</span></li>
+    <li><strong>Chapter 5 Conversions and Contexts</strong> — the assignment, invocation and casting contexts that drive target typing and inference (§1, §4).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-5.html</span></li>
+    <li><strong>§8.1.1.2 sealed and non-sealed classes</strong>, <strong>§8.4.3 default methods</strong> and <strong>§8.10 Record classes</strong> — the exact rules for permitted subtypes, default-method resolution and compact constructors (§3, §8, §9).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html</span></li>
+    <li><strong>§14.11 The switch statement</strong>, <strong>§14.30 Patterns</strong> and <strong>§15.28 Switch expressions</strong> — exhaustiveness, dominance and the scope of pattern variables (§9).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-14.html</span></li>
+    <li><strong>§15.27 Lambda expressions</strong> and <strong>§15.13 Method reference expressions</strong> — what a lambda may capture, what <code>this</code> means inside one, and how the four reference forms are compiled (§2, §4).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">The JEPs</h3>
+  <p>Each feature's design document explains the alternatives that were rejected, which is often the clearest way to understand why the rules are what they are.</p>
+  <ul>
+    <li><strong>JEP 395: Records</strong> — why accessors are <code>name()</code>, why there are no setters, and the "transparent carrier" phrase (§8).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/395</span></li>
+    <li><strong>JEP 409: Sealed Classes</strong> — the <code>permits</code> rules and the expression-problem motivation (§9).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/409</span></li>
+    <li><strong>JEP 441: Pattern Matching for switch</strong> and <strong>JEP 440: Record Patterns</strong> — guards, <code>case null</code>, dominance and nested deconstruction (§9).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/441 · https://openjdk.org/jeps/440</span></li>
+    <li><strong>JEP 400: UTF-8 by Default</strong> — why the platform charset was a bug for twenty-five years and what changed in Java 18 (§13).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/400</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Package documentation</h3>
+  <ul>
+    <li><strong><code>java.util.stream</code> package summary</strong> — the authoritative description of laziness, stateless versus stateful operations, non-interference and the rules for <code>reduce</code> and <code>collect</code>. Read it in full once (§5, §6).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html</span></li>
+    <li><strong><code>java.time</code> package summary</strong> — the type matrix, the ISO calendar, and the design rationale for separating instants from local date-times (§12).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/package-summary.html</span></li>
+    <li><strong><code>HashMap</code> class documentation</strong> — the load-factor trade-off and the treeification note, in the JDK's own words (§11).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/HashMap.html</span></li>
+    <li><strong><code>Optional</code> class documentation</strong> — the API note stating that it is intended as a return type (§7).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Optional.html</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Books</h3>
+  <ul>
+    <li><strong>Effective Java</strong>, Joshua Bloch, 3rd edition — items 26 to 33 are the generics chapter (raw types, wildcards, PECS, heterogeneous containers); items 42 to 48 cover lambdas, method references and streams; item 55 is the definitive statement on <code>Optional</code>. Every section of this module has an item behind it.</li>
+    <li><strong>Modern Java in Action</strong>, Raoul-Gabriel Urma, Mario Fusco and Alan Mycroft — the long-form treatment of streams, collectors and functional style, with the parallel-stream internals this module deferred to Java Advanced.</li>
+    <li><strong>Java Generics and Collections</strong>, Maurice Naftalin and Philip Wadler — older, but still the clearest book-length explanation of wildcards, erasure and the collections framework's design.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Tools worth knowing now</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Useful JDK tools for this module's material</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Use it to</th></tr></thead>
+      <tbody>
+        <tr><td><code>jshell</code></td><td>Build a stream pipeline one operation at a time and watch what each stage emits. The fastest way to settle whether <code>sorted</code> comes before or after <code>limit</code>.</td></tr>
+        <tr><td><code>javap -p Order.class</code></td><td>See the members a record or inner class really has: the generated accessors and <code>equals</code>, the synthetic <code>this$0</code> and <code>val$base</code> fields, and that every <code>List&lt;T&gt;</code> is a plain <code>List</code>.</td></tr>
+        <tr><td><code>javap -c</code></td><td>Find the <code>checkcast</code> the compiler inserted at every generic read, and the <code>invokedynamic</code> a lambda compiles to.</td></tr>
+        <tr><td><code>javac -Xlint:all -Werror</code></td><td>Turn raw types, unchecked casts and missing <code>@Override</code> into build failures. <code>-Xlint:rawtypes</code> alone catches the <code>List</code> that should have been <code>List&lt;?&gt;</code>.</td></tr>
+        <tr><td><code>java -Dfile.encoding=…</code></td><td>Reproduce a charset bug by running with the platform default a customer's machine has. Since Java 18 the default is UTF-8 unless you set this.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Next module</div>
+      <p><strong>Java Advanced</strong> picks up exactly where this stops, and leaves the single-threaded world behind: threads and what they own, the Java memory model and happens-before, <code>synchronized</code> and <code>ReentrantLock</code> and how to avoid deadlock, atomics and the concurrent collections, executors and thread-pool sizing, <code>CompletableFuture</code>, virtual threads and structured concurrency, garbage collection and reading a GC log, class loading and initialisation order, reflection and annotations, the module system, and how to measure before optimising with JMH, JFR and the JIT's tiers. The parallel streams this module told you to measure, the <code>ConcurrentHashMap</code> iterators it called weakly consistent, and the enum singleton it called reflection-proof all get their explanations there.</p>
+      <p class="mb-0">Take the quiz above first. If you scored below 65%, the sections you missed are worth a second pass before moving on — the advanced material assumes every one of the twelve objectives, and generics, lambdas and immutability in particular are load-bearing for everything about concurrency.</p>
+    </div>
+  </div>
+</section>

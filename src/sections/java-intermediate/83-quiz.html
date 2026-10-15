@@ -1,0 +1,246 @@
+<section class="lm-section" id="quiz" data-title="Self-assessment quiz" data-num="Q">
+  <p class="lm-eyebrow">Assessment</p>
+  <h2 class="mb-4">Self-assessment quiz</h2>
+  <p>Sixteen questions covering all twelve learning objectives. Answer every one, then submit — nothing is marked until you do, and the explanations stay hidden until then. Your answers are saved locally, so you can leave and come back.</p>
+
+  <div class="lm-quiz" data-quiz>
+
+    <!-- objective 1: choose the wildcard from PECS -->
+    <div class="lm-q" data-q id="qz-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A method <code>restock(List&lt;…&gt; dst)</code> adds three <code>Perishable</code> objects to <code>dst</code> and reads nothing back. Which parameter type accepts the most callers while still compiling?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-1"><span><code>List&lt;? extends Perishable&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-1"><span><code>List&lt;? super Perishable&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-1"><span><code>List&lt;?&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-1"><span><code>List&lt;Perishable&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The method only writes, so the list is a consumer and <em>Consumer Super</em> applies: any list that a <code>Perishable</code> fits in — <code>List&lt;Perishable&gt;</code>, <code>List&lt;Product&gt;</code>, even <code>List&lt;Object&gt;</code> — is accepted, and <code>add(Perishable)</code> compiles inside. <strong>A</strong> is the producer form: it would accept a <code>List&lt;Milk&gt;</code> and then forbid <code>add</code>, because a <code>Perishable</code> is not necessarily a <code>Milk</code>. <strong>C</strong> forbids adding anything but <code>null</code>. <strong>D</strong> compiles but accepts only the exact type, rejecting a perfectly safe <code>List&lt;Product&gt;</code>.</p></div>
+    </div>
+
+    <!-- objective 1: what erasure prevents -->
+    <div class="lm-q" data-q id="qz-2" data-answer="a,b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which of these are rejected by the compiler as a direct consequence of type erasure? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>return new T();</code> inside <code>&lt;T&gt; T make()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>if (x instanceof List&lt;String&gt;)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>List&lt;?&gt; any = new ArrayList&lt;String&gt;();</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>void f(List&lt;Product&gt; l)</code> and <code>void f(List&lt;String&gt; l)</code> in one class <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A, B and D.</strong> After erasure the method body sees <code>T</code> as <code>Object</code> and has no class to construct (<strong>A</strong>); every <code>List</code> is the same runtime class so there is nothing for <code>instanceof</code> to test (<strong>B</strong>); and both overloads erase to <code>f(List)</code>, the "same erasure" error (<strong>D</strong>). <strong>C</strong> is legal and ordinary — an unbounded wildcard accepts any parameterisation; it is the typed, safe alternative to a raw <code>List</code>.</p></div>
+    </div>
+
+    <!-- objective 2: distinguish the kinds of nested class -->
+    <div class="lm-q" data-q id="qz-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>class Order { class Cursor { } }</code> — from a <code>static void main</code> in another class you write <code>Order.Cursor c = new Order.Cursor();</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-3"><span>It compiles and creates a <code>Cursor</code> with no owner <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-3"><span>It compiles; the first <code>Order</code> ever created becomes the owner <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-3"><span>Compile error: an enclosing instance of type <code>Order</code> is required — <code>Cursor</code> is inner, so it needs <code>order.new Cursor()</code> or the <code>static</code> keyword <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-3"><span>Runtime <code>NullPointerException</code> when <code>Cursor</code> touches an <code>Order</code> field <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> A nested class without <code>static</code> is inner: every instance carries a hidden <code>this$0</code> reference to an <code>Order</code>, passed as a secret constructor argument, so it cannot be created without one. Either construct it through an instance — <code>order.new Cursor()</code>, or more usually a method on <code>Order</code> — or, if it never uses the outer instance, make it <code>static</code>. <strong>A</strong> describes what a <em>static</em> nested class would allow. <strong>B</strong> invents a rule; nothing is implicit. <strong>D</strong> cannot happen because the compiler refuses first.</p></div>
+    </div>
+
+    <!-- objective 2: effectively final -->
+    <div class="lm-q" data-q id="qz-4" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span><code>int n = 0; Runnable r = () -&gt; System.out.println(n); n = 1; r.run();</code> — what happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-4"><span>Prints <code>0</code> — the lambda captured the value at creation <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-4"><span>Prints <code>1</code> — the lambda reads the variable when it runs <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-4"><span>Compile error at <code>n = 1</code>: cannot assign to a captured variable <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-4"><span>Compile error at the lambda: <code>n</code> must be final or effectively final <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>D.</strong> A lambda copies the value of a captured local, so a later assignment would leave two copies that disagree; the language forbids the situation rather than pick a meaning. The rule is checked per variable, not per use — one assignment anywhere in the method makes <code>n</code> uncapturable — and the error is reported at the capture, not at the assignment, which is why <strong>C</strong> has the location wrong. <strong>A</strong> is what would happen if the rule did not exist, and is exactly the surprise it prevents. <strong>B</strong> describes closures in languages that share variables; Java's do not.</p></div>
+    </div>
+
+    <!-- objective 3: default-method resolution -->
+    <div class="lm-q" data-q id="qz-5" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">5.</span><span><code>class Base { public String describe() { return "base"; } }</code>, <code>interface Priced { default String describe() { return "priced"; } }</code>, <code>class Bolt extends Base implements Priced { }</code>. What does <code>new Bolt().describe()</code> return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-5"><span><code>"base"</code> — a class method always beats an interface default <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-5"><span><code>"priced"</code> — the interface is more specific to <code>Bolt</code> than its superclass <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-5"><span>Compile error: <code>Bolt</code> inherits two implementations and must override <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-5"><span>Whichever was declared first in <code>Bolt</code>'s header <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> Rule one of default resolution: a concrete method from a superclass, however far up, wins over every interface default. This is what makes defaults safe to add to published interfaces — they cannot change what an existing class hierarchy does. <strong>B</strong> applies the "more specific" rule to the wrong pair; that rule only ranks interfaces against each other. <strong>C</strong> is the outcome only when <em>two unrelated interfaces</em> supply the default and no class does. <strong>D</strong>: declaration order never affects resolution.</p></div>
+    </div>
+
+    <!-- objective 4: method references and what this/receiver means -->
+    <div class="lm-q" data-q id="qz-6" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">6.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+String prefix = "SKU-";
+Function<String, String> f = prefix::concat;
+prefix = "PART-";       // compiles: prefix is reassigned, but the reference was already built
+System.out.println(f.apply("7"));
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-6"><span><code>SKU-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-6"><span><code>PART-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-6"><span><code>7SKU-</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-6"><span>Compile error: <code>prefix</code> is not effectively final <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> <code>prefix::concat</code> is a <em>bound</em> instance reference: the receiver expression is evaluated once, when the reference is created, and the resulting <code>Function</code> holds that <code>String</code> object. Reassigning the variable afterwards changes nothing the function can see. The call is <code>"SKU-".concat("7")</code>. <strong>B</strong> would require the reference to re-read the variable at call time, which only a lambda <code>s -&gt; prefix.concat(s)</code> would do — and that lambda would not compile, for the reason in <strong>D</strong>. <strong>D</strong> is wrong here because a bound method reference evaluates its receiver immediately and does not capture the variable; the effectively-final rule applies to lambdas and to references whose receiver is a captured local <em>inside a lambda body</em>, not to this form. <strong>C</strong> has the receiver and argument swapped — that is what the unbound <code>String::concat</code> applied as <code>(a, b) -&gt; a.concat(b)</code> might suggest, but this reference is bound.</p></div>
+    </div>
+
+    <!-- objective 5: trace laziness and short-circuiting -->
+    <div class="lm-q" data-q id="qz-7" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">7.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+List.of("a", "bb", "ccc").stream()
+    .peek(s -> System.out.print(s + " "))
+    .filter(s -> s.length() > 1)
+    .findFirst();
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-7"><span><code>a bb ccc </code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-7"><span><code>a bb </code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-7"><span><code>bb </code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-7"><span>Nothing — the <code>Optional</code> result is discarded, so the pipeline never runs <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> <code>findFirst</code> is a terminal operation, so the pipeline runs — vertically, one element at a time. <code>"a"</code> is peeked, fails the filter, and the next element is pulled; <code>"bb"</code> is peeked, passes, and reaches <code>findFirst</code>, which has what it needs and stops. <code>"ccc"</code> is never read. <strong>A</strong> is what <code>toList()</code> would print, since it consumes everything. <strong>C</strong> forgets that <code>peek</code> runs <em>before</em> the filter and sees the rejected element too. <strong>D</strong>: discarding the result does not undo the terminal operation; only a pipeline with no terminal at all is a no-op.</p></div>
+    </div>
+
+    <!-- objective 5: which operations force a full pass -->
+    <div class="lm-q" data-q id="qz-8" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">8.</span><span>Which intermediate operation must receive <em>every</em> upstream element before it can emit its first one?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-8"><span><code>filter</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-8"><span><code>sorted</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-8"><span><code>limit</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-8"><span><code>flatMap</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The smallest element might be the last one in, so <code>sorted</code> is a barrier: it buffers the whole upstream, then emits in order. A <code>limit</code> placed after it still has to wait, and the buffer costs memory proportional to the input. <strong>A</strong> and <strong>D</strong> are stateless — each element is handled alone and passed on immediately. <strong>C</strong> is the opposite of a barrier: it is short-circuiting, and stops the upstream early.</p></div>
+    </div>
+
+    <!-- objective 6: toMap merge strategies -->
+    <div class="lm-q" data-q id="qz-9" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">9.</span><span>The stream holds two <code>FASTENER</code> products. What does <code>stock.stream().collect(toMap(Product::category, Product::sku))</code> do?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-9"><span>Keeps the last SKU for <code>FASTENER</code>, like <code>HashMap.put</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-9"><span>Keeps the first SKU and ignores later ones <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-9"><span>Throws <code>IllegalStateException: Duplicate key FASTENER</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-9"><span>Does not compile — a merge function is mandatory <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> The two-argument <code>toMap</code> refuses to choose a winner: a second value for an existing key throws, naming the key and both values. That is deliberate, because silently keeping one would hide a data problem. To say what should happen, use the three-argument form — <code>(a, b) -&gt; b</code> for <strong>A</strong>'s behaviour, <code>(a, b) -&gt; a</code> for <strong>B</strong>'s, <code>Integer::sum</code> to total. <strong>D</strong> is wrong: the two-argument overload exists and compiles; the failure is at runtime.</p></div>
+    </div>
+
+    <!-- objective 6: groupingBy with a downstream -->
+    <div class="lm-q" data-q id="qz-10" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">10.</span><span>What is the type of <code>stock.stream().collect(groupingBy(Product::category, counting()))</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-10"><span><code>Map&lt;Category, Integer&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-10"><span><code>Map&lt;Category, Long&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-10"><span><code>Map&lt;Category, List&lt;Product&gt;&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-10"><span><code>TreeMap&lt;Category, Long&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The downstream collector decides the value type, and <code>counting()</code> always produces <code>Long</code>. Declaring the result as <code>Map&lt;Category, Integer&gt;</code> (<strong>A</strong>) is the single most common compile error with <code>groupingBy</code>; use <code>summingInt(p -&gt; 1)</code> if you genuinely need an <code>Integer</code>. <strong>C</strong> is the one-argument <code>groupingBy</code>, whose implicit downstream is <code>toList()</code>. <strong>D</strong>: the two-argument form promises a <code>Map</code> backed by a <code>HashMap</code>; a <code>TreeMap</code> needs the three-argument form with <code>TreeMap::new</code> as the <em>middle</em> argument.</p></div>
+    </div>
+
+    <!-- objective 7: where Optional must not appear -->
+    <div class="lm-q" data-q id="qz-11" data-answer="a,b,c">
+      <p class="lm-q-stem"><span class="lm-q-num">11.</span><span>In which of these positions should <code>Optional</code> <em>not</em> appear, according to its designers? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A field: <code>private Optional&lt;String&gt; supplier;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A parameter: <code>long price(Product p, Optional&lt;Discount&gt; d)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A map value: <code>Map&lt;String, Optional&lt;Product&gt;&gt;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A return type: <code>Optional&lt;Product&gt; findBySku(String sku)</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A, B and C.</strong> A field (<strong>A</strong>) is not <code>Serializable</code>, doubles the memory of every nullable field, and can itself still be <code>null</code>; expose a nullable field through an accessor that returns <code>Optional</code> instead. A parameter (<strong>B</strong>) forces every caller to wrap, and the method must still guard against a <code>null</code> argument — two overloads are the idiom. A map value (<strong>C</strong>) gives <code>Map.get</code> two ways to say "nothing": <code>null</code> for an absent key and <code>Optional.empty()</code> for a present one. <strong>D</strong> is the one intended use: a return type that says "may be absent" so the caller cannot forget.</p></div>
+    </div>
+
+    <!-- objective 8: compact constructor and record equality -->
+    <div class="lm-q" data-q id="qz-12" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">12.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+record Line(String sku, int qty) {
+    Line {
+        sku = sku.strip().toUpperCase();
+        if (qty <= 0) throw new IllegalArgumentException("qty");
+    }
+}
+System.out.println(new Line("  bolt-7 ", 2).equals(new Line("BOLT-7", 2)));
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-12"><span><code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-12"><span><code>false</code> — <code>equals</code> compares the original constructor arguments <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-12"><span>Compile error — the compact constructor assigns to a parameter instead of <code>this.sku</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-12"><span><code>false</code> — records compare by identity unless <code>equals</code> is overridden <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> In a compact constructor the body runs <em>before</em> the compiler's automatic <code>this.sku = sku; this.qty = qty;</code>, so reassigning the parameter is exactly how you normalise: both records end up with the field <code>"BOLT-7"</code>, and the generated <code>equals</code> compares fields, not the arguments that were passed. <strong>B</strong> and <strong>D</strong> both misdescribe the generated <code>equals</code> — it is component-wise, on the stored values. <strong>C</strong> is backwards: assigning <code>this.sku</code> in a compact constructor is the compile error, because the field is assigned for you afterwards.</p></div>
+    </div>
+
+    <!-- objective 9: exhaustive sealed switch -->
+    <div class="lm-q" data-q id="qz-13" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">13.</span><span><code>sealed interface Discount permits PercentOff, FixedOff</code>, both records. Does this compile?</span></p>
+      <pre data-code data-lang="java" data-nobar>
+long apply(Discount d, long gross) {
+    return switch (d) {
+        case PercentOff(int pct)                 -> gross * (100 - pct) / 100;
+        case FixedOff(int c) when c >= gross     -> 0;
+    };
+}
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-13"><span>Yes — both permitted subtypes have a case <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-13"><span>Yes, but a <code>FixedOff</code> smaller than <code>gross</code> throws <code>MatchException</code> at runtime <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-13"><span>No — the switch does not cover all possible input values, because the guarded case covers only some <code>FixedOff</code>s <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-13"><span>No — a switch expression over a sealed type always requires a <code>default</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> A guard is not a case. <code>case FixedOff(int c) when c &gt;= gross</code> handles only the vouchers worth more than the line; the compiler cannot prove anything about the rest, so the switch is not exhaustive and the error names <code>FixedOff</code> — the type you thought you had handled. Add an unguarded <code>case FixedOff(int c) -&gt; gross - c</code> after it. <strong>A</strong> counts case labels instead of coverage. <strong>B</strong> describes separate-compilation drift, not a program the compiler has just seen. <strong>D</strong> is the opposite of the design: exhaustiveness without <code>default</code> is the whole point of sealing, and a <code>default</code> would hide the next subtype.</p></div>
+    </div>
+
+    <!-- objective 10: unmodifiable view versus immutable copy -->
+    <div class="lm-q" data-q id="qz-14" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">14.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+List<String> src  = new ArrayList<>(List.of("BOLT-7"));
+List<String> view = Collections.unmodifiableList(src);
+List<String> copy = List.copyOf(src);
+src.add("NUT-3");
+System.out.println(view.size() + " " + copy.size());
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-14"><span><code>1 1</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-14"><span><code>2 1</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-14"><span><code>2 2</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-14"><span><code>src.add</code> throws <code>UnsupportedOperationException</code> because a view exists <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The view stores no elements; it forwards every read to <code>src</code>, so it sees the second element the moment it is added. The copy walked <code>src</code> once and owns its own storage, fixed at that instant. "Unmodifiable" describes the window, not the room. <strong>A</strong> treats the view as a snapshot; <strong>C</strong> treats the copy as a view. <strong>D</strong>: a view only refuses writes made <em>through itself</em>; the original list is unaffected by having been wrapped.</p></div>
+    </div>
+
+    <!-- objective 11: DST, Duration versus Period -->
+    <div class="lm-q" data-q id="qz-15" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">15.</span><span>London's clocks go forward at 01:00 on 29 March 2026. Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+ZonedDateTime placed = ZonedDateTime.of(2026, 3, 28, 23, 30, 0, 0, ZoneId.of("Europe/London"));
+System.out.println(Duration.between(placed, placed.plusDays(1)).toHours());
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-15"><span><code>23</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-15"><span><code>24</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-15"><span><code>25</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-15"><span><code>DateTimeException</code> — 23:30 plus one day lands in a gap <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> <code>plusDays</code> is calendar arithmetic on a <code>ZonedDateTime</code>: it keeps the wall clock at 23:30 and re-resolves the offset, so the result is 23:30 on the 29th — and because the night in between lost an hour, that is 23 real hours later. <code>Duration.between</code> measures elapsed time and reports it honestly. <strong>B</strong> is what <code>plusHours(24)</code> would give, landing at 00:30 on the 30th; it is also what a <code>LocalDateTime</code> would always say, having no zone to consult. <strong>C</strong> is the October overlap, not the March gap. <strong>D</strong>: 23:30 exists on both days; only 01:00–01:59 on the 29th is missing, and even a time in the gap is shifted forward rather than rejected.</p></div>
+    </div>
+
+    <!-- objective 12: a stream that is always closed -->
+    <div class="lm-q" data-q id="qz-16" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">16.</span><span><code>Stream&lt;String&gt; lines = Files.lines(path, StandardCharsets.UTF_8);</code> — which of these guarantee the file handle it opened is released? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Opening it in try-with-resources: <code>try (Stream&lt;String&gt; lines = Files.lines(…)) { … }</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Running a terminal operation such as <code>lines.count()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Calling <code>lines.close()</code> in a <code>finally</code> block <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Letting <code>lines</code> go out of scope at the end of the method <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A and C.</strong> <code>Files.lines</code> reads on demand, so the returned stream owns an open file descriptor until <code>close()</code> runs; <code>Stream</code> implements <code>AutoCloseable</code> for exactly this reason, and try-with-resources is the idiom. <strong>B</strong> is the trap: a terminal operation consumes the elements and marks the stream as used, but does not close it — on Windows the file then cannot be deleted, and on Linux the descriptor leaks silently. <strong>D</strong> relies on the garbage collector finalising the stream, which may happen hours later or never. The same applies to <code>Files.walk</code> and <code>Files.list</code>.</p></div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mt-6" data-print="hide">
+      <button type="button" class="lm-btn lm-btn--primary" data-quiz-submit>Submit all 16 answers</button>
+      <button type="button" class="lm-btn" data-quiz-review hidden>Review wrong answers</button>
+    </div>
+    <div class="lm-score" data-quiz-score hidden></div>
+  </div>
+</section>

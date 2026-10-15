@@ -1,0 +1,376 @@
+<section class="lm-section" id="generics" data-title="Generics in depth" data-num="1">
+  <p class="lm-eyebrow">Section 1</p>
+  <h2 class="mb-4">Generics in depth</h2>
+
+  <p>Fundamentals left generics at the point where you can declare a <code>List&lt;Product&gt;</code> and get a <code>Product</code> back without a cast. That is the <em>consumer's</em> view. This section is the <em>designer's</em> view: how to write a method or class that works for a whole family of types, and why the rules that make that safe produce some of the strangest-looking signatures in the JDK.</p>
+
+  <p>Everything follows from one decision made in 2004: generic type arguments exist only at compile time. The compiler checks them, then <strong>erases</strong> them, and the bytecode that runs contains plain <code>List</code>, plain <code>Object</code>, and a cast wherever you read an element out. Every limitation in this section — no <code>new T()</code>, no <code>List&lt;int&gt;</code>, no <code>instanceof List&lt;String&gt;</code> — is a direct consequence of that.</p>
+
+  <h3 class="mt-8 mb-3">Invariance: why a <code>List&lt;Perishable&gt;</code> is not a <code>List&lt;Product&gt;</code></h3>
+
+  <p>A <code>Perishable</code> is a <code>Product</code>. It is natural to assume a <code>List&lt;Perishable&gt;</code> is therefore a <code>List&lt;Product&gt;</code>, and the compiler says no. Here is why it must:</p>
+
+  <pre data-code data-lang="java" data-nobar data-bad="2,3">
+List<Perishable> dairy = new ArrayList<>();
+List<Product> products = dairy;              // if this were allowed…
+products.add(new Product("GIRD-1", 120_000)); // …a girder would land in the dairy list
+Perishable p = dairy.get(0);                 // and this would throw ClassCastException
+  </pre>
+
+  <p>Generic types are <strong>invariant</strong>: <code>List&lt;A&gt;</code> and <code>List&lt;B&gt;</code> are unrelated no matter how <code>A</code> and <code>B</code> relate. Arrays, designed a decade earlier, went the other way — <code>Perishable[]</code> <em>is</em> a <code>Product[]</code> — and pay for it at runtime with <code>ArrayStoreException</code>, which the language designers regarded as a mistake not to repeat. Invariance is safe but inconvenient: a method taking <code>List&lt;Product&gt;</code> cannot accept the dairy list even to read it. Wildcards are the fix.</p>
+
+  <h3 class="mt-8 mb-3">Wildcards and PECS</h3>
+
+  <p>A wildcard loosens the type argument in one direction. <code>List&lt;? extends Product&gt;</code> means "a list of some unknown subtype of <code>Product</code>"; <code>List&lt;? super Perishable&gt;</code> means "a list of some unknown <em>supertype</em> of <code>Perishable</code>". Which one you want depends entirely on whether the method reads or writes, and the mnemonic is <strong>PECS</strong>: <em>Producer Extends, Consumer Super</em>.</p>
+
+  <pre data-code data-lang="java" data-file="Pecs.java" data-verify="Pecs" data-hi="17,24,30">
+import java.util.ArrayList;
+import java.util.List;
+
+public class Pecs {
+
+    static class Product {
+        final String sku; final int priceInCents;
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @Override public String toString() { return sku; }
+    }
+    static class Perishable extends Product {
+        final int shelfDays;
+        Perishable(String sku, int priceInCents, int shelfDays) { super(sku, priceInCents); this.shelfDays = shelfDays; }
+    }
+
+    // PRODUCER: we only READ Products out of `src`, so accept any List of a subtype
+    static int totalInCents(List<? extends Product> src) {
+        int sum = 0;
+        for (Product p : src) sum += p.priceInCents;   // reading as Product is always safe
+        return sum;
+    }
+
+    // CONSUMER: we only WRITE Perishables into `dst`, so accept any List of a supertype
+    static void restockPerishables(List<? super Perishable> dst) {
+        dst.add(new Perishable("MILK-1", 120, 7));      // writing a Perishable is always safe
+        dst.add(new Perishable("EGGS-6", 240, 21));
+    }
+
+    // BOTH: reads and writes, so the type must be exact — no wildcard
+    static void swapFirstTwo(List<Product> list) {
+        Product first = list.get(0);
+        list.set(0, list.get(1));
+        list.set(1, first);
+    }
+
+    public static void main(String[] args) {
+        List<Perishable> dairy = new ArrayList<>();
+        restockPerishables(dairy);                      // List<Perishable> is a List<? super Perishable>
+        System.out.println("dairy         = " + dairy);
+
+        List<Product> catalogue = new ArrayList<>();
+        catalogue.add(new Product("BOLT-7", 80));
+        catalogue.add(new Product("GIRD-1", 120_000));
+        restockPerishables(catalogue);                  // List<Product> is ALSO a List<? super Perishable>
+        System.out.println("catalogue     = " + catalogue);
+
+        System.out.println("total(dairy)  = " + totalInCents(dairy));       // List<Perishable> as a producer
+        System.out.println("total(catal.) = " + totalInCents(catalogue));   // List<Product> as a producer
+
+        List<Object> anything = new ArrayList<>();
+        restockPerishables(anything);                   // even List<Object> is a List<? super Perishable>
+        System.out.println("anything      = " + anything);
+
+        swapFirstTwo(catalogue);
+        System.out.println("swapped       = " + catalogue);
+
+        // totalInCents(anything);                       // does not compile: Object is not a Product
+        // restockPerishables(new ArrayList<String>());  // does not compile: String is not a supertype
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Pecs">
+dairy         = [MILK-1, EGGS-6]
+catalogue     = [BOLT-7, GIRD-1, MILK-1, EGGS-6]
+total(dairy)  = 360
+total(catal.) = 120440
+anything      = [MILK-1, EGGS-6]
+swapped       = [GIRD-1, BOLT-7, MILK-1, EGGS-6]
+  </pre>
+
+  <p>Read the three signatures as promises. <code>totalInCents</code> promises never to add anything, so it can be handed a list of anything that is at least a <code>Product</code>. <code>restockPerishables</code> promises only ever to add <code>Perishable</code>s, so it can be handed any list those will fit in — and a <code>List&lt;Object&gt;</code> qualifies. <code>swapFirstTwo</code> does both and so can promise neither; its parameter is exact. The wildcards buy flexibility for the <em>caller</em> at the price of restrictions <em>inside</em> the method, which the compiler enforces: try to <code>add</code> to a <code>? extends</code> list, or read a typed element from a <code>? super</code> list, and it refuses.</p>
+
+  <h3 class="mt-8 mb-3">Pick the wildcard</h3>
+
+  <div class="lm-card" data-sandbox="wildcard-picker">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      What does your method do with the list?
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Reads elements out of it</span>
+        <select data-sb-reads><option value="yes" selected>yes</option><option value="no">no</option></select>
+      </label>
+      <label class="lm-field">
+        <span>Writes elements into it</span>
+        <select data-sb-writes><option value="yes">yes</option><option value="no" selected>no</option></select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Match each parameter type to its job</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a type onto its slot, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Each slot describes what a method does with a <code>List</code> parameter. Place the element type that fits.</p>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Parameter types to place">
+        <button type="button" class="lm-chip" data-chip="ext"><code>List&lt;? extends Product&gt;</code></button>
+        <button type="button" class="lm-chip" data-chip="sup"><code>List&lt;? super Product&gt;</code></button>
+        <button type="button" class="lm-chip" data-chip="unb"><code>List&lt;?&gt;</code></button>
+        <button type="button" class="lm-chip" data-chip="exact"><code>List&lt;Product&gt;</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Slots">
+        <button type="button" class="lm-slot" data-slot="ext" data-label="sums the prices of every element"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">sums the prices of every element</span></button>
+        <button type="button" class="lm-slot" data-slot="sup" data-label="adds three sample products to it"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">adds three sample products to it</span></button>
+        <button type="button" class="lm-slot" data-slot="unb" data-label="returns true if it is empty"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">returns true if it is empty</span></button>
+        <button type="button" class="lm-slot" data-slot="exact" data-label="replaces every element with a discounted copy"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">replaces every element with a discounted copy</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. Summing reads only — producer, <code>extends</code>. Adding writes only — consumer, <code>super</code>. <code>isEmpty()</code> touches no element — unbounded. Replacing reads each element <em>and</em> writes one back — exact type, or a generic method <code>&lt;T extends Product&gt; void discount(List&lt;T&gt;)</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Bounded type parameters and generic methods</h3>
+
+  <p>A wildcard constrains an argument you receive. A <strong>type parameter</strong> — the <code>&lt;T&gt;</code> before a method's return type — names an unknown type so you can refer to it more than once: take a <code>List&lt;T&gt;</code>, return a <code>T</code>. A <strong>bound</strong> on it (<code>T extends Something</code>) is what lets you call methods on a <code>T</code>; without a bound, all the compiler knows is that <code>T</code> is an <code>Object</code>.</p>
+
+  <pre data-code data-lang="java" data-file="Bounds.java" data-verify="Bounds" data-hi="24,35">
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class Bounds {
+
+    static class Product implements Comparable<Product> {
+        final String sku; final int priceInCents;
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @Override public int compareTo(Product o) { return Integer.compare(priceInCents, o.priceInCents); }
+        @Override public String toString() { return sku + "@" + priceInCents; }
+    }
+    interface Stockable { int onHand(); }
+
+    // Perishable inherits compareTo(Product): it is Comparable<Product>, NOT Comparable<Perishable>
+    static class Perishable extends Product implements Stockable {
+        final int onHand;
+        Perishable(String sku, int priceInCents, int onHand) { super(sku, priceInCents); this.onHand = onHand; }
+        @Override public int onHand() { return onHand; }
+    }
+
+    // Bounded type parameter. Without `? super T`, max(dairy) below would not compile,
+    // because Perishable is only Comparable<Product>, never Comparable<Perishable>.
+    static <T extends Comparable<? super T>> T max(List<T> items) {
+        T best = items.get(0);
+        for (T t : items) if (t.compareTo(best) > 0) best = t;
+        return best;
+    }
+
+    // Generic method: T is inferred from the arguments, the caller never writes <Product>
+    static <T> List<T> pair(T a, T b) {
+        List<T> out = new ArrayList<>();
+        out.add(a); out.add(b);
+        return out;
+    }
+
+    // Intersection bound: T must be a Product AND Stockable. The class comes first, then interfaces.
+    // Inside, every T has both priceInCents and onHand() — no cast, no instanceof.
+    static <T extends Product & Stockable> int stockValueInCents(List<T> items) {
+        int total = 0;
+        for (T t : items) total += t.priceInCents * t.onHand();
+        return total;
+    }
+
+    public static void main(String[] args) {
+        List<Perishable> dairy = List.of(new Perishable("MILK-1", 120, 40), new Perishable("EGGS-6", 240, 12), new Perishable("BUTR-2", 310, 5));
+        List<Product> parts = List.of(new Product("BOLT-7", 80), new Product("GIRD-1", 120_000), new Product("NUT-3", 25));
+
+        System.out.println("max(dairy)      = " + max(dairy));      // T = Perishable; bound met via Comparable<Product>
+        System.out.println("max(parts)      = " + max(parts));
+        System.out.println("stock value     = " + stockValueInCents(dairy));   // T = Perishable satisfies both bounds
+        // stockValueInCents(parts);   // does not compile: Product is not Stockable
+
+        List<Product> two = pair(new Product("A", 1), new Product("B", 2));   // T inferred as Product
+        List<Object> mixed = pair("BOLT-7", 42);                              // T inferred as Object (see below)
+        System.out.println("pair            = " + two + " / " + mixed);
+
+        // A Comparator supplies ordering from outside; List.sort takes Comparator<? super E>,
+        // so a Comparator<Product> sorts a List<Perishable>
+        Comparator<Product> bySku = Comparator.comparing(p -> p.sku);
+        List<Perishable> sorted = new ArrayList<>(dairy);
+        sorted.sort(bySku);
+        System.out.println("sorted by sku   = " + sorted);
+
+        System.out.println("max(strings)    = " + max(List.of("BOLT", "NUT", "CAM")));  // String is Comparable<String>
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Bounds">
+max(dairy)      = BUTR-2@310
+max(parts)      = GIRD-1@120000
+stock value     = 9230
+pair            = [A@1, B@2] / [BOLT-7, 42]
+sorted by sku   = [BUTR-2@310, EGGS-6@240, MILK-1@120]
+max(strings)    = NUT
+  </pre>
+
+  <p>Three things in that program are worth slowing down for.</p>
+  <ul>
+    <li><strong>The recursive bound <code>T extends Comparable&lt;? super T&gt;</code>.</strong> The obvious version, <code>T extends Comparable&lt;T&gt;</code>, rejects <code>max(dairy)</code>: <code>Perishable</code> inherited <code>compareTo(Product)</code> and so implements <code>Comparable&lt;Product&gt;</code>, not <code>Comparable&lt;Perishable&gt;</code>. The <code>? super</code> says "comparable to itself <em>or to something more general</em>", which is exactly the PECS rule again — the comparator <em>consumes</em> a <code>T</code>. This is the signature of <code>Collections.max</code>, <code>Collections.sort</code> and every <code>sorted()</code> in the JDK.</li>
+    <li><strong>Inference.</strong> Nobody writes <code>Bounds.&lt;Product&gt;pair(…)</code>. The compiler infers <code>T</code> from the arguments and, since Java 8, from the <em>target</em> too: <code>pair("BOLT-7", 42)</code> on its own would infer an unpronounceable intersection of <code>Serializable</code> and <code>Comparable</code>, but assigned to a <code>List&lt;Object&gt;</code> it infers <code>Object</code> because that is what the assignment needs.</li>
+    <li><strong>Intersection bounds.</strong> <code>T extends Product &amp; Stockable</code> gives you both APIs on every <code>T</code> with no cast. One class at most, listed first; any number of interfaces after it. You cannot write <code>T extends Product &amp; Comparable&lt;? super T&gt;</code> here, because <code>Product</code> already fixes <code>Comparable&lt;Product&gt;</code> and the compiler rejects "<code>Comparable</code> cannot be inherited with different arguments".</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch erasure happen</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of type erasure">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">What <code>javac</code> keeps and what it throws away</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="erasure"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">After erasure (what <code>javap -c</code> shows)</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Compiler notes</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="erasure">
+    {
+      "lang": "java",
+      "code": "List<Product> parts = new ArrayList<>();\nparts.add(new Product(\"BOLT-7\", 80));\nProduct first = parts.get(0);\n\nList<String> names = new ArrayList<>();\nif (parts.getClass() == names.getClass())\n    System.out.println(\"same class\");\n\n// parts.add(\"oops\");          // rejected by javac\n// List<Product>[] grid = new List<Product>[4];   // rejected",
+      "steps": [
+        { "line": 1, "vars": { "declared": "List<Product>", "in bytecode": "List", "local var table": "no type argument" }, "out": "",
+          "note": "The type argument is checked, recorded in a Signature attribute for reflection and the compiler, and then dropped from the actual instruction stream. The ArrayList constructed is a plain ArrayList — there is no ArrayList<Product> object anywhere." },
+        { "line": 2, "vars": { "call": "parts.add(Object)", "argument checked as": "Product ✓" }, "out": "",
+          "note": "javac checks that the argument is a Product, then emits a call to List.add(Object) — the only add that exists after erasure. The check happened at compile time; the bytecode carries no trace of it." },
+        { "line": 3, "vars": { "call": "parts.get(int) → Object", "inserted": "checkcast Product" }, "out": "checkcast #12 // class Product",
+          "note": "get() returns Object in bytecode. To hand you a Product, the compiler inserts a checkcast instruction — the exact cast you wrote by hand before generics existed. If a raw type smuggled a String into this list, THIS is the line that throws ClassCastException." },
+        { "line": [6, 7], "vars": { "parts.getClass()": "class java.util.ArrayList", "names.getClass()": "class java.util.ArrayList" }, "out": "checkcast #12 // class Product\nsame class",
+          "note": "One class, two parameterisations. This is why instanceof List<String> is meaningless and rejected, why you cannot overload on List<Product> versus List<String> — both erase to the same descriptor — and why List<int> is impossible: an int is not an Object." },
+        { "line": 9, "vars": { "argument": "String", "needed": "Product" }, "out": "error: incompatible types: String cannot be converted to Product",
+          "note": "The guarantee: because every add was checked when it was compiled, and every get inserts the matching cast, a program with no raw types and no unchecked warnings cannot throw ClassCastException from a generic collection. The checks are all at compile time, which is the whole point." },
+        { "line": 10, "vars": { "wanted": "List<Product>[]", "allowed": "List<?>[] or List[] (raw)" }, "out": "error: generic array creation",
+          "note": "Arrays check their element type at runtime on every store, but after erasure the runtime cannot tell List<Product> from List<String>, so it could not perform that check. Rather than let a hole open, the language forbids creating the array." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What erasure forbids, and what to do instead</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Things erasure prevents, why, and the workaround</caption>
+      <thead><tr><th scope="col">You cannot write</th><th scope="col">Because at runtime</th><th scope="col">Instead</th></tr></thead>
+      <tbody>
+        <tr><td><code>new T()</code></td><td><code>T</code> is <code>Object</code>; there is no constructor to call</td><td>Pass a <code>Supplier&lt;T&gt;</code> (§4) or a <code>Class&lt;T&gt;</code> token</td></tr>
+        <tr><td><code>new T[n]</code></td><td>the array would be an <code>Object[]</code> and lie about its type</td><td><code>(T[]) new Object[n]</code> kept private, or better, an <code>ArrayList&lt;T&gt;</code></td></tr>
+        <tr><td><code>x instanceof List&lt;String&gt;</code></td><td>every <code>List</code> is the same class</td><td><code>x instanceof List&lt;?&gt;</code>, then trust the declared type</td></tr>
+        <tr><td><code>List&lt;int&gt;</code></td><td><code>int</code> is not an <code>Object</code></td><td><code>List&lt;Integer&gt;</code>, or <code>IntStream</code> / <code>int[]</code> when boxing costs matter</td></tr>
+        <tr><td><code>void f(List&lt;A&gt;)</code> and <code>void f(List&lt;B&gt;)</code></td><td>both erase to <code>f(List)</code> — "same erasure" error</td><td>Different method names</td></tr>
+        <tr><td><code>static T cached;</code></td><td>there is one static field per class, not per <code>T</code></td><td>A <code>Map&lt;Class&lt;?&gt;, Object&gt;</code> keyed by type token</td></tr>
+        <tr><td><code>catch (T e)</code></td><td>the JVM matches exception tables by class</td><td>Bound <code>T extends Exception</code> only in <code>throws</code> clauses</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Generics gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A wildcard in a return type helps nobody.</strong> <code>List&lt;? extends Product&gt; find()</code> forces every caller to deal with the wildcard. Use wildcards in <em>parameters</em>; return the exact type.</li>
+        <li><strong><code>List&lt;?&gt;</code> and raw <code>List</code> are not the same.</strong> The wildcard is a typed "list of something" and still forbids unsafe adds. The raw type switches off generics entirely and produces the unchecked warnings Fundamentals §13 showed you. <code>-Xlint:rawtypes -Werror</code> turns the difference into a build failure.</li>
+        <li><strong>"Capture of ?"</strong> in an error message is not a bug in the compiler. Each use of a wildcard is given a fresh, anonymous type variable (<code>CAP#1</code>); the message is telling you that it cannot prove two of them are the same. The fix is usually a small private generic helper method that gives the capture a name: <code>private static &lt;T&gt; void swapHelper(List&lt;T&gt; l)</code> called from <code>swap(List&lt;?&gt; l)</code>.</li>
+        <li><strong>Bounds are not implemented by subtypes automatically.</strong> <code>Perishable extends Product implements Comparable&lt;Product&gt;</code> never becomes <code>Comparable&lt;Perishable&gt;</code>. That is why the <code>? super T</code> appears in every sorting signature, and why forgetting it produces an error that mentions neither sorting nor subclasses.</li>
+        <li><strong><code>@SuppressWarnings("unchecked")</code> is a promise, not a fix.</strong> Put it on the smallest scope possible, with a comment proving why the cast is safe. An unchecked cast that is wrong does not fail where you wrote it — it fails at some later <code>get</code>, in code that looks innocent.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-generics-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>List&lt;Number&gt; nums = new ArrayList&lt;Integer&gt;();</code> does not compile. What is the compiler protecting you from?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-generics-1"><span>Reading an <code>Integer</code> back as a <code>Number</code>, which would need a cast <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-generics-1"><span>Nothing — it is a historical limitation that arrays do not have <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-generics-1"><span>Adding a <code>Double</code> through <code>nums</code> into what is really a list of <code>Integer</code>s <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-generics-1"><span>A <code>ClassCastException</code> at the assignment itself <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> If the assignment were legal, <code>nums.add(2.5)</code> would type-check (a <code>Double</code> is a <code>Number</code>) and corrupt the <code>Integer</code> list; the failure would surface later, as a <code>ClassCastException</code> at some unrelated <code>get</code>. Invariance moves that error to compile time, at the line that caused it.</p>
+        <p class="mb-0"><strong>A</strong> is backwards — reading an <code>Integer</code> as a <code>Number</code> is always safe and is exactly what <code>List&lt;? extends Number&gt;</code> permits. <strong>B</strong> is wrong: arrays <em>do</em> allow the equivalent assignment and pay for it with <code>ArrayStoreException</code> at runtime, which is the problem generics were designed not to repeat. <strong>D</strong> cannot happen because the assignment is rejected before any code runs.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-generics-2" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Given <code>static void copy(List&lt;? super Product&gt; dst, List&lt;? extends Product&gt; src)</code>, which calls compile? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>copy(new ArrayList&lt;Object&gt;(), List.of(new Perishable(…)))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>copy(new ArrayList&lt;Perishable&gt;(), List.of(new Product(…)))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>copy(new ArrayList&lt;Product&gt;(), new ArrayList&lt;Product&gt;())</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>copy(new ArrayList&lt;Product&gt;(), new ArrayList&lt;Object&gt;())</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> The destination must hold <code>Product</code> or a supertype; the source must supply <code>Product</code> or a subtype. <strong>A</strong>: <code>Object</code> is a supertype of <code>Product</code> and <code>Perishable</code> is a subtype — both bounds satisfied. <strong>C</strong>: the exact type satisfies both wildcards trivially.</p>
+        <p class="mb-0"><strong>B</strong> fails on the first argument: <code>Perishable</code> is a <em>subtype</em> of <code>Product</code>, so a <code>List&lt;Perishable&gt;</code> is not a <code>List&lt;? super Product&gt;</code> — the method could put a non-perishable <code>Product</code> into it. <strong>D</strong> fails on the second: a <code>List&lt;Object&gt;</code> might contain a <code>String</code>, so it is not a <code>List&lt;? extends Product&gt;</code>. This is the signature of <code>Collections.copy</code>, and it is the clearest illustration of PECS in the JDK.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-generics-3" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Inside <code>static &lt;T&gt; T blank()</code>, the line <code>return new T();</code> is rejected. What is the root cause?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-generics-3"><span><code>T</code> might be an interface or abstract class with no constructor <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-generics-3"><span>After erasure the method body sees <code>T</code> as <code>Object</code>; there is no runtime information to say which class to construct <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-generics-3"><span>Generic methods cannot allocate objects, only return existing ones <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-generics-3"><span>The compiler cannot infer <code>T</code> when there are no parameters <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The bytecode for <code>blank()</code> is compiled once and contains no <code>T</code> — the JVM would have to construct "an Object", which is useless. The standard fixes both pass the missing information in explicitly: a <code>Supplier&lt;T&gt;</code> such as <code>Product::new</code>, or a <code>Class&lt;T&gt;</code> token and <code>clazz.getDeclaredConstructor().newInstance()</code>.</p>
+        <p class="mb-0"><strong>A</strong> is a real concern but not the cause — C# has reified generics and solves it with a <code>new()</code> constraint; Java cannot because the information is gone. <strong>C</strong> is false: <code>new ArrayList&lt;T&gt;()</code> inside a generic method is fine, because <code>ArrayList</code> is a real class. <strong>D</strong> describes a different, solvable problem: <code>T</code> is inferred from the assignment target, as in <code>Product p = blank();</code>.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="generics"> Mark this section complete
+  </label>
+</section>

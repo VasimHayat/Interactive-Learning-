@@ -1,0 +1,152 @@
+<section class="lm-section" id="glossary" data-title="Glossary" data-num="G">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Glossary</h2>
+  <p>Thirty terms, each linked back to the section that introduces it. The same entries drive the flashcard deck below — one list, two ways to use it.</p>
+
+  <div data-flash>
+
+    <div class="lm-card" data-print="hide">
+      <div class="lm-card-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M7 3h14v14"/></svg>
+        Flashcards
+      </div>
+      <div class="lm-flash">
+        <button type="button" class="lm-flash-card" aria-pressed="false" aria-label="Flashcard — activate to flip between term and definition">
+          <span class="lm-flash-face"><span class="text-h3" data-flash-front></span><span class="text-caption text-ink-subtle">click, or press Space, to flip</span></span>
+          <span class="lm-flash-face lm-flash-face--back"><span data-flash-back></span></span>
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <button type="button" class="lm-btn" data-flash-prev>Previous</button>
+        <button type="button" class="lm-btn lm-btn--primary" data-flash-next>Next</button>
+        <button type="button" class="lm-btn" data-flash-known>I knew it</button>
+        <button type="button" class="lm-btn" data-flash-shuffle>Shuffle</button>
+        <span class="text-caption text-ink-subtle" data-flash-count></span>
+      </div>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    </div>
+
+    <dl class="mt-6">
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g1">
+        <dt class="font-semibold" data-term>Autoboxing</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Automatic conversion between a primitive and its wrapper class, inserted by the compiler. Convenient, but the source of null-unboxing crashes and <code>==</code> surprises. <a href="#primitives">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g2">
+        <dt class="font-semibold" data-term>Bytecode</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The portable instruction set <code>javac</code> emits into <code>.class</code> files. Not machine code — it targets the abstract JVM, which is why one build runs everywhere. <a href="#jvm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g3">
+        <dt class="font-semibold" data-term>Checked exception</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An <code>Exception</code> that is not a <code>RuntimeException</code>. The compiler forces you to catch it or declare it. Models conditions a correct program can still meet. <a href="#exceptions">§11</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g4">
+        <dt class="font-semibold" data-term>Class loader</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The JVM component that finds a <code>.class</code> file, links it, and makes the type available. Runs on first active use, not at startup. <a href="#jvm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g5">
+        <dt class="font-semibold" data-term>ConcurrentModificationException</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Thrown when a collection is structurally changed while being iterated. Despite the name, usually a single thread doing it to itself. <a href="#controlflow">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g6">
+        <dt class="font-semibold" data-term>Defensive copy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Returning a copy of internal mutable state rather than the field itself, so callers cannot reach past your invariants. <a href="#access">§14</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g7">
+        <dt class="font-semibold" data-term>Dynamic dispatch</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Choosing which overridden method body runs from the object's <em>runtime</em> class, not the declared type of the variable. <a href="#oop">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g8">
+        <dt class="font-semibold" data-term>Encapsulation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Keeping state private and exposing operations that enforce the rules, so an object cannot be put into an invalid condition from outside. <a href="#oop">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g9">
+        <dt class="font-semibold" data-term>Enhanced for loop</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>for (T x : items)</code>. Uses an iterator underneath, and cannot go out of bounds because you never write a bound. <a href="#controlflow">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g10">
+        <dt class="font-semibold" data-term>Erasure</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Generic type arguments exist only at compile time and are removed from the bytecode. Why <code>new T()</code>, <code>new T[]</code> and <code>instanceof List&lt;String&gt;</code> are all impossible. <a href="#generics">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g11">
+        <dt class="font-semibold" data-term>equals/hashCode contract</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Objects that are <code>equals</code> must return the same <code>hashCode</code>. Break it and every hash-based collection gives wrong answers silently. <a href="#equals">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g12">
+        <dt class="font-semibold" data-term>final</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Prevents reassignment of a variable, overriding of a method, or subclassing of a class. It does <em>not</em> make the referenced object immutable. <a href="#access">§14</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g13">
+        <dt class="font-semibold" data-term>Immutability</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An object's state cannot change after construction. <code>String</code> is the canonical example; every "modifying" method returns a new instance. <a href="#strings">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g14">
+        <dt class="font-semibold" data-term>Instance initializer</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A bare <code>{ … }</code> block in a class body. Runs on every construction, after the implicit <code>super()</code> and before the constructor body. <a href="#static">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g15">
+        <dt class="font-semibold" data-term>Integer cache</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>Integer.valueOf</code> returns shared instances for −128…127. Why <code>==</code> on boxed values is <code>true</code> for small numbers and <code>false</code> for large ones. <a href="#primitives">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g16">
+        <dt class="font-semibold" data-term>Interface</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A contract with no instance state. A class may implement many, which is why it is the default choice for expressing a capability. <a href="#oop">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g17">
+        <dt class="font-semibold" data-term>JIT compiler</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Compiles frequently executed bytecode to native code while the program runs. Why JVM benchmarks need a warm-up phase. <a href="#jvm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g18">
+        <dt class="font-semibold" data-term>JDK / JRE / JVM</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Development kit (adds <code>javac</code> and tools) ⊃ runtime environment (JVM plus class library) ⊃ the virtual machine that executes bytecode. <a href="#jvm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g19">
+        <dt class="font-semibold" data-term>Overloading</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Several methods with one name and different parameter types. Resolved by the <em>compiler</em> in three phases: exact/widening, then boxing, then varargs. <a href="#methods">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g20">
+        <dt class="font-semibold" data-term>Overriding</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A subclass replacing an inherited method with the same signature. Resolved by the <em>JVM</em> at runtime. Always mark it <code>@Override</code>. <a href="#oop">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g21">
+        <dt class="font-semibold" data-term>Package-private</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The access level you get by writing no modifier at all: visible to every class in the same package, and nothing else. <a href="#access">§14</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g22">
+        <dt class="font-semibold" data-term>Pass-by-value</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Java's only calling convention. For references the reference is copied, so a method can mutate your object but cannot repoint your variable. <a href="#methods">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g23">
+        <dt class="font-semibold" data-term>Polymorphism</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Writing code against a supertype and having it work for every subtype, with the actual behaviour selected at runtime. <a href="#oop">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g24">
+        <dt class="font-semibold" data-term>Primitive</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>One of the eight non-object value types. Cannot be <code>null</code>, cannot go directly into a collection, and has a fixed bit width. <a href="#primitives">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g25">
+        <dt class="font-semibold" data-term>Raw type</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A generic type used without its type argument, e.g. plain <code>List</code>. Legal for backward compatibility; switches off the compiler's help. <a href="#generics">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g26">
+        <dt class="font-semibold" data-term>Short-circuit evaluation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>&amp;&amp;</code> and <code>||</code> skip the right operand when the left already decides the result. Load-bearing for null and divide-by-zero guards. <a href="#operators">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g27">
+        <dt class="font-semibold" data-term>static</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Belongs to the class rather than any instance. One copy shared by everything, initialised once on first active use. <a href="#static">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g28">
+        <dt class="font-semibold" data-term>String pool</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A JVM-managed set of shared <code>String</code> instances holding compile-time literals and interned strings. Why <code>==</code> sometimes appears to work. <a href="#strings">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g29">
+        <dt class="font-semibold" data-term>Try-with-resources</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>try (R r = …)</code>. Closes what it acquired, in reverse order, and suppresses rather than discards a secondary exception from <code>close()</code>. <a href="#exceptions">§11</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g30">
+        <dt class="font-semibold" data-term>Unchecked exception</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A <code>RuntimeException</code> subclass. Needs no declaration, and models a programming error whose fix is to change the code. <a href="#exceptions">§11</a></dd>
+      </div>
+    </dl>
+  </div>
+</section>

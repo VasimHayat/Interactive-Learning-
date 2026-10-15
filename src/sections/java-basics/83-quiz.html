@@ -1,0 +1,190 @@
+<section class="lm-section" id="quiz" data-title="Self-assessment quiz" data-num="Q">
+  <p class="lm-eyebrow">Assessment</p>
+  <h2 class="mb-4">Self-assessment quiz</h2>
+  <p>Sixteen questions covering all nine learning objectives. Answer every one, then submit — nothing is marked until you do, and the explanations stay hidden until then. Your answers are saved locally, so you can leave and come back.</p>
+
+  <div class="lm-quiz" data-quiz>
+
+    <div class="lm-q" data-q id="qz-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A colleague can run <code>java -version</code> but not <code>javac</code>. What do they have?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-1"><span>A corrupt JDK installation <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-1"><span>A JVM but no JRE <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-1"><span>A JRE — the compiler ships only with the JDK <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-1"><span>A JDK with <code>javac</code> disabled by policy <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> The JRE runs programs; the JDK adds the tools to build them. <strong>B</strong> is impossible — a JRE contains the JVM, so having the JVM means having at least a JRE. <strong>A</strong> and <strong>D</strong> invent causes for what is simply the normal JRE layout.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>int qty = Integer.MAX_VALUE; qty++;</code> — what is <code>qty</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-2"><span><code>Integer.MAX_VALUE</code> — it saturates <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-2"><span><code>Integer.MIN_VALUE</code> — it wraps around silently <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-2"><span>It throws <code>ArithmeticException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-2"><span>It is promoted to <code>long</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> Two's-complement wraparound, with no diagnostic. <strong>C</strong> is what <code>Math.incrementExact</code> would do and is what you want when overflow matters. <strong>A</strong> is saturating arithmetic, which Java does not have. <strong>D</strong> never happens on assignment back into an <code>int</code>.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>Integer a = 1000, b = 1000;</code> — what are <code>a == b</code> and <code>a.equals(b)</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-3"><span><code>true</code>, <code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-3"><span><code>true</code>, <code>false</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-3"><span><code>false</code>, <code>true</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-3"><span><code>false</code>, <code>false</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> 1000 is outside the −128…127 <code>Integer</code> cache, so two distinct objects are allocated and <code>==</code> compares references. <code>equals</code> compares values. With 100 instead of 1000, <strong>A</strong> would be correct — that inconsistency is the whole trap.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-4" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>What is <code>-7 % 2</code> in Java?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-4"><span><code>-1</code> — the sign follows the dividend <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-4"><span><code>1</code> — the result is always non-negative <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-4"><span><code>-3</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-4"><span>It does not compile without a cast <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> Java's <code>%</code> takes its sign from the left operand, so it can be negative. <strong>B</strong> is <code>Math.floorMod(-7, 2)</code>, which is what you want when wrapping an array index. <strong>C</strong> is <code>-7 / 2</code>.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-5" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">5.</span><span><code>String s = "BOLT"; s.concat("-7"); System.out.println(s);</code></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-5"><span><code>BOLT-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-5"><span><code>-7</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-5"><span>A compile error — the result is unused <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-5"><span><code>BOLT</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>D.</strong> Strings are immutable; <code>concat</code> returns a new string that nothing captured. <strong>A</strong> assumes mutation in place. <strong>C</strong> is at most a warning, never an error — which is why this slips through.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-6" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">6.</span><span>A SKU read from a socket fails an <code>==</code> comparison against the literal <code>"BOLT-7"</code>, though both print identically. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-6"><span>Socket strings use a different internal encoding <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-6"><span>Only literals are pooled; a runtime-constructed string is a different object <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-6"><span><code>==</code> is undefined for strings and returns arbitrary results <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-6"><span>The literal has an invisible terminating character <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> <code>==</code> compares references, and the pooled literal is not the same object as the one built from bytes. <strong>C</strong> is wrong — <code>==</code> is perfectly well defined, just not what you meant. <strong>A</strong> and <strong>D</strong> invent mechanisms; Java strings carry no terminator.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-7" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">7.</span><span>Building a 10,000-line CSV with <code>report += line + ","</code> inside a loop is slow. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-7"><span><code>+=</code> on strings is not JIT-compiled <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-7"><span>Each iteration acquires a lock on the string pool <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-7"><span>Immutability means each iteration allocates a new string and copies everything so far — O(n²) <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-7"><span>Strings over 8 KB spill to disk <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> Use a <code>StringBuilder</code>. Note the boundary: a <code>+</code> chain in a <em>single expression</em> compiles to one efficient concatenation and needs no rewriting — the problem is specifically re-concatenating across iterations. <strong>A</strong>, <strong>B</strong> and <strong>D</strong> are invented mechanisms.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-8" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">8.</span><span>You must test membership tens of thousands of times, order irrelevant. Which collection?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-8"><span><code>ArrayList</code> with <code>contains</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-8"><span><code>HashSet</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-8"><span><code>LinkedList</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-8"><span><code>TreeSet</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> O(1) <code>contains</code>. <strong>A</strong> and <strong>C</strong> scan linearly, giving O(n²) overall — the classic reason a job fine at 100 items crawls at 100,000. <strong>D</strong> works at O(log n) but charges you for sorted order you do not need.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-9" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">9.</span><span>A test asserting <code>hashSet.toString()</code> passes locally and fails in CI. The correct fix is…</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-9"><span>Assert on contents and size — <code>HashSet</code> iteration order is unspecified <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-9"><span>Pin the CI machine to the same JVM vendor <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-9"><span>Synchronise the set <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-9"><span>Set the default locale in the test <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> The assertion was testing an implementation detail. <strong>B</strong> hides it rather than fixing it, and order can change between versions of one vendor anyway. <strong>C</strong> addresses concurrency, which is not what is happening. <strong>D</strong> is a real cause of <em>other</em> cross-machine failures — date and case formatting — but not this one.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-10" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">10.</span><span><code>Product</code> overrides <code>equals</code> on <code>sku</code> only. Two same-SKU products go into a <code>HashSet</code>. Most likely result?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-10"><span>Size 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-10"><span>An exception on the second add <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-10"><span>Size 2, and <code>contains</code> still works <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-10"><span>Size 2, and <code>contains</code> with an equal product returns <code>false</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>D.</strong> Without <code>hashCode</code>, equal objects hash to different buckets, so <code>equals</code> is never consulted. <strong>A</strong> needs <code>hashCode</code> overridden too. <strong>B</strong> never happens — the JDK cannot detect the violation. <strong>C</strong> is self-contradictory: the same mismatch that stored the duplicate also breaks lookup.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-11" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">11.</span><span>Running out of stock is a normal business outcome the caller must decide about. What kind of exception?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-11"><span>Unchecked, extending <code>RuntimeException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-11"><span>Checked, extending <code>Exception</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-11"><span>An <code>Error</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-11"><span>No exception — return <code>null</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> A correct program can hit it and must handle it, which is exactly the case checked exceptions model. <strong>A</strong> suits programming errors such as a negative quantity. <strong>C</strong> is reserved for JVM-level failures. <strong>D</strong> pushes the problem to a <code>NullPointerException</code> somewhere less informative.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-12" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">12.</span><span><code>try (A a = new A(); B b = new B())</code> — <code>A</code> constructs, then <code>B</code>'s constructor throws. What is closed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-12"><span>Neither <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-12"><span>Both <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-12"><span>Only <code>A</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-12"><span>Only <code>B</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> Only successfully acquired resources are closed, in reverse order. <strong>A</strong> would leak <code>A</code>. <strong>B</strong> would call <code>close()</code> on a never-assigned reference. This is exactly the case hand-written <code>finally</code> blocks get wrong.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-13" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">13.</span><span>Given <code>f(int)</code>, <code>f(Integer)</code> and <code>f(int...)</code>, which runs for <code>f(7)</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-13"><span><code>f(int)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-13"><span><code>f(Integer)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-13"><span><code>f(int...)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-13"><span>Ambiguous — compile error <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> Phase 1 allows only exact and widening matches, finds <code>f(int)</code>, and stops. <strong>B</strong> needs boxing (phase 2) and <strong>C</strong> needs varargs (phase 3), neither of which is reached. <strong>D</strong> would require two candidates in the <em>same</em> phase.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-14" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">14.</span><span>A raw <code>List</code> got an <code>Integer</code> added, was assigned to <code>List&lt;String&gt;</code>, and throws <code>ClassCastException</code> at a <code>get</code>. Why there and not at the <code>add</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-14"><span><code>ArrayList</code> validates lazily <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-14"><span>The <code>add</code> did throw; it was caught and rethrown later <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-14"><span>Type arguments are erased, so nothing checks on <code>add</code>; the compiler's cast at the <code>get</code> is the first check <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-14"><span>The JVM checks generics only on reads, by design <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> At runtime it is a plain <code>List</code> of <code>Object</code>. Because <code>get</code> is declared to return <code>String</code>, <code>javac</code> emits a <code>checkcast</code> there. <strong>D</strong> is close but wrong in attribution — the JVM knows nothing about generics; the <em>compiler</em> inserted the cast. <strong>A</strong> and <strong>B</strong> describe behaviour that does not exist.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-15" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">15.</span><span>A field declared <code>int qty;</code> with no modifier is visible to…</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-15"><span>Only the declaring class <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-15"><span>Any class in the same package <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-15"><span>Any class anywhere <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-15"><span>The class and all subclasses, wherever they are <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> That is package-private, the level you get by writing nothing. <strong>A</strong> requires an explicit <code>private</code> — the most common wrong answer. <strong>D</strong> describes <code>protected</code>, which is strictly wider.</p></div>
+    </div>
+
+    <div class="lm-q" data-q id="qz-16" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">16.</span><span>Which safely remove elements while walking a list? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>list.removeIf(…)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Enhanced <code>for</code> plus <code>list.remove(item)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>Iterator.remove()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Indexed <code>for</code> ascending with <code>list.remove(i)</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A and C.</strong> <strong>B</strong> throws <code>ConcurrentModificationException</code>. <strong>D</strong> is worse than throwing: removing at <code>i</code> shifts everything left, the loop increments <code>i</code>, and the element that slid into that slot is skipped — so two adjacent matches silently leave one behind.</p></div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mt-6" data-print="hide">
+      <button type="button" class="lm-btn lm-btn--primary" data-quiz-submit>Submit all 16 answers</button>
+      <button type="button" class="lm-btn" data-quiz-review hidden>Review wrong answers</button>
+    </div>
+    <div class="lm-score" data-quiz-score hidden></div>
+  </div>
+</section>
