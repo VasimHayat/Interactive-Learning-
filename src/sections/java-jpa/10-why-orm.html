@@ -1,0 +1,351 @@
+<section class="lm-section" id="why-orm" data-title="Why an ORM, and what it costs" data-num="1">
+  <p class="lm-eyebrow">Section 1</p>
+  <h2 class="mb-4">Why an ORM, and what it costs</h2>
+
+  <p>A relational database stores rows in tables and relates them by values in columns. A Java program holds objects on a heap and relates them by references. Neither model is wrong, but they disagree about almost everything that matters, and the disagreement has a name: the <strong>object–relational impedance mismatch</strong>. An object-relational mapper exists to translate across it — and like every translator, it is only trustworthy once you know what it says on your behalf.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The five places objects and rows disagree</caption>
+      <thead><tr><th scope="col">Disagreement</th><th scope="col">Objects</th><th scope="col">Rows</th><th scope="col">Where it bites</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Identity</strong></td><td>Two things are the same if they are the same reference; <code>equals</code> is a separate, optional notion</td><td>A row is identified by its primary key; two rows with equal columns are two rows</td><td>§3 (the identity guarantee), §11 (<code>equals</code> for entities)</td></tr>
+        <tr><td><strong>Associations</strong></td><td>Directional references; a <code>Product</code> may hold a <code>Supplier</code> without the supplier knowing</td><td>A foreign key column in one table, navigable from either side by a join</td><td>§4 (the owning side)</td></tr>
+        <tr><td><strong>Granularity</strong></td><td>A <code>Product</code> holds a <code>Dimensions</code> object holds three <code>int</code>s</td><td>One table, three extra columns; there is no "small object" in SQL</td><td>§2 (embeddables)</td></tr>
+        <tr><td><strong>Inheritance</strong></td><td><code>PercentOff extends Discount</code>, dispatched at runtime</td><td>No such thing; you choose between one wide table, several joined tables, or one table per class</td><td>§8</td></tr>
+        <tr><td><strong>Navigation</strong></td><td>Follow references one at a time: <code>order.lines().get(0).product().supplier()</code></td><td>Declare the whole shape up front in one query and get a single result set back</td><td>§5 (lazy loading and N+1)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example, part 1: the baseline without an ORM</h3>
+
+  <p>Before reading a line of Hibernate, see what it replaces. This is plain JDBC against the same in-memory H2 database every other program in this module uses. Note everything you have to write yourself: the table, the parameter indices, the column names repeated in the <code>select</code> and again in the <code>ResultSet</code> reads, the row-to-object code, and the <code>update</code> statement for a change to one field.</p>
+
+  <pre data-code data-lang="java" data-file="JdbcBaseline.java" data-verify="JdbcBaseline" data-hi="37,38,39">
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+
+public class JdbcBaseline {
+
+    record Product(long id, String sku, int priceInCents) {}
+
+    public static void main(String[] args) throws SQLException {
+        String url = "jdbc:h2:mem:JdbcBaseline;DB_CLOSE_DELAY=-1";
+        try (Connection c = DriverManager.getConnection(url, "sa", "")) {
+            c.setAutoCommit(false);                         // a transaction starts here
+
+            try (Statement s = c.createStatement()) {
+                s.execute("create table product (" +
+                          "id bigint generated always as identity primary key, " +
+                          "sku varchar(16) not null unique, " +
+                          "price_in_cents int not null)");
+            }
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "insert into product (sku, price_in_cents) values (?, ?)")) {
+                ps.setString(1, "BOLT-7"); ps.setInt(2, 80); ps.executeUpdate();
+                ps.setString(1, "NUT-3");  ps.setInt(2, 25); ps.executeUpdate();
+            }
+            c.commit();
+
+            List<Product> cheap = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(
+                    "select id, sku, price_in_cents from product where price_in_cents < ? order by sku")) {
+                ps.setInt(1, 100);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {                      // row -> object, by hand, column by column
+                        cheap.add(new Product(rs.getLong("id"), rs.getString("sku"), rs.getInt("price_in_cents")));
+                    }
+                }
+            }
+            System.out.println("mapped by hand = " + cheap);
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "update product set price_in_cents = ? where sku = ?")) {
+                ps.setInt(1, 90); ps.setString(2, "BOLT-7");
+                System.out.println("rows updated   = " + ps.executeUpdate());
+            }
+            c.commit();
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="JdbcBaseline">
+mapped by hand = [Product[id=1, sku=BOLT-7, priceInCents=80], Product[id=2, sku=NUT-3, priceInCents=25]]
+rows updated   = 1
+  </pre>
+
+  <p>Nothing here is wrong. JDBC is explicit, fast, and every statement is one you wrote. The cost is <em>repetition that must agree</em>: the column list appears in the DDL, the insert, the select and the mapping loop, and a renamed column breaks all four at runtime, not at compile time. Multiply by forty tables and two hundred queries and the mapping code is the largest, dullest, most bug-prone part of the application. That is the problem an ORM solves — not "writing SQL", which it cannot spare you from reading, but writing the <em>same</em> SQL and the same mapping over and over.</p>
+
+  <h3 class="mt-8 mb-3">Worked example, part 2: the same thing as an entity</h3>
+
+  <p>Now the ORM version. The class is annotated instead of mapped by hand; the table is generated from it; the insert, the select and the update are all written by Hibernate. Read the program, then read the SQL it produced — every <code>Hibernate:</code> line below was captured from the real run.</p>
+
+  <pre data-code data-lang="java" data-file="FirstEntity.java" data-verify="FirstEntity" data-hi="6,9,15,43,55">
+import jakarta.persistence.*;
+import java.util.List;
+
+public class FirstEntity {
+
+    @Entity(name = "Product")              // the name JPQL uses; for a nested class it would otherwise be FirstEntity$Product
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        private int priceInCents;
+
+        protected Product() {}             // JPA instantiates entities reflectively
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+
+        Long id() { return id; }
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+        void reprice(int cents) { this.priceInCents = cents; }
+        @Override public String toString() { return "Product[" + id + ", " + sku + ", " + priceInCents + "c]"; }
+    }
+
+    static EntityManagerFactory emf(Class<?>... entities) {
+        var cfg = new PersistenceConfiguration("warehouse")
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:FirstEntity;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true");
+        for (Class<?> c : entities) cfg.managedClass(c);
+        return cfg.createEntityManagerFactory();
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf(Product.class)) {
+
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(new Product("BOLT-7", 80));
+                em.persist(new Product("NUT-3", 25));
+                em.getTransaction().commit();           // the inserts happen here, not at persist()
+            }
+
+            try (EntityManager em = emf.createEntityManager()) {
+                List<Product> all = em.createQuery(
+                        "select p from Product p order by p.sku", Product.class).getResultList();
+                System.out.println("loaded " + all);
+            }
+
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = em.find(Product.class, 1L);
+                bolt.reprice(90);                        // no SQL written by you: dirty checking does it
+                em.getTransaction().commit();
+                System.out.println("after reprice " + bolt);
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="FirstEntity">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create table product (priceInCents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: select next value for product_SEQ
+Hibernate: select next value for product_SEQ
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 order by p1_0.sku
+loaded [Product[1, BOLT-7, 80c], Product[2, NUT-3, 25c]]
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: update product set priceInCents=?,sku=? where id=?
+after reprice Product[1, BOLT-7, 90c]
+  </pre>
+
+  <p>Read the output as a transcript of what Hibernate did on your behalf, in order:</p>
+  <ol class="max-w-prose">
+    <li><strong><code>create global temporary table HTE_product …</code></strong> — a scratch table Hibernate 7 prepares on H2 for bulk JPQL <code>update</code> and <code>delete</code> statements that touch several tables (§6). It appears at the top of every program in this module; it is harmless, and from here on the text will not mention it again.</li>
+    <li><strong><code>drop … / create sequence / create table</code></strong> — schema generation, because the configuration asked for <code>drop-and-create</code>. The column list came from the fields of <code>Product</code>: <code>@Column</code> supplied <code>not null unique</code> and <code>varchar(16)</code>; the primitive <code>int</code> became <code>not null</code> on its own, because a primitive cannot hold <code>null</code>. Hibernate orders columns its own way; you did not write this DDL and should not rely on its shape (§10).</li>
+    <li><strong><code>create sequence product_SEQ start with 1 increment by 50</code></strong> — the default for <code>GenerationType.SEQUENCE</code> is an <em>allocation size</em> of 50: Hibernate asks the database for one value and hands out fifty ids from it before asking again. That is why two <code>persist</code> calls produced only two <code>select next value</code> lines here — and why a thousand would produce twenty, not a thousand. §2 compares this with the other strategies.</li>
+    <li><strong>Two <code>insert</code>s, after both <code>persist</code> calls</strong> — <code>persist</code> does not write. It assigns the id, registers the object with the persistence context, and queues the insert; the queue is <em>flushed</em> at <code>commit</code>. §3 is entirely about that gap, and almost every surprise in Hibernate lives in it.</li>
+    <li><strong><code>select p1_0.id, … from product p1_0 order by p1_0.sku</code></strong> — the JPQL <code>select p from Product p</code> became SQL with Hibernate's own aliases. JPQL names <em>entities and fields</em>; the SQL names <em>tables and columns</em>. That translation is the whole job (§6).</li>
+    <li><strong><code>select … where p1_0.id=?</code> then <code>update product set priceInCents=?,sku=? where id=?</code></strong> — <code>find</code> loaded the row; <code>reprice</code> changed a field in memory; nothing in the program said "update". At commit Hibernate compared the entity's current state with a snapshot taken at load, found a difference, and wrote the row back. That is <strong>dirty checking</strong>. Note that it updated <em>every</em> column, not only the changed one — the default, and tunable (§9, §11).</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Watch the bootstrap and the first persist</h3>
+
+  <p>Two things in the program above are expensive and happen once: building the <code>EntityManagerFactory</code>, and the first <code>commit</code>. Step through what each actually does.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of EntityManagerFactory bootstrap and a first persist">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">From configuration to the first row</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="bootstrap"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What Hibernate holds</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL sent</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="bootstrap">
+    {
+      "lang": "java",
+      "code": "var cfg = new PersistenceConfiguration(\"warehouse\")\n    .managedClass(Product.class)\n    .property(JDBC_URL, \"jdbc:h2:mem:warehouse\")\n    .property(SCHEMAGEN_DATABASE_ACTION, \"drop-and-create\");\nEntityManagerFactory emf = cfg.createEntityManagerFactory();\n\nEntityManager em = emf.createEntityManager();\nem.getTransaction().begin();\nem.persist(new Product(\"BOLT-7\", 80));\nem.getTransaction().commit();\nem.close();",
+      "steps": [
+        { "line": [1, 2, 3, 4], "vars": { "configuration": "1 managed class, JDBC url, schema action", "metamodel": "(not built)", "connection": "none" }, "out": "",
+          "note": "A PersistenceConfiguration is just a description. Nothing has been loaded, connected or checked. In JPA 3.2 this object replaces persistence.xml for programmatic bootstrap." },
+        { "line": 5, "vars": { "step": "1 of 4: build the metamodel", "metamodel": "entity Product → table product; id ← product_SEQ; sku varchar(16) unique; priceInCents int", "connection": "none" }, "out": "",
+          "note": "Hibernate reads the annotations of every managed class and builds an in-memory model of entities, tables, columns, generators and associations. Mapping errors — a missing no-arg constructor, two @Id fields — are thrown here, before any connection exists." },
+        { "line": 5, "vars": { "step": "2 of 4: choose the dialect", "metamodel": "built", "connection": "opened once", "dialect": "H2Dialect (from DatabaseMetaData)" }, "out": "",
+          "note": "A connection is opened and the driver is asked what database it is. The dialect decides every detail of the SQL you will see: sequence syntax, identity columns, how enums and timestamps are typed, what a page of results looks like." },
+        { "line": 5, "vars": { "step": "3 of 4: schema generation", "dialect": "H2Dialect", "action": "drop-and-create" }, "out": "drop table if exists product cascade\ndrop sequence if exists product_SEQ\ncreate sequence product_SEQ start with 1 increment by 50\ncreate table product (…)",
+          "note": "Because the configuration asked for it, the metamodel is turned into DDL and executed. In production this step is 'validate' or 'none' and a migration tool owns the schema (§10)." },
+        { "line": 5, "vars": { "step": "4 of 4: open the pool, build the SessionFactory", "pool": "built-in, 20 connections (not for production)", "emf": "ready — one per application" }, "out": "",
+          "note": "The EntityManagerFactory is Hibernate's SessionFactory: thread-safe, expensive, and meant to live for the whole application. Creating one per request is the single most common performance mistake in beginner code." },
+        { "line": 7, "vars": { "em": "new, empty persistence context", "connection": "none yet", "cost": "microseconds" }, "out": "",
+          "note": "An EntityManager is cheap: a map of managed entities (empty) and a queue of pending actions (empty). It takes a connection only when it needs one. One per unit of work, never shared between threads." },
+        { "line": 8, "vars": { "transaction": "active", "connection": "borrowed from the pool, autocommit off" }, "out": "",
+          "note": "begin() borrows a connection and turns autocommit off. Everything until commit() or rollback() is one database transaction." },
+        { "line": 9, "vars": { "transaction": "active", "persistence context": "{ Product#1 → MANAGED }", "action queue": "[ INSERT Product#1 ]" }, "out": "select next value for product_SEQ",
+          "note": "persist() needs an id to register the entity, so the sequence is consulted now (once per 50 ids). The entity becomes MANAGED. The insert itself is only queued — nothing has been written." },
+        { "line": 10, "vars": { "transaction": "committing", "flush": "action queue → SQL", "persistence context": "{ Product#1 → MANAGED, snapshot taken }" }, "out": "insert into product (priceInCents,sku,id) values (?,?,?)\ncommit",
+          "note": "commit() first flushes: every queued action becomes SQL, in a fixed order (inserts, updates, collection changes, deletes). Then the database transaction commits and the connection goes back to the pool. The entity stays managed." },
+        { "line": 11, "vars": { "em": "closed", "persistence context": "discarded", "Product#1": "now DETACHED — a plain object with an id" }, "out": "",
+          "note": "Closing the EntityManager throws the context away. The Product object still exists in your code, but Hibernate no longer watches it; changing it now changes nothing in the database until you merge it back (§3)." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What JPA specifies, what Hibernate adds</h3>
+
+  <p><strong>Jakarta Persistence (JPA)</strong> is a specification: the annotations (<code>@Entity</code>, <code>@Id</code>, <code>@OneToMany</code> …), the <code>EntityManager</code> API, the query language JPQL, the Criteria API, the lifecycle rules and the exception hierarchy. <strong>Hibernate</strong> is the implementation almost everyone uses, and it has existed longer than the specification it implements; JPA was largely written by standardising what Hibernate already did. In practice you program against the JPA API and reach into Hibernate's own API when you need something the spec does not offer:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The JPA standard versus Hibernate-specific capabilities</caption>
+      <thead><tr><th scope="col">Standard JPA</th><th scope="col">Hibernate-only (unwrap or annotate)</th></tr></thead>
+      <tbody>
+        <tr><td><code>EntityManagerFactory</code>, <code>EntityManager</code></td><td><code>SessionFactory</code>, <code>Session</code> — the same objects; <code>em.unwrap(Session.class)</code> gets the richer one</td></tr>
+        <tr><td>JPQL</td><td>HQL — a superset: more functions, <code>insert … select</code>, <code>with</code> clauses, window functions</td></tr>
+        <tr><td><code>@GeneratedValue</code> strategies</td><td><code>@UuidGenerator</code> styles, custom generators, <code>@NaturalId</code> with its own cache</td></tr>
+        <tr><td><code>@Version</code>, <code>LockModeType</code></td><td><code>@OptimisticLocking(type = ALL)</code>, <code>@DynamicUpdate</code>, <code>@SQLDelete</code>, <code>@SQLRestriction</code> (§7, §11)</td></tr>
+        <tr><td>Entity graphs, <code>FetchType</code></td><td><code>@BatchSize</code>, <code>@Fetch(SUBSELECT)</code>, the <code>Statistics</code> API that counts statements (§5, §9)</td></tr>
+        <tr><td>Schema generation properties</td><td>JDBC batching, ordered inserts/updates, <code>StatelessSession</code>, second-level cache integration (§9)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>This module uses the JPA API wherever it exists and names every Hibernate-specific feature as such, so you know which parts would survive a switch to another provider — and which parts you would miss.</p>
+
+  <h3 class="mt-8 mb-3">The architecture, in three objects</h3>
+
+  <ul class="max-w-prose">
+    <li><strong>One <code>EntityManagerFactory</code> per application.</strong> Expensive to build (the stepper above), thread-safe, holds the metamodel, the dialect, the connection pool and the second-level cache. In a Spring application it is the bean behind every repository.</li>
+    <li><strong>One <code>EntityManager</code> per unit of work.</strong> Cheap, <em>not</em> thread-safe, and the owner of a <em>persistence context</em>: the set of entities it currently manages. A web request, a message handler, a batch chunk — each gets its own, and closes it.</li>
+    <li><strong>One transaction per unit of work, usually.</strong> Begun and committed explicitly here with <code>EntityTransaction</code>; in a container, declared with <code>@Transactional</code> and begun for you. Reads outside a transaction are allowed; writes without one are silently never flushed (§7).</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">When not to use an ORM</h3>
+
+  <p>Hibernate is a tool for an <em>object model that is persisted</em>: a domain with identity, invariants and associations, where the same objects are loaded, changed and saved many times. It is the wrong tool when there is no such model:</p>
+  <ul class="max-w-prose">
+    <li><strong>Reporting and analytics.</strong> A query that joins six tables and groups by three columns does not want to become entities. Use a projection (§6), or skip the ORM and use a query builder such as <strong>jOOQ</strong>, which gives you type-safe SQL without pretending the result is an object graph.</li>
+    <li><strong>Bulk operations.</strong> Updating a million rows through managed entities loads a million objects. Use a JPQL or native bulk statement (§6), or a <code>StatelessSession</code> (§9).</li>
+    <li><strong>Very small applications.</strong> Three tables and ten queries are less code with Spring's <code>JdbcClient</code> than with an entity model, and far easier to reason about.</li>
+  </ul>
+  <p>Most applications are a mixture: an ORM for the transactional core, plain SQL for the reports. Knowing where the line falls is a large part of what this module teaches.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">The cost model: what you pay for not writing the SQL</div>
+      <ul class="mb-0">
+        <li><strong>SQL you did not write still runs.</strong> The <code>update</code> above wrote every column. A lazy collection you touched in a loop ran a query per iteration. Nothing is free because it is implicit; it is merely hidden. Keep <code>show_sql</code> on in development and read it, every time (§12).</li>
+        <li><strong>The N+1 problem is the default outcome</strong>, not an edge case. Loading twenty orders and printing each one's lines is twenty-one queries unless you say otherwise (§5).</li>
+        <li><strong>Flushes happen when Hibernate decides.</strong> Before a query that might see stale data, and at commit. An unexpected <code>update</code> in the middle of a read is usually a flush you did not plan for (§3).</li>
+        <li><strong>The factory is slow to build and the first query is slow to run</strong> — metamodel, dialect probing, schema checks, query plan compilation. Measure a warm application, never the first request.</li>
+        <li><strong>The database still has the last word.</strong> Constraints, indexes, isolation levels and locks are database facts. An ORM that lets you forget them has not made them go away.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-why-orm-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In <code>FirstEntity</code>, two <code>persist</code> calls produced two <code>insert</code> statements — but only <em>after</em> both calls, at <code>commit</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-why-orm-1"><span>H2 buffers inserts until the transaction ends <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-why-orm-1"><span>Hibernate waits for the sequence to return both ids before it can write either row <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-why-orm-1"><span><code>persist</code> only registers the entity and queues the insert; the queue is flushed to SQL at commit, or earlier if a query needs it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-why-orm-1"><span><code>show_sql</code> prints statements when the connection is returned to the pool, not when they execute <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> This is the persistence context's write-behind behaviour: operations are collected in an action queue and flushed as late as possible so they can be ordered and batched. §3 shows exactly when a flush happens.</p>
+        <p class="mb-0"><strong>A</strong> confuses the database transaction with Hibernate's queue; the database executes each statement as it arrives. <strong>B</strong> is backwards — the sequence <em>was</em> consulted at each <code>persist</code> (two <code>select next value</code> lines appear before the inserts). <strong>D</strong> is invented: <code>show_sql</code> prints at execution time, which is exactly how you can tell that execution was deferred.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-why-orm-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>The program never contains the word <code>update</code>, yet an <code>update product set …</code> statement ran. Which mechanism produced it?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-why-orm-2"><span><code>em.find</code> opens the row for writing, so any change is streamed to the database as it happens <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-why-orm-2"><span>Dirty checking: at flush Hibernate compares each managed entity with the snapshot taken when it was loaded and writes the rows that differ <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-why-orm-2"><span>The <code>reprice</code> method is intercepted by a Hibernate proxy that issues the update <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-why-orm-2"><span><code>commit</code> always rewrites every entity it has loaded, changed or not <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The snapshot comparison is why a managed entity needs no "save" call — and why it is dangerous to hand managed entities to code that mutates them casually: every change is a pending <code>update</code>.</p>
+        <p class="mb-0"><strong>A</strong> would mean a round trip per field assignment; nothing in the output shows that. <strong>C</strong>: Hibernate uses proxies for lazy loading, not for intercepting setters on an entity you constructed with <code>new</code>. <strong>D</strong> is false — unchanged entities produce no SQL at all, which is what makes loading a thousand products for a read cheap.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-why-orm-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these are good reasons to <em>bypass</em> the ORM for a particular piece of code? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A monthly report that groups and sums across six tables and is never written back <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A form that loads one order, changes its status and saves it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Any query with a <code>join</code> in it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Archiving two million rows older than a year into another table <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> A read-only aggregate has no object model to manage, and a bulk move has no business passing through two million managed entities; both are SQL jobs (or a projection / bulk JPQL statement, §6).</p>
+        <p class="mb-0"><strong>B</strong> is the ORM's home ground: load, mutate, let dirty checking write the change, with optimistic locking for free (§7). <strong>C</strong> is far too broad — JPQL and the Criteria API join entities perfectly well, and <code>join fetch</code> is the standard fix for N+1 (§5).</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="why-orm"> Mark this section complete
+  </label>
+</section>

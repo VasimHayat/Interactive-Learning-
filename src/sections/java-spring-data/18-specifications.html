@@ -1,0 +1,420 @@
+<section class="lm-section" id="specifications" data-title="Dynamic queries: Specifications and Query by Example" data-num="9">
+  <p class="lm-eyebrow">Section 9</p>
+  <h2 class="mb-4">Dynamic queries: Specifications and Query by Example</h2>
+
+  <p>A search screen has six optional filters. A derived query name cannot express "category if given, price range if given, SKU prefix if given": you would need one method per combination, and six filters make sixty-four. A <code>@Query</code> string cannot either, unless you start concatenating JPQL — which is how injection bugs and unreadable code are born. What you need is a query assembled at runtime from whichever criteria are present, with the type checking and parameter binding of a real query.</p>
+
+  <p>That is the JPA Criteria API (JPA §6), and Spring Data wraps it in one small idea. A <strong><code>Specification&lt;T&gt;</code></strong> is a function <code>(root, query, cb) -&gt; Predicate</code>: given the query being built, return the condition this criterion contributes. Because each criterion is a value, you can name it, test it, store it in a list and combine it with <code>and</code>, <code>or</code> and <code>not</code>. A repository that also extends <code>JpaSpecificationExecutor&lt;T&gt;</code> gains <code>findAll(spec)</code>, <code>count(spec)</code>, <code>exists(spec)</code> and <code>delete(spec)</code>, and Spring Data turns the composed predicate into one JPQL query. <strong>Query by Example</strong> is the lighter sibling: hand it a half-filled entity and it builds the equality and string-matching predicates for you.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: one repository, eight queries, no strings</h3>
+
+  <p>Six products from two suppliers. Every criterion is a static factory on <code>ProductSpecs</code>; the runner composes them in different ways and the SQL shows exactly what each composition became.</p>
+
+  <pre data-code data-lang="java" data-file="Specifications.java" data-verify="Specifications" data-package="lm.specs" data-hi="84,53,67,80,104,127,136">
+package lm.specs;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.*;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import static org.springframework.data.domain.ExampleMatcher.GenericPropertyMatchers.startsWith;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class Specifications {
+
+    public enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    @Entity(name = "Supplier")
+    @Table(name = "supplier")
+    public static class Supplier {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true) String name;
+        protected Supplier() {}
+        Supplier(String name) { this.name = name; }
+    }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        @Enumerated(EnumType.STRING) @Column(nullable = false) Category category;
+        int priceInCents;
+        boolean active = true;
+        @ManyToOne(fetch = FetchType.LAZY) Supplier supplier;
+        protected Product() {}
+        Product(String sku, Category category, int priceInCents, boolean active, Supplier supplier) {
+            this.sku = sku; this.category = category; this.priceInCents = priceInCents; this.active = active; this.supplier = supplier;
+        }
+        @Override public String toString() { return sku + "/" + category + "/" + priceInCents + (active ? "" : "/inactive"); }
+    }
+
+    /* One static factory per criterion. Each returns a Specification, so they compose. */
+    public static final class ProductSpecs {
+        static Specification&lt;Product&gt; inCategory(Category c) {
+            return (root, query, cb) -&gt; cb.equal(root.get("category"), c);
+        }
+        static Specification&lt;Product&gt; priceBetween(int lo, int hi) {
+            return (root, query, cb) -&gt; cb.between(root.get("priceInCents"), lo, hi);
+        }
+        static Specification&lt;Product&gt; skuStartsWith(String prefix) {
+            return (root, query, cb) -&gt; cb.like(root.get("sku"), prefix + "%");
+        }
+        static Specification&lt;Product&gt; isActive() {
+            return (root, query, cb) -&gt; cb.isTrue(root.get("active"));
+        }
+        static Specification&lt;Product&gt; suppliedBy(String supplierName) {
+            return (root, query, cb) -&gt; {
+                if (query != null) query.distinct(true);        // query is null for count/exists/delete
+                return cb.equal(root.join("supplier").get("name"), supplierName);
+            };
+        }
+        /* The "ignore absent criteria" pattern: every null argument means "no filter". */
+        static Specification&lt;Product&gt; filter(Category c, Integer minPrice, Integer maxPrice, String skuPrefix, Boolean activeOnly) {
+            List&lt;Specification&lt;Product&gt;&gt; parts = new ArrayList&lt;&gt;();
+            if (c != null) parts.add(inCategory(c));
+            if (minPrice != null || maxPrice != null) {
+                parts.add(priceBetween(minPrice == null ? 0 : minPrice, maxPrice == null ? Integer.MAX_VALUE : maxPrice));
+            }
+            if (skuPrefix != null) parts.add(skuStartsWith(skuPrefix));
+            if (Boolean.TRUE.equals(activeOnly)) parts.add(isActive());
+            return Specification.allOf(parts);                   // empty list → no where clause at all
+        }
+    }
+
+    public interface ProductRepository extends JpaRepository&lt;Product, Long&gt;, JpaSpecificationExecutor&lt;Product&gt; {}
+    public interface SupplierRepository extends JpaRepository&lt;Supplier, Long&gt; {}
+
+    @Bean CommandLineRunner demo(ProductRepository products, SupplierRepository suppliers) {
+        return args -&gt; {
+            Supplier acme = suppliers.save(new Supplier("Acme"));
+            Supplier bolt = suppliers.save(new Supplier("BoltCo"));
+            products.saveAll(List.of(
+                new Product("BOLT-7", Category.FASTENER, 80, true, bolt),
+                new Product("BOLT-9", Category.FASTENER, 95, false, bolt),
+                new Product("NUT-3", Category.FASTENER, 25, true, acme),
+                new Product("GIRD-1", Category.STRUCTURAL, 120_000, true, acme),
+                new Product("ROD-4", Category.STRUCTURAL, 4_500, true, acme),
+                new Product("CAM-9", Category.MOTION, 2_300, true, bolt)));
+            Sort bySku = Sort.by("sku");
+
+            System.out.println("-- 1. one criterion --");
+            System.out.println(products.findAll(ProductSpecs.inCategory(Category.FASTENER), bySku));
+
+            System.out.println("-- 2. and / or / not --");
+            Specification&lt;Product&gt; cheapFasteners = Specification.where(ProductSpecs.inCategory(Category.FASTENER))
+                    .and(ProductSpecs.priceBetween(0, 90));
+            System.out.println(products.findAll(cheapFasteners.or(ProductSpecs.inCategory(Category.MOTION)), bySku));
+            System.out.println(products.findAll(Specification.not(ProductSpecs.isActive()), bySku));
+
+            System.out.println("-- 3. allOf / anyOf --");
+            System.out.println(products.findAll(Specification.anyOf(
+                    ProductSpecs.skuStartsWith("BOLT"), ProductSpecs.skuStartsWith("CAM")), bySku));
+
+            System.out.println("-- 4. the null-tolerant filter --");
+            System.out.println(products.findAll(ProductSpecs.filter(null, null, null, null, null), bySku));
+            System.out.println(products.findAll(ProductSpecs.filter(Category.STRUCTURAL, 1_000, null, null, true), bySku));
+
+            System.out.println("-- 5. a page needs two statements --");
+            Page&lt;Product&gt; page = products.findAll(ProductSpecs.isActive(), PageRequest.of(0, 2, bySku));
+            System.out.println("page 0 of " + page.getTotalPages() + ": " + page.getContent() + " total=" + page.getTotalElements());
+
+            System.out.println("-- 6. a join inside a spec --");
+            System.out.println(products.findAll(ProductSpecs.suppliedBy("BoltCo"), bySku));
+
+            System.out.println("-- 7. count / exists / delete --");
+            System.out.println("count structural = " + products.count(ProductSpecs.inCategory(Category.STRUCTURAL)));
+            System.out.println("exists inactive = " + products.exists(Specification.not(ProductSpecs.isActive())));
+            System.out.println("deleted inactive = " + products.delete((root, cb) -&gt; cb.isFalse(root.get("active"))));
+
+            System.out.println("-- 8. Query by Example --");
+            Product probe = new Product();
+            probe.sku = "bo";
+            // one probe field only: with two, the order of the and-ed predicates is not guaranteed
+            ExampleMatcher matcher = ExampleMatcher.matching()
+                    .withIgnoreNullValues()
+                    .withIgnorePaths("id", "priceInCents", "active")   // primitives are never null, so they must be ignored explicitly
+                    .withMatcher("sku", startsWith())
+                    .withIgnoreCase();
+            System.out.println(products.findAll(Example.of(probe, matcher), bySku));
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Specifications.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:specs;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Specifications">
+Hibernate: create global temporary table HTE_product(active boolean, priceInCents integer, rn_ integer not null, id bigint, supplier_id bigint, sku varchar(16), category enum ('FASTENER','MOTION','STRUCTURAL'), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_supplier(rn_ integer not null, id bigint, name varchar(255), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop table if exists supplier cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: drop sequence if exists supplier_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create sequence supplier_seq start with 1 increment by 50
+Hibernate: create table product (active boolean not null, price_in_cents integer not null, id bigint not null, supplier_id bigint, sku varchar(16) not null unique, category enum ('FASTENER','MOTION','STRUCTURAL') not null, primary key (id))
+Hibernate: create table supplier (id bigint not null, name varchar(255) not null unique, primary key (id))
+Hibernate: alter table if exists product add constraint FK2kxvbr72tmtscjvyp9yqb12by foreign key (supplier_id) references supplier
+Hibernate: select next value for supplier_seq
+Hibernate: insert into supplier (name,id) values (?,?)
+Hibernate: select next value for supplier_seq
+Hibernate: insert into supplier (name,id) values (?,?)
+Hibernate: select next value for product_seq
+Hibernate: select next value for product_seq
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,price_in_cents,sku,supplier_id,id) values (?,?,?,?,?,?)
+-- 1. one criterion --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where p1_0.category=? order by p1_0.sku
+[BOLT-7/FASTENER/80, BOLT-9/FASTENER/95/inactive, NUT-3/FASTENER/25]
+-- 2. and / or / not --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where p1_0.category=? and p1_0.price_in_cents between ? and ? or p1_0.category=? order by p1_0.sku
+[BOLT-7/FASTENER/80, CAM-9/MOTION/2300, NUT-3/FASTENER/25]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where not(p1_0.active) order by p1_0.sku
+[BOLT-9/FASTENER/95/inactive]
+-- 3. allOf / anyOf --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where p1_0.sku like ? escape '' or p1_0.sku like ? escape '' order by p1_0.sku
+[BOLT-7/FASTENER/80, BOLT-9/FASTENER/95/inactive, CAM-9/MOTION/2300]
+-- 4. the null-tolerant filter --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 order by p1_0.sku
+[BOLT-7/FASTENER/80, BOLT-9/FASTENER/95/inactive, CAM-9/MOTION/2300, GIRD-1/STRUCTURAL/120000, NUT-3/FASTENER/25, ROD-4/STRUCTURAL/4500]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where p1_0.category=? and p1_0.price_in_cents between ? and ? and p1_0.active order by p1_0.sku
+[GIRD-1/STRUCTURAL/120000, ROD-4/STRUCTURAL/4500]
+-- 5. a page needs two statements --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where p1_0.active order by p1_0.sku offset ? rows fetch first ? rows only
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.active
+page 0 of 3: [BOLT-7/FASTENER/80, CAM-9/MOTION/2300] total=5
+-- 6. a join inside a spec --
+Hibernate: select distinct p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 join supplier s1_0 on s1_0.id=p1_0.supplier_id where s1_0.name=? order by p1_0.sku
+[BOLT-7/FASTENER/80, BOLT-9/FASTENER/95/inactive, CAM-9/MOTION/2300]
+-- 7. count / exists / delete --
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.category=?
+count structural = 2
+Hibernate: select 1 from product p1_0 where not(p1_0.active) fetch first ? rows only
+exists inactive = true
+Hibernate: delete from product p1_0 where not(p1_0.active)
+deleted inactive = 1
+-- 8. Query by Example --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.price_in_cents,p1_0.sku,p1_0.supplier_id from product p1_0 where lower(p1_0.sku) like ? escape '\' order by p1_0.sku
+[BOLT-7/FASTENER/80]
+Hibernate: drop table if exists product cascade
+Hibernate: drop table if exists supplier cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: drop sequence if exists supplier_seq
+  </pre>
+
+  <p>Read the SQL against the composition that produced it:</p>
+  <ol class="max-w-prose">
+    <li><strong>One criterion</strong> becomes one predicate: <code>where p1_0.category=?</code>. The enum is a bound parameter, never spliced into the string.</li>
+    <li><strong><code>where(a).and(b).or(c)</code></strong> is evaluated left to right as <code>(a and b) or c</code>. Hibernate prints it without parentheses — <code>category=? and price_in_cents between ? and ? or category=?</code> — because SQL's <code>and</code> binds tighter than <code>or</code>, so the brackets would be redundant. If you meant <code>a and (b or c)</code>, build <code>b.or(c)</code> first and pass it to <code>and</code>; the fluent chain will not guess. <code>Specification.not</code> becomes <code>not(p1_0.active)</code>.</li>
+    <li><strong><code>anyOf</code></strong> joins its arguments with <code>or</code>; <code>allOf</code> with <code>and</code>. Notice <code>like ? escape ''</code>: a Criteria <code>cb.like</code> with no escape character means a <code>%</code> or <code>_</code> typed into a search box is a wildcard. A derived <code>StartingWith</code> (§3) escapes for you, emitting <code>escape '\'</code>; a hand-written spec does not.</li>
+    <li><strong>The null-tolerant filter</strong> with every argument <code>null</code> produced a query with <em>no</em> <code>where</code> clause at all — <code>allOf</code> of an empty list is "unrestricted", not <code>where 1=1</code>. With three arguments present, three predicates appear, joined by <code>and</code>. This is the pattern a search endpoint wants.</li>
+    <li><strong>Paging</strong> costs two statements: the page itself with <code>offset ? rows fetch first ? rows only</code>, then <code>select count(p1_0.id) … where p1_0.active</code>. Spring Data re-applies the <em>same</em> specification to a count query, so the total always matches the filter (§7).</li>
+    <li><strong>A join inside a spec</strong> — <code>root.join("supplier")</code> — becomes an inner join, and <code>query.distinct(true)</code> becomes <code>select distinct</code>. The guard <code>if (query != null)</code> matters: Spring Data 4 calls the same spec for <code>count</code>, <code>exists</code> and <code>delete</code>, where there is no <code>CriteriaQuery</code> to set <code>distinct</code> on.</li>
+    <li><strong><code>count</code>, <code>exists</code> and <code>delete</code></strong> reuse specs too. <code>exists</code> is <code>select 1 … fetch first ? rows only</code> — it stops at the first match. <code>delete</code> here takes a <code>PredicateSpecification</code>, Spring Data JPA 4's query-independent form <code>(root, cb) -&gt; …</code>, and runs one bulk <code>delete</code>: no entities are loaded, no lifecycle callbacks fire, and the persistence context is not told (JPA §6).</li>
+    <li><strong>Query by Example</strong> turned a probe with <code>sku = "bo"</code>, matched with <code>startsWith</code> and ignoring case, into <code>lower(p1_0.sku) like ? escape '\'</code>. Primitive fields are never <code>null</code>, so <code>priceInCents</code> and <code>active</code> would have become <code>= 0</code> and <code>= false</code> — the matcher must ignore them explicitly. Only <code>BOLT-7</code> comes back because step 7 deleted the inactive <code>BOLT-9</code>. While this page was being built, a probe with <em>two</em> fields (SKU and category) emitted its two predicates in a different order on different runs: Query by Example walks the entity's attributes in an order nobody promises. The rows are the same either way, but never write a test that asserts on its SQL text.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Build a filter</h3>
+
+  <div class="lm-card" data-sandbox="spec-builder">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4-2v-4Z"/></svg>
+      Compose a Specification from whichever criteria are present
+    </div>
+    <div class="lm-controls">
+      <div class="lm-field">
+        <label><input type="checkbox" data-sb-usecat> Category</label>
+        <select data-sb-cat aria-label="Category">
+          <option>FASTENER</option><option>STRUCTURAL</option><option>MOTION</option>
+        </select>
+      </div>
+      <label class="lm-field grow">
+        <span>Min price (cents) <span class="lm-readout" data-sb-minout>off</span></span>
+        <input type="range" data-sb-min min="0" max="5000" step="100" value="0">
+      </label>
+      <label class="lm-field grow">
+        <span>Max price (cents) <span class="lm-readout" data-sb-maxout>off</span></span>
+        <input type="range" data-sb-max min="0" max="130000" step="500" value="130000">
+      </label>
+      <label class="lm-field">
+        <span>SKU prefix</span>
+        <select data-sb-prefix>
+          <option value="">none</option><option>BOLT</option><option>NUT</option><option>CAM</option><option>G</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Status</span>
+        <span><input type="checkbox" data-sb-active> Active only</span>
+      </label>
+      <label class="lm-field">
+        <span>Combine with</span>
+        <select data-sb-comb>
+          <option value="and" selected>allOf (and)</option><option value="or">anyOf (or)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Sort</span>
+        <select data-sb-sort>
+          <option value="sku" selected>sku</option><option value="price">priceInCents desc</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p class="text-sm text-ink-muted">The rows are the six products from the worked example, filtered in the browser by the same rules the database applies. The price range is "off" at its extremes, mirroring the null-tolerant factory: an absent bound contributes no predicate.</p>
+
+  <h3 class="mt-8 mb-3">Which tool for which query</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Choosing between derived queries, @Query, Specifications and Query by Example</caption>
+      <thead><tr><th scope="col">The query is…</th><th scope="col">Reach for</th><th scope="col">Why</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed, one or two conditions</td><td>Derived query (§3)</td><td>The name is the documentation, validated at startup.</td></tr>
+        <tr><td>Fixed but complex: joins, aggregates, projections</td><td><code>@Query</code> (§4)</td><td>One readable JPQL string, validated at startup.</td></tr>
+        <tr><td>Shape decided at runtime from optional inputs</td><td><code>Specification</code></td><td>Composable, typed, parameters always bound.</td></tr>
+        <tr><td>"Find things like this one", equality and string matching only</td><td>Query by Example</td><td>Zero query code; the probe is the filter.</td></tr>
+        <tr><td>Ranges, <code>or</code> across fields, nested properties of collections</td><td><code>Specification</code></td><td>Query by Example cannot express them.</td></tr>
+        <tr><td>Reporting with grouping, window functions</td><td>Native <code>@Query</code> or jOOQ</td><td>Criteria becomes harder to read than the SQL it emits.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Specification techniques">
+      <button type="button" class="lm-tab" role="tab" id="tab-specifications-compose" aria-controls="panel-specifications-compose" aria-selected="true" tabindex="0">Composing and reuse</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-specifications-qbe" aria-controls="panel-specifications-qbe" aria-selected="false" tabindex="-1">Query by Example</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-specifications-typed" aria-controls="panel-specifications-typed" aria-selected="false" tabindex="-1">Type safety</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-specifications-compose" aria-labelledby="tab-specifications-compose" tabindex="0">
+      <p>Treat specifications like small pure functions. Each factory knows one criterion and nothing else; the screen or service decides which to combine. That gives you criteria you can unit-test in isolation, reuse across repositories with the same attribute names, and name after the business rule — <code>overdue()</code>, <code>restockCandidate(threshold)</code> — rather than after the columns.</p>
+      <pre data-code data-lang="java" data-nobar>
+static Specification&lt;Product&gt; restockCandidate(int threshold) {
+    return Specification.allOf(isActive(), stockBelow(threshold), not(discontinued()));
+}
+
+// the caller adds what the request supplied
+Specification&lt;Product&gt; spec = restockCandidate(10);
+if (req.category() != null) spec = spec.and(inCategory(req.category()));
+List&lt;Product&gt; hits = products.findAll(spec, Sort.by("sku"));
+      </pre>
+      <p class="mb-0">Composition is immutable: <code>spec.and(x)</code> returns a new specification and leaves <code>spec</code> alone, so a shared base filter cannot be corrupted by one caller.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-specifications-qbe" aria-labelledby="tab-specifications-qbe" tabindex="0" hidden>
+      <p>Query by Example needs only <code>QueryByExampleExecutor</code>, which <code>JpaRepository</code> already extends. The probe's non-null fields become predicates; the <code>ExampleMatcher</code> decides how strings compare (exact, starts with, contains, ends with, regex where supported) and whether case matters.</p>
+      <ul class="mb-0">
+        <li><strong>It can:</strong> equality on any property, including nested single-valued ones (<code>supplier.name</code>); string matching; ignoring paths; <code>matchingAll</code> versus <code>matchingAny</code>.</li>
+        <li><strong>It cannot:</strong> ranges (<code>between</code>, <code>&gt;</code>), <code>in</code> lists, <code>or</code> on the same property, conditions on collection elements, <code>is null</code> unless you opt in with <code>withIncludeNullValues()</code>.</li>
+        <li><strong>The primitive trap:</strong> an <code>int</code> field is <code>0</code>, never <code>null</code>, so it is always included unless you ignore its path. Prefer wrapper types on probes, or ignore paths explicitly as the worked example does.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-specifications-typed" aria-labelledby="tab-specifications-typed" tabindex="0" hidden>
+      <p><code>root.get("priceInCents")</code> is a string. Rename the field and every spec still compiles, then fails at runtime with an <code>IllegalArgumentException</code> about an unknown attribute. Two cures:</p>
+      <ul class="mb-0">
+        <li><strong>The JPA static metamodel.</strong> Add <code>hibernate-processor</code> as an annotation processor and Hibernate generates <code>Product_</code> with typed attributes, so the spec reads <code>root.get(Product_.priceInCents)</code> and a rename becomes a compile error. Not on this module's class path, so the worked example uses strings.</li>
+        <li><strong>Querydsl</strong> generates <code>QProduct</code> and a fluent, typed predicate language (<code>product.priceInCents.between(lo, hi)</code>); Spring Data integrates it via <code>QuerydslPredicateExecutor</code>. It is a separate dependency and code generator — worth it on a large query surface, overkill for a handful of filters.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Specification gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A fetch join in a spec breaks paging.</strong> <code>root.fetch("lines")</code> is reused for the count query, where Hibernate rejects fetching an association whose owner is not selected. Guard it with <code>if (Long.class != query.getResultType())</code>, or keep fetch plans in an <code>@EntityGraph</code> on the repository method (§6).</li>
+        <li><strong>Joins multiply rows.</strong> A join to a collection returns one row per element; without <code>distinct</code> the same product appears several times, and the total in a <code>Page</code> counts the duplicates.</li>
+        <li><strong>The fluent chain is left-associative.</strong> <code>a.and(b).or(c)</code> is <code>(a and b) or c</code>. Build the bracketed part as its own specification when you mean something else.</li>
+        <li><strong>User input in <code>like</code> is a pattern.</strong> <code>cb.like(root.get("sku"), prefix + "%")</code> treats <code>%</code> and <code>_</code> in <code>prefix</code> as wildcards. Escape them, or use the three-argument <code>cb.like(expr, pattern, '\\')</code>.</li>
+        <li><strong>Every filter combination is a different SQL string.</strong> Six optional filters can produce dozens of statement shapes, each parsed and planned separately by the database and each a separate entry in Hibernate's query plan cache. Usually fine; worth knowing when a database's statement cache starts thrashing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-specifications-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A search endpoint receives no filters at all and calls <code>products.findAll(Specification.allOf(List.of()))</code>. What SQL runs?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-specifications-1"><span>An exception: an empty specification list is rejected <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-specifications-1"><span>A select with no <code>where</code> clause <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-specifications-1"><span>A select with <code>where 1=1</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-specifications-1"><span>A select with <code>where 1=0</code>, returning nothing <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The worked example's step 4 shows it: <code>allOf</code> of nothing is the unrestricted specification, and Spring Data omits the <code>where</code> clause entirely. That is what makes the null-tolerant filter pattern work without special cases.</p>
+        <p class="mb-0"><strong>A</strong> would make the pattern unusable, and Spring Data deliberately allows it. <strong>C</strong> is what string-building code tends to produce, not what Criteria emits. <strong>D</strong> would be the result of <code>anyOf</code> semantics taken literally ("at least one of nothing"), which is not how an empty conjunction behaves.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-specifications-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You need: active products whose category is <code>FASTENER</code> <em>or</em> whose price is under 100 cents. Which composition is correct?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-specifications-2"><span><code>isActive().and(inCategory(FASTENER)).or(priceBelow(100))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-specifications-2"><span><code>Specification.anyOf(isActive(), inCategory(FASTENER), priceBelow(100))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-specifications-2"><span><code>isActive().and(inCategory(FASTENER).or(priceBelow(100)))</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-specifications-2"><span>Any of them; Hibernate adds the parentheses it needs <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The <code>or</code> must be built first, then <code>and</code>-ed with <code>isActive()</code>: <code>active and (category = ? or price &lt; ?)</code>.</p>
+        <p class="mb-0"><strong>A</strong> groups left to right as <code>(active and fastener) or cheap</code>, so an inactive product under 100 cents is returned — exactly the shape step 2 of the worked example printed. <strong>B</strong> makes all three alternatives, returning every active product regardless of category or price. <strong>D</strong> is wrong: Hibernate faithfully renders the tree you built; it only omits parentheses that SQL precedence makes redundant.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-specifications-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these can Query by Example express? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>SKU starts with <code>"bo"</code>, ignoring case, and category equals <code>FASTENER</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Price between 100 and 500 cents <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Category is <code>FASTENER</code> or <code>MOTION</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Supplier name equals <code>"Acme"</code>, through the many-to-one <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> String matching with a matcher, equality, and nested single-valued properties are exactly what a probe can describe. Step 8 of the worked example is the SKU half of case A; adding the category is one more field on the probe.</p>
+        <p class="mb-0"><strong>B</strong>: a probe holds one value per property, so there is no way to say "between". <strong>C</strong>: one property cannot hold two values, and <code>matchingAny</code> ors <em>different</em> properties, not alternatives for the same one. Both need a <code>Specification</code>.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="specifications"> Mark this section complete
+  </label>
+</section>

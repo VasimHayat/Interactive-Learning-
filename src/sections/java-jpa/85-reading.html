@@ -1,0 +1,60 @@
+<section class="lm-section" id="reading" data-title="Further reading" data-num="R">
+  <p class="lm-eyebrow">Where to go next</p>
+  <h2 class="mb-4">Further reading</h2>
+
+  <p>Primary sources only — the specification, the Hibernate guide that documents the version this module runs, the tools, and the few books and articles that are worth the time. These are links, but nothing on this page loads them; the module remains fully offline.</p>
+
+  <h3 class="mt-8 mb-3">Specifications and reference guides</h3>
+  <ul>
+    <li><strong>Jakarta Persistence 3.2 Specification</strong> — the contract behind every annotation, the <code>EntityManager</code> lifecycle rules (chapter 3), the JPQL grammar (chapter 4), the Criteria API (chapter 6) and the exception hierarchy. Chapter 3's state transitions are §3 of this module, stated formally.<br><span class="text-sm text-ink-subtle">https://jakarta.ee/specifications/persistence/3.2/</span></li>
+    <li><strong>Hibernate ORM 7.4 documentation</strong> — the User Guide's chapters on the domain model (§2, §4, §8), the persistence context (§3), fetching (§5), HQL (§6), locking (§7), batching and caching (§9) and schema generation (§10). The HQL chapter documents the superset Hibernate accepts beyond JPQL.<br><span class="text-sm text-ink-subtle">https://hibernate.org/orm/documentation/7.4/</span></li>
+    <li><strong>Hibernate ORM migration guide</strong> — what changed between 6.x and 7.x: JPA 3.2, the <code>PersistenceConfiguration</code> bootstrap used in every program here, deprecated APIs such as <code>byNaturalId</code>, and changed defaults.<br><span class="text-sm text-ink-subtle">https://github.com/hibernate/hibernate-orm/blob/main/migration-guide.adoc</span></li>
+    <li><strong>H2 Database documentation</strong> — the SQL grammar and the <code>jdbc:h2:mem:</code> URL options (<code>DB_CLOSE_DELAY=-1</code> keeps an in-memory database alive between connections) behind the verified programs.<br><span class="text-sm text-ink-subtle">https://h2database.com/html/main.html</span></li>
+    <li><strong>Flyway documentation</strong> and <strong>Liquibase documentation</strong> — versioned migrations, checksums, baselining an existing schema, and the naming conventions (<code>V1__init.sql</code>) that §10 recommends over <code>hbm2ddl.auto=update</code>.<br><span class="text-sm text-ink-subtle">https://documentation.red-gate.com/flyway · https://docs.liquibase.com/</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Articles that settle arguments</h3>
+  <ul>
+    <li><strong>Vlad Mihalcea, "N+1 query problem with JPA and Hibernate"</strong> — the problem, how to detect it in tests by asserting on statement counts, and each fix measured (§5).<br><span class="text-sm text-ink-subtle">https://vladmihalcea.com/n-plus-1-query-problem/</span></li>
+    <li><strong>Vlad Mihalcea, "How to implement equals and hashCode using the JPA entity identifier"</strong> — the constant-<code>hashCode</code> idiom §11 uses, with the test that proves the id-based version breaks.<br><span class="text-sm text-ink-subtle">https://vladmihalcea.com/how-to-implement-equals-and-hashcode-using-the-jpa-entity-identifier/</span></li>
+    <li><strong>Vlad Mihalcea, "How to batch INSERT and UPDATE statements with Hibernate"</strong> — <code>batch_size</code>, ordered inserts, why IDENTITY defeats it, and how to verify with a proxy driver (§9).<br><span class="text-sm text-ink-subtle">https://vladmihalcea.com/how-to-batch-insert-and-update-statements-with-hibernate/</span></li>
+    <li><strong>Thorben Janssen's Hibernate tips</strong> — short, current answers to the questions that come up in code review: lazy one-to-one, <code>@DynamicUpdate</code>, entity graphs, natural ids.<br><span class="text-sm text-ink-subtle">https://thorben-janssen.com/</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Books</h3>
+  <ul>
+    <li><strong>High-Performance Java Persistence</strong>, Vlad Mihalcea — the book behind §5, §7 and §9: how JDBC, the database and Hibernate interact, with measurements. Read it when you have shipped one Hibernate application and want to know why it behaves as it does.</li>
+    <li><strong>Java Persistence with Spring Data and Hibernate</strong>, Cătălin Tudose — the long-form treatment of mapping, the persistence context, conversations and caching, and the bridge to Spring Data that this module deliberately left out.</li>
+    <li><strong>Effective Java</strong>, Joshua Bloch, 3rd edition — items 10 and 11 are the <code>equals</code>/<code>hashCode</code> contract that §11 has to satisfy under the extra constraint of a generated id.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Tools worth knowing now</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Tools for diagnosing a persistence layer</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Use it to</th></tr></thead>
+      <tbody>
+        <tr><td><code>hibernate.generate_statistics</code> + <code>Statistics</code></td><td>Count prepared statements, entity loads, flushes and cache hits per unit of work; assert on them in tests so an N+1 regression fails the build.</td></tr>
+        <tr><td>datasource-proxy</td><td>Wrap the <code>DataSource</code> to log every statement with its bound parameters and batch sizes — what <code>show_sql</code> cannot show.</td></tr>
+        <tr><td>p6spy</td><td>The same at the JDBC-driver level, with timing per statement, for applications you cannot change.</td></tr>
+        <tr><td><code>EXPLAIN ANALYZE</code></td><td>Take the slowest statement from the log to the database and read the plan; a missing index is a database fix, not a Hibernate one.</td></tr>
+        <tr><td>Testcontainers</td><td>Run the integration tests against the real database engine in a container, so that H2's dialect differences never reach production.</td></tr>
+        <tr><td>Schema export (<code>schema-generation.scripts.action=create</code>)</td><td>Generate the DDL for the current mapping as the starting point of a migration script, as §10's worked example does.</td></tr>
+        <tr><td>jOOQ</td><td>The type-safe SQL builder for the reports and bulk jobs that should not go through entities at all.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Where to go from here</div>
+      <p>This is the last module of the course. Three things will teach you more than any further reading.</p>
+      <ul class="mb-0">
+        <li><strong>Add Spring Data JPA on top</strong>, deliberately. A <code>JpaRepository</code> is an <code>EntityManager</code> with the boilerplate generated and <code>@Transactional</code> drawing the unit-of-work boundary for you. Every mechanism here — the context, flush timing, lazy loading, <code>@Version</code> — behaves identically underneath; the first thing to do in a new Spring Boot project is set <code>spring.jpa.open-in-view=false</code> and read the SQL.</li>
+        <li><strong>Run the lab against PostgreSQL in Testcontainers.</strong> Watch which <code>Hibernate:</code> lines change (types, sequences, <code>for update</code>), move the generated DDL into a Flyway script, and start the application with <code>validate</code>. That is the production shape.</li>
+        <li><strong>Finish the lab's extensions.</strong> The <code>@EmbeddedId</code> stock key, the filterable soft delete and the IDENTITY experiment each force a design decision this module only described — and the statistics will tell you whether you got it right.</li>
+      </ul>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,324 @@
+<section class="lm-section" id="gc" data-title="Garbage collection: generations, G1 and ZGC" data-num="8">
+  <p class="lm-eyebrow">Section 8</p>
+  <h2 class="mb-4">Garbage collection: generations, G1 and ZGC</h2>
+
+  <p>Fundamentals §1 said the JVM frees memory for you and left it there. The mechanism matters the day a service that was fine for a month starts pausing for two seconds, or dies with <code>OutOfMemoryError</code> at 3 a.m. with plenty of RAM on the box. Both are garbage-collection stories, and both are diagnosable once you know what the collector is doing.</p>
+
+  <p>The collector's job has one definition: an object is <strong>reachable</strong> if some chain of references leads to it from a <strong>root</strong> — a local variable or operand on any thread's stack, a static field, a JNI handle, a few JVM-internal structures. Everything else is garbage, and the collector may reclaim it at any time. It does not count references (cycles would leak), it does not run when you call <code>System.gc()</code> (that is a hint), and it does not know what your object "means"; it only knows whether anything can still get to it. The entire section follows from that definition plus one empirical fact: <em>most objects die young</em>.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>The four reference strengths, a root that keeps an object alive no matter what, a map whose entries vanish with their keys, and the modern replacement for <code>finalize()</code>. Every <code>System.gc()</code> here is a request in a bounded loop, and the program prints facts, never sizes.</p>
+
+  <pre data-code data-lang="java" data-file="Reachability.java" data-verify="Reachability" data-hi="19,36,63,65">
+import java.lang.ref.Cleaner;
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+
+public class Reachability {
+
+    static final class Pallet {
+        final String sku;
+        Pallet(String sku) { this.sku = sku; }
+    }
+
+    static Pallet pinned;                                   // a static field is a GC root
+
+    // System.gc() is a request, not a command. Ask repeatedly, with a bound, and report the fact.
+    static boolean gcUntil(BooleanSupplier condition) throws InterruptedException {
+        for (int i = 0; i < 50 && !condition.getAsBoolean(); i++) {
+            System.gc();
+            Thread.sleep(20);
+        }
+        return condition.getAsBoolean();
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. Weak: cleared as soon as nothing strong reaches the object.
+        ReferenceQueue<Pallet> queue = new ReferenceQueue<>();
+        Pallet p = new Pallet("BOLT-7");
+        WeakReference<Pallet> weak = new WeakReference<>(p, queue);
+        System.out.println("weak while a strong ref exists = " + (weak.get() != null));
+        p = null;                                           // the last strong reference is gone
+        System.out.println("weak cleared after gc          = " + gcUntil(() -> weak.get() == null));
+        Reference<? extends Pallet> notified = queue.remove(5_000);
+        System.out.println("reference enqueued             = " + (notified == weak));
+
+        // 2. A root keeps it alive no matter how often you ask.
+        pinned = new Pallet("GIRD-1");
+        WeakReference<Pallet> weakPinned = new WeakReference<>(pinned);
+        for (int i = 0; i < 3; i++) System.gc();
+        System.out.println("rooted object still reachable  = " + (weakPinned.get() != null));
+
+        // 3. Soft: cleared only under memory pressure, so an idle gc leaves it alone.
+        SoftReference<Pallet> soft = new SoftReference<>(new Pallet("CAM-9"));
+        for (int i = 0; i < 3; i++) System.gc();
+        System.out.println("soft survives an idle gc       = " + (soft.get() != null));
+
+        // 4. WeakHashMap: the entry goes when the key goes.
+        Map<Pallet, Integer> onHand = new WeakHashMap<>();
+        Pallet key = new Pallet("NUT-3");
+        onHand.put(key, 1200);
+        System.out.println("entries while key is held      = " + onHand.size());
+        key = null;
+        System.out.println("entries after key dropped + gc = " + (gcUntil(() -> onHand.isEmpty()) ? 0 : onHand.size()));
+
+        // 5. Cleaner: the replacement for finalize(). The action must not capture the object.
+        Cleaner cleaner = Cleaner.create();
+        CountDownLatch ran = new CountDownLatch(1);
+        Runnable release = ran::countDown;                  // captures the latch, not the Pallet
+        Pallet handle = new Pallet("ROD-4");
+        Cleaner.Cleanable cleanable = cleaner.register(handle, release);
+        handle = null;
+        gcUntil(() -> ran.getCount() == 0);
+        System.out.println("cleaner ran after gc           = " + ran.await(5, TimeUnit.SECONDS));
+
+        CountDownLatch ran2 = new CountDownLatch(1);
+        Cleaner.Cleanable explicit = cleaner.register(new Pallet("PIN-2"), ran2::countDown);
+        explicit.clean();                                   // deterministic release: call it yourself, from close()
+        System.out.println("explicit clean() ran at once   = " + (ran2.getCount() == 0));
+        explicit.clean();                                   // idempotent
+        cleanable.clean();                                  // already run by the cleaner thread: also a no-op
+        System.out.println("repeated clean() is a no-op    = " + (ran2.getCount() == 0));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Reachability">
+weak while a strong ref exists = true
+weak cleared after gc          = true
+reference enqueued             = true
+rooted object still reachable  = true
+soft survives an idle gc       = true
+entries while key is held      = 1
+entries after key dropped + gc = 0
+cleaner ran after gc           = true
+explicit clean() ran at once   = true
+repeated clean() is a no-op    = true
+  </pre>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The four reference strengths</caption>
+      <thead><tr><th scope="col">Reference</th><th scope="col">Collector clears it when…</th><th scope="col">Use it for</th></tr></thead>
+      <tbody>
+        <tr><td>strong (<code>Pallet p = …</code>)</td><td>never, while reachable</td><td>everything, by default</td></tr>
+        <tr><td><code>SoftReference</code></td><td>memory is short; recently used ones last longer (<code>-XX:SoftRefLRUPolicyMSPerMB</code>)</td><td>a cache that may be dropped under pressure — but a real cache (Caffeine) with a size bound is almost always better</td></tr>
+        <tr><td><code>WeakReference</code></td><td>at the next collection that finds no strong path</td><td>canonicalising maps, listener lists, <code>WeakHashMap</code> keyed by objects you do not own</td></tr>
+        <tr><td><code>PhantomReference</code></td><td>after the object is finalizable; <code>get()</code> always returns <code>null</code></td><td>post-mortem cleanup — what <code>Cleaner</code> is built on</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Why <code>finalize()</code> is gone.</strong> It ran on an unspecified thread at an unspecified time, could resurrect the object, delayed reclamation by at least one extra cycle, and a slow finalizer stalled every other one behind it. It has been deprecated for removal since Java 18 (JEP 421). <code>Cleaner</code> keeps the one legitimate use — releasing a native resource whose owner forgot to <code>close()</code> — and fixes the design: the cleanup action is a separate object that <em>must not</em> reference the thing being cleaned (or the thing is reachable and never cleaned), it runs at most once, and calling <code>clean()</code> yourself from <code>close()</code> makes release deterministic with the cleaner as a safety net.</p>
+
+  <h3 class="mt-8 mb-3">Generations, and why copying is cheap</h3>
+
+  <p>Mark-and-sweep over a whole heap costs time proportional to the heap. The <strong>generational hypothesis</strong> — most objects die almost immediately, and the ones that survive a while tend to survive a long while — turns that around. Allocate everything in a small <strong>young</strong> area (eden). When it fills, trace from the roots and copy only the <em>live</em> objects out into a survivor space; everything else is reclaimed by doing nothing at all. The cost is proportional to the survivors, which is a small fraction of what was allocated. Objects that survive enough young collections are <strong>promoted</strong> to the <strong>old</strong> generation, which is collected rarely and differently.</p>
+
+  <div class="lm-card" data-sandbox="gc-generations">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      Ten seconds of young collections
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Allocation rate, objects per second <span class="lm-readout" data-sb-rateout>2,000</span></span>
+        <input type="range" data-sb-rate min="0" max="10000" value="2000" step="100">
+      </label>
+      <label class="lm-field grow">
+        <span>Still alive at each collection <span class="lm-readout" data-sb-survout>10%</span></span>
+        <input type="range" data-sb-surv min="0" max="60" value="10" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Tenuring threshold <span class="lm-readout" data-sb-tenureout>6</span></span>
+        <input type="range" data-sb-tenure min="1" max="15" value="6" step="1">
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>Three readings to try. Keep the defaults and note that a collection copies a tenth of what was allocated. Push <em>still alive</em> to 40%: now each young collection is copying almost half of eden and the old generation fills within the run — the hypothesis is false for that workload and no amount of eden helps. Set alive to 20% with a tenuring threshold of 15: the survivor space (an eighth of eden, the JVM's default <code>SurvivorRatio</code>) overflows and objects are promoted <em>early</em>, where they will die in the old generation and cost a far more expensive collection to reclaim. The real flags are <code>-Xmn</code> (young size), <code>-XX:SurvivorRatio</code> and <code>-XX:MaxTenuringThreshold</code>, and the real signal is the GC log in §9.</p>
+
+  <h3 class="mt-8 mb-3">Which collector, and what it is trading</h3>
+
+  <p>A collector's two costs are <strong>pause time</strong> (the application stops while the collector moves things: "stop-the-world", STW) and <strong>throughput</strong> (CPU spent collecting rather than working). You cannot minimise both. Each collector in the JDK picks a point on that line:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">HotSpot collectors compared</caption>
+      <thead><tr><th scope="col">Collector</th><th scope="col">Optimises for</th><th scope="col">Pauses</th><th scope="col">Heap sweet spot</th><th scope="col">Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Serial (<code>-XX:+UseSerialGC</code>)</td><td>footprint; one core</td><td>STW, single-threaded, proportional to live data</td><td>&lt; 1 GB, containers with 1 CPU</td><td>default when the JVM sees &lt; 2 CPUs or &lt; 2 GB (a "client-class" machine)</td></tr>
+        <tr><td>Parallel (<code>-XX:+UseParallelGC</code>)</td><td>throughput</td><td>STW, all cores, can be long on big heaps</td><td>batch jobs, any size</td><td>default in Java 8; still the best choice when only total time matters</td></tr>
+        <tr><td>G1 (<code>-XX:+UseG1GC</code>)</td><td>predictable pauses with good throughput</td><td>STW young and mixed collections, concurrent marking; targets <code>-XX:MaxGCPauseMillis=200</code></td><td>2 GB – tens of GB</td><td>default since Java 9 on server-class machines</td></tr>
+        <tr><td>ZGC (<code>-XX:+UseZGC</code>)</td><td>sub-millisecond pauses</td><td>everything concurrent except tiny root scans; pauses do not grow with the heap</td><td>8 GB – terabytes</td><td>generational mode in Java 21 with <code>-XX:+ZGenerational</code> (default from Java 23)</td></tr>
+        <tr><td>Shenandoah</td><td>low pause, like ZGC</td><td>concurrent compaction via forwarding pointers</td><td>similar to ZGC</td><td>Red Hat's; not in every JDK build</td></tr>
+        <tr><td>Epsilon</td><td>nothing — it never collects</td><td>none; dies when the heap is full</td><td>tests, 100 ms batch tools</td><td>a measurement tool, not a production choice</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">A G1 cycle, region by region</h3>
+
+  <p>G1 abandons the fixed young/old split of a contiguous heap. The heap is cut into a few thousand equal <strong>regions</strong> (1–32 MB each), and every region is, at any moment, eden, survivor, old, humongous (one object too large for half a region), or free. Collections pick a <em>set</em> of regions to evacuate, which is how G1 keeps a pause under its target: it evacuates as many as it predicts it can afford.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a G1 collection cycle">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Young collections, marking, mixed collections</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What the application and the collector are doing</div>
+        <div data-stepper-code data-for="g1-cycle"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Regions (of 32) and collector state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">GC log</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="g1-cycle">
+    {
+      "lang": "java",
+      "code": "// 32 regions: E eden, S survivor, O old, H humongous, . free\nallocate(orders);        // the application fills eden regions\nyoungCollect();          // STW: live eden+survivor objects copied, ages++\nallocate(orders);\nyoungCollect();          // objects past the tenuring threshold -> old\nallocateHuge(report);    // bigger than half a region: humongous, old at once\n// old occupancy crosses the initiating threshold (IHOP)\nconcurrentMark();        // mostly concurrent: which old regions are mostly garbage?\nmixedCollect();          // STW: young regions + the emptiest old regions\nmixedCollect();\n// back to young-only collections until IHOP is crossed again",
+      "steps": [
+        { "line": 1, "vars": { "eden": "0", "survivor": "0", "old": "0", "humongous": "0", "free": "32", "phase": "idle" }, "out": "",
+          "note": "A fresh heap: every region is free. G1 will size the young generation (eden + survivor) to hit its pause goal, 200 ms by default, and grow or shrink it between collections." },
+        { "line": 2, "vars": { "eden": "8", "survivor": "0", "old": "0", "humongous": "0", "free": "24", "phase": "application running" }, "out": "",
+          "note": "Pickers create orders and lines; each thread bumps a pointer in its own allocation buffer inside an eden region. Allocation is a few instructions. Nothing is collected yet." },
+        { "line": 3, "vars": { "eden": "0", "survivor": "1", "old": "0", "humongous": "0", "free": "31", "phase": "STW young pause", "copied": "live objects from 8 eden regions into 1 survivor region" }, "out": "GC(0) Pause Young (Normal) (G1 Evacuation Pause) 64M->9M 7.8ms",
+          "note": "Eden is full, so every application thread is stopped at a safepoint. Live objects (reached from the roots) are copied into a survivor region; the 8 eden regions become free without anyone touching the dead objects in them. The pause is proportional to what survived, not to what was allocated." },
+        { "line": 4, "vars": { "eden": "8", "survivor": "1", "old": "0", "humongous": "0", "free": "23", "phase": "application running" }, "out": "GC(0) Pause Young (Normal) (G1 Evacuation Pause) 64M->9M 7.8ms",
+          "note": "The application resumes with fresh eden regions. The survivor region holds objects of age 1 — they have lived through one collection." },
+        { "line": 5, "vars": { "eden": "0", "survivor": "1", "old": "1", "humongous": "0", "free": "30", "phase": "STW young pause", "promoted": "objects at age >= threshold -> old region" }, "out": "GC(1) Pause Young (Normal) (G1 Evacuation Pause) 73M->14M 9.1ms",
+          "note": "Second young collection. Survivors are copied again and their age incremented; anything reaching the tenuring threshold is copied into an old region instead. A region, not an object, is the unit of accounting." },
+        { "line": 6, "vars": { "eden": "3", "survivor": "1", "old": "1", "humongous": "2", "free": "25", "phase": "application running" }, "out": "GC(1) Pause Young (Normal) (G1 Evacuation Pause) 73M->14M 9.1ms",
+          "note": "A 40 MB stock report array is bigger than half a region. It is allocated as a humongous object in contiguous free regions and treated as old immediately, so it is never copied. Many short-lived humongous objects are a classic G1 pathology — the regions are reclaimed only at marking or a full GC." },
+        { "line": 7, "vars": { "eden": "8", "survivor": "1", "old": "4", "humongous": "2", "free": "17", "phase": "IHOP crossed", "old + humongous occupancy": "6 regions ≈ 19% of heap — above the adaptive threshold" }, "out": "",
+          "note": "After a few more cycles the old generation has grown past the Initiating Heap Occupancy Percent (45% by default, adaptive in modern G1). G1 schedules a marking cycle: it will start on the next young pause." },
+        { "line": 8, "vars": { "eden": "8", "survivor": "1", "old": "4", "humongous": "2", "free": "17", "phase": "concurrent marking", "application": "running — writes tracked by a barrier (SATB)" }, "out": "GC(5) Pause Young (Concurrent Start) 10.2ms\nGC(6) Concurrent Mark Cycle\nGC(6) Pause Remark 2.1ms\nGC(6) Pause Cleanup 0.4ms",
+          "note": "Marking walks the whole object graph while the application keeps running; a write barrier records any reference the mutator overwrites so nothing live is missed. Two short STW pauses bracket it: Remark finishes the trace, Cleanup computes liveness per old region. Completely empty regions (dead humongous ones, too) are freed right here." },
+        { "line": 9, "vars": { "eden": "0", "survivor": "1", "old": "2", "humongous": "0", "free": "29", "phase": "STW mixed pause", "collection set": "all young regions + the 2 old regions with the least live data" }, "out": "GC(7) Pause Young (Mixed) (G1 Evacuation Pause) 92M->21M 14.6ms",
+          "note": "A mixed collection is a young collection that also evacuates a few old regions — the ones marking showed to be mostly garbage, so copying their few survivors is cheap. Compacting old space this way is what lets G1 avoid the long full compaction of older collectors." },
+        { "line": 10, "vars": { "eden": "0", "survivor": "1", "old": "1", "humongous": "0", "free": "30", "phase": "STW mixed pause", "remaining old regions": "above 85% live — not worth evacuating" }, "out": "GC(8) Pause Young (Mixed) (G1 Evacuation Pause) 88M->18M 11.9ms",
+          "note": "Mixed collections continue, a few old regions each, until the candidates left are too full of live data to be worth copying (G1MixedGCLiveThresholdPercent). Spreading the old-space work over several pauses keeps each one under the target." },
+        { "line": 11, "vars": { "eden": "8", "survivor": "1", "old": "1", "humongous": "0", "free": "22", "phase": "application running" }, "out": "",
+          "note": "Steady state: young collections until occupancy crosses IHOP again. If the old generation fills faster than marking and mixed collections can clear it, G1 falls back to a single-threaded Full GC — the long pause you see in the log as \"Pause Full (G1 Compaction Pause)\", and the signal that the heap is too small or something is leaking." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">ZGC: moving objects without stopping</h3>
+
+  <p>Even G1's pauses grow with the live set, because copying live objects happens while the world is stopped. ZGC copies them <em>while the application runs</em>. Two ideas make that possible. First, <strong>coloured pointers</strong>: a 64-bit reference has spare bits, and ZGC uses a few of them to record the object's GC state (marked, remapped, relocated). Second, a <strong>load barrier</strong>: every time the application reads a reference from the heap, a few instructions check those colour bits and, if the object has been moved, fix the reference up to the new address before the application sees it. The application therefore never observes a stale pointer, and the collector can relocate objects at its own pace. The pauses that remain only scan the thread roots, so they stay around a millisecond on a terabyte heap. The price is throughput — those barriers run on every load — and, before generational ZGC, no cheap young collections; <code>-XX:+ZGenerational</code> in Java 21 adds a young generation on top of the same machinery and is the default from Java 23.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Memory leaks in a garbage-collected language</div>
+      <p class="mb-2">A leak in Java is an object that is still reachable but will never be used. The collector is doing its job; the program is lying to it. The usual suspects:</p>
+      <ul class="mb-0">
+        <li><strong>A static or long-lived collection that only grows.</strong> A <code>Map&lt;OrderId, Order&gt;</code> "cache" with no eviction. Bound it (Caffeine, <code>LinkedHashMap</code> with <code>removeEldestEntry</code> from Intermediate §11) or key it weakly.</li>
+        <li><strong>Listeners and callbacks never removed.</strong> The subject holds the listener, the listener holds its whole object graph. Unsubscribe in <code>close()</code>, or hold listeners through <code>WeakReference</code>.</li>
+        <li><strong><code>ThreadLocal</code> in a thread pool.</strong> The pool thread lives forever, so its thread-local map does too. Always <code>remove()</code> in a <code>finally</code>; §7 showed why this multiplies with virtual threads.</li>
+        <li><strong>Unclosed resources.</strong> A stream, connection or socket holds buffers and native memory the heap collector cannot see. Try-with-resources, always (Fundamentals §11).</li>
+        <li><strong>Inner-class and lambda captures.</strong> An anonymous listener inside an activity-sized object keeps the object alive (Intermediate §2). Static nested classes capture nothing by accident.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The four <code>OutOfMemoryError</code>s</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">OutOfMemoryError messages and their meaning</caption>
+      <thead><tr><th scope="col">Message</th><th scope="col">What ran out</th><th scope="col">First thing to check</th></tr></thead>
+      <tbody>
+        <tr><td><code>Java heap space</code></td><td>the heap: live data exceeds <code>-Xmx</code></td><td>a heap dump (<code>-XX:+HeapDumpOnOutOfMemoryError</code>) opened in a tool that shows dominator trees; is it a leak or just a bigger working set?</td></tr>
+        <tr><td><code>GC overhead limit exceeded</code></td><td>time: &gt; 98% of it in GC recovering &lt; 2% of heap</td><td>the same as above — the heap is effectively full; this error fires before the slow death</td></tr>
+        <tr><td><code>Metaspace</code></td><td>class metadata, outside the heap</td><td>class loaders that are never unloaded (§10): redeploys in an app server, runtime code generation, a proxy per request</td></tr>
+        <tr><td><code>unable to create native thread</code></td><td>OS threads or their stacks</td><td>a thread leak, or a pool per request; <code>ulimit -u</code>, <code>-Xss</code>; virtual threads make this one rare</td></tr>
+        <tr><td><code>Direct buffer memory</code></td><td>off-heap <code>ByteBuffer</code>s</td><td><code>-XX:MaxDirectMemorySize</code>; buffers are freed by a <code>Cleaner</code>, so they wait for a GC the heap may not need</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>§9 picks up from here: how to size the heap so these do not happen, which flags matter in 2026 and which are folklore, and how to read the log lines the stepper showed.</p>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-gc-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A young collection in a copying collector is cheap mainly because…</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-gc-1"><span>eden is small, so there is little to scan <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-gc-1"><span>its cost is proportional to the live objects it copies, and dead objects cost nothing <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-gc-1"><span>it runs concurrently with the application <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-gc-1"><span>young objects have no references to follow <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The collector traces from the roots and copies what it reaches; everything it does not reach is reclaimed by simply reusing the region. Under the generational hypothesis most of eden is dead, so most of eden is free. The sandbox shows this breaking down when the survival fraction climbs.</p>
+        <p class="mb-0"><strong>A</strong>: the collector does not "scan" eden at all — it never visits dead objects, whatever eden's size. <strong>C</strong>: young collections in Serial, Parallel and G1 are stop-the-world; only ZGC and Shenandoah collect concurrently. <strong>D</strong>: they do have references, and those into the old generation are tracked by card tables or remembered sets so the whole old space need not be scanned.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-gc-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You register a native handle with a <code>Cleaner</code>: <code>cleaner.register(this, () -> nativeFree(this.ptr))</code>. What is wrong?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-gc-2"><span>Nothing; this is the documented pattern <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-gc-2"><span><code>Cleaner</code> actions may not call native code <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-gc-2"><span>The lambda captures <code>this</code>, so the object stays reachable and is never cleaned <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-gc-2"><span>The action runs twice: once by the cleaner thread, once by the finalizer <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The cleaner keeps the action strongly reachable until it runs; the action references <code>this</code>; so <code>this</code> is reachable from a root for as long as the cleaner lives. The object becomes immortal and the handle leaks. The fix is a static nested <code>Runnable</code> holding only the <code>long ptr</code> — exactly why the worked example captures a latch, not the <code>Pallet</code>.</p>
+        <p class="mb-0"><strong>A</strong> is the trap the Javadoc warns about in its first paragraph. <strong>B</strong>: freeing native memory is the main use case. <strong>D</strong>: there is no finalizer here, and <code>Cleanable.clean()</code> is guaranteed to run the action at most once.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-gc-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>A service on a 48 GB heap sees 1.5-second pauses logged as <code>Pause Young (Mixed)</code> under G1. Which responses are sound? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Try ZGC: its pauses do not grow with the live set, at some throughput cost <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Call <code>System.gc()</code> from a timer every minute so collections stay small <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Switch to Parallel GC, which has no concurrent phase to compete with the application <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Reduce the live set or the promotion rate: fewer surviving objects means less to copy in each pause <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> A G1 pause is a copy of live objects, so the two levers are "copy them concurrently instead" (ZGC) and "have fewer of them" (a smaller live set, less premature promotion, fewer humongous allocations). Both address the cause.</p>
+        <p class="mb-0"><strong>B</strong>: an explicit <code>System.gc()</code> under G1 is a <em>full</em>, stop-the-world collection by default — the longest pause there is, now on a schedule. <strong>C</strong>: Parallel GC maximises throughput and its old-generation pauses are longer still, since it compacts the entire old space in one stop.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="gc"> Mark this section complete
+  </label>
+</section>

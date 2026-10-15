@@ -1,0 +1,440 @@
+<section class="lm-section" id="declared-queries" data-title="@Query, modifying queries and projections" data-num="4">
+  <p class="lm-eyebrow">Section 4</p>
+  <h2 class="mb-4">@Query, modifying queries and projections</h2>
+
+  <p>A derived name is a specification written in a tiny language. When the language runs out — an aggregate, parentheses around an <code>or</code>, a fetch join, a constructor expression, a vendor function — you write the query yourself and put it on the method with <code>@Query</code>. Spring Data still does the plumbing: it binds the parameters, appends a <code>Sort</code>, derives or uses a count query for a <code>Page</code>, and maps the result to whatever return type you declared. The query string is still parsed at startup, so a misspelt attribute in JPQL fails the boot exactly as a misspelt derived name does.</p>
+
+  <p>This section also covers the other half of "I do not want the whole entity": <strong>projections</strong>. A read screen that shows a SKU and a price does not need a managed <code>Product</code> with its snapshot, its dirty check and its lazy associations; it needs two columns. Spring Data offers three ways to ask for them, and they do not all do what they look like they do.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Seven declared queries, five projections and the two forms of <code>@Modifying</code>, over six products. The SQL line above each result is the evidence for every claim in the rest of the section.</p>
+
+  <pre data-code data-lang="java" data-file="DeclaredQueries.java" data-verify="DeclaredQueries" data-package="lm.declared" data-hi="84,95">
+package lm.declared;
+
+import jakarta.persistence.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.List;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class DeclaredQueries {
+
+    public enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    @NamedQuery(name = "Product.cheaperThan",
+                query = "select p from Product p where p.priceInCents < :max order by p.sku")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        @Column(nullable = false) String name;
+        @Enumerated(EnumType.STRING) @Column(nullable = false, length = 16) Category category;
+        int priceInCents;
+        boolean active;
+        protected Product() {}
+        Product(String sku, String name, Category category, int priceInCents, boolean active) {
+            this.sku = sku; this.name = name; this.category = category; this.priceInCents = priceInCents; this.active = active;
+        }
+        public String getSku() { return sku; }
+        public int getPriceInCents() { return priceInCents; }
+        @Override public String toString() { return sku + "@" + priceInCents; }
+    }
+
+    /* Projections: three ways to say "I do not want the whole entity". */
+    public interface SkuAndPrice { String getSku(); int getPriceInCents(); }              // closed: only these columns
+    public interface SkuLabel { @Value("#{target.sku + ' @ ' + target.priceInCents + 'c'}") String getLabel(); }  // open: all columns
+    public record SkuPrice(String sku, int priceInCents) {}                                // DTO: only these columns
+    public interface SkuCents { String getSku(); int getCents(); }                         // for the native query's aliases
+
+    public interface ProductRepository extends JpaRepository<Product, Long> {
+
+        @Query("select p from Product p where p.category = :category and p.priceInCents <= :max order by p.sku")
+        List<Product> affordable(@Param("category") Category category, @Param("max") int max);
+
+        @Query("select p from Product p where p.sku like ?1 order by p.sku")
+        List<Product> skuLike(String pattern);
+
+        @Query("select p from Product p where p.category = :category")
+        List<Product> byCategory(@Param("category") Category category, Sort sort);
+
+        @Query(value = "select p from Product p where p.active = true",
+               countQuery = "select count(p) from Product p where p.active = true")
+        Page<Product> activePage(Pageable pageable);
+
+        @Query(value = "select sku, price_in_cents as cents from product where price_in_cents > :min order by sku",
+               nativeQuery = true)
+        List<SkuCents> nativeAbove(@Param("min") int min);
+
+        List<Product> cheaperThan(@Param("max") int max);          // resolved to the @NamedQuery "Product.cheaperThan"
+
+        @Query("select count(p) from #{#entityName} p")
+        long total();
+
+        @Modifying @Transactional
+        @Query("update Product p set p.priceInCents = p.priceInCents + :delta where p.category = :category")
+        int repriceStale(@Param("category") Category category, @Param("delta") int delta);
+
+        @Modifying(clearAutomatically = true) @Transactional
+        @Query("update Product p set p.priceInCents = p.priceInCents + :delta where p.category = :category")
+        int repriceClearing(@Param("category") Category category, @Param("delta") int delta);
+
+        @Modifying @Transactional
+        @Query("delete from Product p where p.active = false")
+        int purgeInactive();
+
+        List<SkuAndPrice> findByCategoryOrderBySku(Category category);                       // closed projection
+        List<SkuLabel> findByPriceInCentsGreaterThanOrderBySku(int min);                      // open projection
+        List<SkuPrice> findByCategoryAndActiveTrueOrderBySku(Category category);              // DTO, derived
+        @Query("select new lm.declared.DeclaredQueries$SkuPrice(p.sku, p.priceInCents) from Product p where p.category = :category order by p.sku")
+        List<SkuPrice> prices(@Param("category") Category category);                          // DTO, declared
+        <T> List<T> findByCategoryOrderBySkuDesc(Category category, Class<T> type);           // dynamic projection
+    }
+
+    @Bean TransactionTemplate tx(PlatformTransactionManager manager) { return new TransactionTemplate(manager); }
+
+    @Bean CommandLineRunner demo(ProductRepository repo, TransactionTemplate tx) {
+        return args -> {
+            repo.saveAll(List.of(
+                new Product("BOLT-7", "Hex bolt M8", Category.FASTENER, 80, true),
+                new Product("NUT-3", "Hex nut M8", Category.FASTENER, 25, true),
+                new Product("PIN-2", "Split pin", Category.FASTENER, 15, false),
+                new Product("GIRD-1", "Steel girder 6m", Category.STRUCTURAL, 120_000, true),
+                new Product("ROD-4", "Threaded rod 1m", Category.STRUCTURAL, 4_500, true),
+                new Product("CAM-9", "Cam follower", Category.MOTION, 2_300, true)));
+
+            System.out.println("-- declared JPQL --");
+            System.out.println("affordable        = " + repo.affordable(Category.FASTENER, 50));
+            System.out.println("positional like   = " + repo.skuLike("%-%"));
+            System.out.println("sort appended     = " + repo.byCategory(Category.STRUCTURAL, Sort.by("priceInCents").descending()));
+            Page<Product> page = repo.activePage(PageRequest.of(1, 2, Sort.by("sku")));
+            System.out.println("page 2 of active  = " + page.getContent() + " of " + page.getTotalElements() + " in " + page.getTotalPages() + " pages");
+            System.out.println("native            = " + repo.nativeAbove(1_000).stream().map(r -> r.getSku() + "=" + r.getCents()).toList());
+            System.out.println("named query       = " + repo.cheaperThan(100));
+            System.out.println("#{#entityName}    = " + repo.total());
+
+            System.out.println("-- projections --");
+            System.out.println("closed interface  = " + repo.findByCategoryOrderBySku(Category.FASTENER).stream().map(p -> p.getSku() + "/" + p.getPriceInCents()).toList());
+            System.out.println("open interface    = " + repo.findByPriceInCentsGreaterThanOrderBySku(2_000).stream().map(SkuLabel::getLabel).toList());
+            System.out.println("record, derived   = " + repo.findByCategoryAndActiveTrueOrderBySku(Category.FASTENER));
+            System.out.println("record, declared  = " + repo.prices(Category.STRUCTURAL));
+            System.out.println("dynamic -> record = " + repo.findByCategoryOrderBySkuDesc(Category.FASTENER, SkuPrice.class));
+            System.out.println("dynamic -> entity = " + repo.findByCategoryOrderBySkuDesc(Category.FASTENER, Product.class));
+
+            System.out.println("-- @Modifying without clearAutomatically: the managed copy goes stale --");
+            tx.executeWithoutResult(status -> {
+                Product bolt = repo.findById(1L).orElseThrow();
+                int changed = repo.repriceStale(Category.FASTENER, 10);
+                Product again = repo.findById(1L).orElseThrow();
+                System.out.println("rows updated      = " + changed);
+                System.out.println("managed copy says = " + bolt.priceInCents + " (same instance: " + (bolt == again) + ")");
+            });
+            System.out.println("database says     = " + repo.findById(1L).orElseThrow().priceInCents);
+
+            System.out.println("-- @Modifying(clearAutomatically = true): the context is emptied, so the next read hits the database --");
+            tx.executeWithoutResult(status -> {
+                Product bolt = repo.findById(1L).orElseThrow();
+                int changed = repo.repriceClearing(Category.FASTENER, 10);
+                Product again = repo.findById(1L).orElseThrow();
+                System.out.println("rows updated      = " + changed);
+                System.out.println("stale copy says   = " + bolt.priceInCents + ", fresh copy says " + again.priceInCents + " (same instance: " + (bolt == again) + ")");
+            });
+
+            System.out.println("-- @Modifying delete --");
+            System.out.println("purged            = " + repo.purgeInactive());
+            System.out.println("remaining         = " + repo.total());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(DeclaredQueries.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:declared;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="DeclaredQueries">
+Hibernate: create global temporary table HTE_product(active boolean, priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), name varchar(255), category enum ('FASTENER','MOTION','STRUCTURAL'), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (active boolean not null, price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, name varchar(255) not null, category enum ('FASTENER','MOTION','STRUCTURAL') not null, primary key (id))
+Hibernate: select next value for product_seq
+Hibernate: select next value for product_seq
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+-- declared JPQL --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? and p1_0.price_in_cents<=? order by p1_0.sku
+affordable        = [NUT-3@25, PIN-2@15]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku like ? escape '' order by p1_0.sku
+positional like   = [BOLT-7@80, CAM-9@2300, GIRD-1@120000, NUT-3@25, PIN-2@15, ROD-4@4500]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.price_in_cents desc
+sort appended     = [GIRD-1@120000, ROD-4@4500]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.active=true order by p1_0.sku offset ? rows fetch first ? rows only
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.active=true
+page 2 of active  = [GIRD-1@120000, NUT-3@25] of 5 in 3 pages
+Hibernate: select sku, price_in_cents as cents from product where price_in_cents > ? order by sku
+native            = [CAM-9=2300, GIRD-1=120000, ROD-4=4500]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.price_in_cents<? order by p1_0.sku
+named query       = [BOLT-7@80, NUT-3@25, PIN-2@15]
+Hibernate: select count(p1_0.id) from product p1_0
+#{#entityName}    = 6
+-- projections --
+Hibernate: select p1_0.sku,p1_0.price_in_cents from product p1_0 where p1_0.category=? order by p1_0.sku
+closed interface  = [BOLT-7/80, NUT-3/25, PIN-2/15]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.price_in_cents>? order by p1_0.sku
+open interface    = [CAM-9 @ 2300c, GIRD-1 @ 120000c, ROD-4 @ 4500c]
+Hibernate: select p1_0.sku,p1_0.price_in_cents from product p1_0 where p1_0.category=? and p1_0.active=true order by p1_0.sku
+record, derived   = [SkuPrice[sku=BOLT-7, priceInCents=80], SkuPrice[sku=NUT-3, priceInCents=25]]
+Hibernate: select p1_0.sku,p1_0.price_in_cents from product p1_0 where p1_0.category=? order by p1_0.sku
+record, declared  = [SkuPrice[sku=GIRD-1, priceInCents=120000], SkuPrice[sku=ROD-4, priceInCents=4500]]
+Hibernate: select p1_0.sku,p1_0.price_in_cents from product p1_0 where p1_0.category=? order by p1_0.sku desc
+dynamic -> record = [SkuPrice[sku=PIN-2, priceInCents=15], SkuPrice[sku=NUT-3, priceInCents=25], SkuPrice[sku=BOLT-7, priceInCents=80]]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.sku desc
+dynamic -> entity = [PIN-2@15, NUT-3@25, BOLT-7@80]
+-- @Modifying without clearAutomatically: the managed copy goes stale --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: update product p1_0 set price_in_cents=(p1_0.price_in_cents+cast(? as integer)) where p1_0.category=?
+rows updated      = 3
+managed copy says = 80 (same instance: true)
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.id=?
+database says     = 90
+-- @Modifying(clearAutomatically = true): the context is emptied, so the next read hits the database --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: update product p1_0 set price_in_cents=(p1_0.price_in_cents+cast(? as integer)) where p1_0.category=?
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.id=?
+rows updated      = 3
+stale copy says   = 90, fresh copy says 100 (same instance: false)
+-- @Modifying delete --
+Hibernate: delete from product p1_0 where p1_0.active=false
+purged            = 1
+Hibernate: select count(p1_0.id) from product p1_0
+remaining         = 5
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <h3 class="mt-8 mb-3">Reading the output</h3>
+
+  <ul class="max-w-prose">
+    <li><strong>Named and positional parameters.</strong> <code>affordable</code> binds <code>:category</code> and <code>:max</code> through <code>@Param</code>; <code>skuLike</code> binds <code>?1</code> by position. Both become plain <code>?</code> placeholders in the SQL, so neither can be injected into. Never build JPQL by string concatenation to "add a parameter".</li>
+    <li><strong><code>escape ''</code> on the declared <code>like</code>.</strong> Compare it with §3's <code>escape '\'</code>. In a declared query <em>you</em> supply the pattern (<code>"%-%"</code>) and nothing is escaped for you: a user-supplied <code>%</code> is a wildcard here. If the value comes from a user, either escape it yourself or use a derived <code>Containing</code>.</li>
+    <li><strong>A <code>Sort</code> parameter is appended.</strong> <code>byCategory</code>'s JPQL has no <code>order by</code>; the SQL has <code>order by p1_0.price_in_cents desc</code>. Spring Data rewrote the query string before handing it to Hibernate. It validates the sort property against the entity, which is why an unknown property in a client-supplied sort fails instead of injecting SQL.</li>
+    <li><strong>A <code>Page</code> costs two statements.</strong> <code>activePage</code> ran the <code>offset … fetch first</code> select and then the <code>countQuery</code>. Give a declared paged query its own <code>countQuery</code> whenever the select has joins or fetches; the count Spring Data would otherwise derive by rewriting your select can be wrong or slow (§7 goes deeper).</li>
+    <li><strong>Native SQL goes through untouched.</strong> <code>nativeAbove</code>'s SQL is exactly the string in the annotation, aliases and all, and its result maps to the <code>SkuCents</code> interface by alias name. You give up portability, entity graphs and automatic count derivation; you gain every feature of your database.</li>
+    <li><strong>A named query is found by convention.</strong> <code>cheaperThan</code> has no annotation; Spring Data looked up <code>Product.cheaperThan</code> among the entity's <code>@NamedQuery</code>s before trying to derive the name. <code>#{#entityName}</code> in <code>total()</code> is SpEL substituted with the entity name, so a query in a generic base repository works for every entity.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Projections: what the SQL actually selects</h3>
+
+  <p>The five projection lines are the most instructive part of the output, because the method signatures look alike and the SQL does not.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Projection types and the columns they select</caption>
+      <thead><tr><th scope="col">Return type</th><th scope="col">Example</th><th scope="col">SQL selects</th><th scope="col">Managed entities?</th></tr></thead>
+      <tbody>
+        <tr><td>Closed interface</td><td><code>SkuAndPrice { getSku(); getPriceInCents(); }</code></td><td>only <code>sku, price_in_cents</code></td><td>no</td></tr>
+        <tr><td>Open interface</td><td><code>@Value("#{target.sku + …}") getLabel()</code></td><td><strong>every column</strong> — the SpEL needs a whole <code>target</code></td><td>yes, behind a proxy</td></tr>
+        <tr><td>Record / DTO, derived</td><td><code>List&lt;SkuPrice&gt; findBy…</code></td><td>only the constructor's columns</td><td>no</td></tr>
+        <tr><td>Record / DTO, declared</td><td><code>select new lm.declared.DeclaredQueries$SkuPrice(…)</code></td><td>only the listed expressions</td><td>no</td></tr>
+        <tr><td>Dynamic</td><td><code>&lt;T&gt; List&lt;T&gt; findBy…(…, Class&lt;T&gt; type)</code></td><td>depends on the class passed at the call</td><td>only if you pass the entity</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Two details from the output: the open projection's SQL selects <code>id, active, category, name, price_in_cents, sku</code> even though the label uses two of them, so it saves nothing over loading the entity. And the declared constructor expression names the record by its <strong>binary name</strong>, <code>DeclaredQueries$SkuPrice</code>, because it is nested; a top-level record would be <code>lm.declared.SkuPrice</code>. Spring Data's <em>derived</em> DTO projection needed no such string — it inspected the record's constructor itself.</p>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a projection onto what its SQL selects, or click one then click the other
+    </div>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Projection kinds to place">
+        <button type="button" class="lm-chip" data-chip="closed">Closed interface projection</button>
+        <button type="button" class="lm-chip" data-chip="open">Open interface with <code>@Value</code> SpEL</button>
+        <button type="button" class="lm-chip" data-chip="dto">Record via <code>select new …</code></button>
+        <button type="button" class="lm-chip" data-chip="entity">The entity itself</button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="SQL shapes">
+        <button type="button" class="lm-slot" data-slot="closed" data-label="only the getters' columns, nothing managed"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">only the getters' columns, nothing managed</span></button>
+        <button type="button" class="lm-slot" data-slot="open" data-label="every column, wrapped in a proxy for SpEL"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">every column, wrapped in a proxy for SpEL</span></button>
+        <button type="button" class="lm-slot" data-slot="dto" data-label="only the constructor arguments, a plain object"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">only the constructor arguments, a plain object</span></button>
+        <button type="button" class="lm-slot" data-slot="entity" data-label="every column, managed and dirty-checked"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">every column, managed and dirty-checked</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. The practical rule: for a read model, use a closed interface or a record; reach for an open projection only when the computed value needs data you would have loaded anyway; load the entity only when you intend to change it.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3"><code>@Modifying</code>: one statement, and a stale persistence context</h3>
+
+  <p>An <code>update</code> or <code>delete</code> in JPQL is a <strong>bulk operation</strong>: Hibernate turns it into one SQL statement (<code>update product p1_0 set price_in_cents=(p1_0.price_in_cents+cast(? as integer)) where p1_0.category=?</code>) and the database changes every matching row. The persistence context is not consulted and not updated (JPA §6). The output shows the consequence exactly:</p>
+
+  <ul class="max-w-prose">
+    <li><strong>Without <code>clearAutomatically</code>,</strong> <code>BOLT-7</code> was loaded at 80, the update raised it to 90 in the database, and the second <code>findById</code> returned the <em>same instance</em> from the first-level cache — no <code>select</code> was emitted for it — still saying 80. Only after the transaction ended did a fresh read say 90. Any business logic after the update in that transaction worked on wrong numbers, and had the code then modified that entity, the flush would have written the stale price back over the update.</li>
+    <li><strong>With <code>clearAutomatically = true</code>,</strong> Spring Data calls <code>EntityManager.clear()</code> after the update. The next <code>findById</code> emitted a <code>select</code> and got a <em>new</em> instance at 100, while the old reference still said 90. Clearing detaches everything, so unflushed changes to other entities would be lost — pair it with <code>flushAutomatically = true</code> when the transaction has pending writes.</li>
+    <li><strong>The delete</strong> is one <code>delete from product p1_0 where p1_0.active=false</code>: no select, no cascades, no <code>@PreRemove</code>. That is the point of it, and also the risk.</li>
+  </ul>
+
+  <p>A <code>@Modifying</code> method must run inside a writable transaction. A declared query method gets none of its own, so it needs <code>@Transactional</code> on the method (as here) or a caller's transaction (§5). Without one you get <code>TransactionRequiredException: Executing an update/delete query</code>.</p>
+
+  <h3 class="mt-8 mb-3">Choosing the form</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Choosing a query form">
+      <button type="button" class="lm-tab" role="tab" id="tab-declared-queries-when" aria-controls="panel-declared-queries-when" aria-selected="true" tabindex="0">Derive or declare</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-declared-queries-native" aria-controls="panel-declared-queries-native" aria-selected="false" tabindex="-1">JPQL or native</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-declared-queries-stream" aria-controls="panel-declared-queries-stream" aria-selected="false" tabindex="-1">Streams and hints</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-declared-queries-when" aria-labelledby="tab-declared-queries-when" tabindex="0">
+      <ul class="mb-0">
+        <li><strong>Derive</strong> when the name reads as a sentence: one or two conditions, a sort, maybe a limit.</li>
+        <li><strong>Declare</strong> when you need parentheses, aggregates, <code>group by</code>, <code>case</code>, a fetch join, a subquery, or a constructor expression — or when the derived name would pass forty characters.</li>
+        <li><strong>Name the method for its purpose</strong> once you declare: <code>affordable(category, max)</code> says why the query exists; <code>findByCategoryAndPriceInCentsLessThanEqualOrderBySku</code> only says how.</li>
+        <li><strong>A <code>Specification</code></strong> (§9) is the answer when the conditions are chosen at run time from a filter form.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-declared-queries-native" aria-labelledby="tab-declared-queries-native" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">JPQL versus native queries in Spring Data</caption>
+          <thead><tr><th scope="col"></th><th scope="col">JPQL <code>@Query</code></th><th scope="col"><code>nativeQuery = true</code></th></tr></thead>
+          <tbody>
+            <tr><td>Validated at startup</td><td>yes, against the entity model</td><td>no — errors appear on first call</td></tr>
+            <tr><td>Portable across databases</td><td>yes</td><td>no</td></tr>
+            <tr><td><code>Sort</code> parameter</td><td>appended safely</td><td>appended as raw SQL column names, limited</td></tr>
+            <tr><td><code>Page</code></td><td>count derived if absent</td><td><code>countQuery</code> effectively required</td></tr>
+            <tr><td><code>@EntityGraph</code></td><td>applies</td><td>ignored</td></tr>
+            <tr><td>Window functions, CTEs, JSON operators, hints</td><td>some (Hibernate 6+ HQL has many)</td><td>all of them</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0">Hibernate 6 and 7's HQL covers window functions, CTEs and set operations, so "I need native for this" is less often true than it used to be. Check the HQL guide before giving up portability.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-declared-queries-stream" aria-labelledby="tab-declared-queries-stream" tabindex="0" hidden>
+      <p>A <code>Stream&lt;T&gt;</code> return holds a JDBC cursor open. It needs a surrounding transaction and must be closed, or the connection leaks back to the pool late or never:</p>
+      <pre data-code data-lang="java" data-nobar>
+@Transactional(readOnly = true)
+public long exportActive(Writer out) {
+    try (Stream&lt;SkuAndPrice&gt; rows = repo.streamAllActive()) {     // @QueryHints fetch size below
+        return rows.peek(r -&gt; write(out, r)).count();
+    }
+}
+
+@QueryHints(@QueryHint(name = org.hibernate.jpa.HibernateHints.HINT_FETCH_SIZE, value = "500"))
+@Query("select p.sku as sku, p.priceInCents as priceInCents from Product p where p.active = true")
+Stream&lt;SkuAndPrice&gt; streamAllActive();
+      </pre>
+      <p class="mb-0"><code>@QueryHints</code> passes JPA or Hibernate hints straight through: <code>HINT_FETCH_SIZE</code> for streaming, <code>HINT_READ_ONLY</code> to skip snapshots for entities you will not change, <code>jakarta.persistence.query.timeout</code> for a statement deadline.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Declared-query gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A bulk update leaves managed entities stale</strong> in the same transaction, as the output shows. Use <code>clearAutomatically</code> (with <code>flushAutomatically</code> if there are pending changes), or run the update in its own transaction.</li>
+        <li><strong>Bulk operations skip <code>@Version</code>, callbacks, cascades and the second-level cache.</strong> An optimistic lock is not checked; increment the version column in the JPQL yourself (<code>set p.version = p.version + 1</code>) if other writers rely on it.</li>
+        <li><strong>A declared <code>like</code> does not escape.</strong> <code>escape ''</code> in the output: user input containing <code>%</code> or <code>_</code> becomes a wildcard.</li>
+        <li><strong>An open projection is not a projection.</strong> It loads the entity. Use it for convenience, never for performance.</li>
+        <li><strong><code>select new</code> needs the fully qualified (binary) class name.</strong> A nested record is <code>Outer$Record</code>; a typo fails at startup with a class-resolution error.</li>
+        <li><strong>A native <code>Page</code> without <code>countQuery</code></strong> makes Spring Data guess a count by rewriting your SQL, which fails or lies on anything non-trivial.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-declared-queries-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Inside one transaction: <code>p = repo.findById(1L)</code> (price 80), then a <code>@Modifying</code> query without <code>clearAutomatically</code> adds 10 to every fastener's price, then <code>repo.findById(1L).priceInCents</code>. What does the last read return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-declared-queries-1"><span>90, because <code>findById</code> always queries the database <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-declared-queries-1"><span>80, the cached instance — the bulk update never touched the persistence context <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-declared-queries-1"><span>90, because Hibernate refreshes managed entities affected by a bulk update <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-declared-queries-1"><span>It throws, because a managed entity changed underneath the context <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The output shows <code>managed copy says = 80 (same instance: true)</code> and no <code>select</code> before it: the second <code>findById</code> was served by the first-level cache.</p>
+        <p class="mb-0"><strong>A</strong> is wrong: <code>findById</code> checks the persistence context first. <strong>C</strong> describes behaviour Hibernate does not have — bulk operations bypass the context entirely, which is why <code>clearAutomatically</code> exists. <strong>D</strong>: nothing detects the divergence; the stale value is silently used.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-declared-queries-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A report needs only <code>sku</code> and <code>price</code> from a wide table. Which return type keeps the selected columns to those two?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-declared-queries-2"><span>An interface with <code>@Value("#{target.sku + ' ' + target.priceInCents}") String getLine()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-declared-queries-2"><span><code>List&lt;Product&gt;</code> with <code>@QueryHints</code> read-only <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-declared-queries-2"><span>An interface with <code>String getSku(); int getPriceInCents();</code>, or a record with those two components <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-declared-queries-2"><span>Any of them — Hibernate removes unused columns from the select <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The closed interface and the record both produced <code>select p1_0.sku,p1_0.price_in_cents</code> in the output.</p>
+        <p class="mb-0"><strong>A</strong> is an open projection: its SQL selected every column, because SpEL may touch any property of <code>target</code>. <strong>B</strong> skips the dirty-check snapshot but still selects and hydrates whole entities. <strong>D</strong> is false; nothing analyses which getters you call.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-declared-queries-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which are true of <code>@Modifying @Query("delete from Product p where p.active = false")</code>? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>It runs as one <code>delete</code> statement, with no <code>select</code> first <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It fires <code>@PreRemove</code> on each deleted product <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>It cascades to the products' order lines because the mapping says <code>cascade = REMOVE</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Called with no transaction, it fails with <code>TransactionRequiredException</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> The output's single <code>delete from product p1_0 where p1_0.active=false</code> is the bulk statement; JPA requires a transaction for any bulk update or delete.</p>
+        <p class="mb-0"><strong>B</strong> and <strong>C</strong> describe entity-level removal — what §3's <em>derived</em> <code>deleteBySku</code> did by loading first. A bulk JPQL delete never loads the entities, so there is nothing to call back on and nothing to cascade from; child rows with a foreign key make it fail instead.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="declared-queries"> Mark this section complete
+  </label>
+</section>

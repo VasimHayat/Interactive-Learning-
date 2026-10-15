@@ -1,0 +1,373 @@
+<section class="lm-section" id="concurrent-collections" data-title="Atomics and concurrent collections" data-num="4">
+  <p class="lm-eyebrow">Section 4</p>
+  <h2 class="mb-4">Atomics and concurrent collections</h2>
+
+  <p>A lock is a pessimist: it assumes a conflict and makes everyone else wait. For a single-word update — a counter, a reference, a stock level — there is a cheaper optimist: do the computation without any lock, then ask the CPU to install the result <em>only if nobody else changed the value meanwhile</em>, and retry if someone did. That instruction is <strong>compare-and-swap</strong> (CAS), every modern processor has it, and <code>java.util.concurrent</code> is built on it from the atomics up to <code>ConcurrentHashMap</code>.</p>
+
+  <pre data-code data-lang="java" data-nobar>
+// what AtomicInteger.compareAndSet(expected, update) does, as one indivisible hardware step:
+if (memory[address] == expected) { memory[address] = update; return true; }
+else                             { return false; }
+  </pre>
+
+  <p>Because the compare and the swap are one instruction, two threads that both read 500, both compute 499, and both try to CAS — one succeeds and one is told <em>no</em>. The loser re-reads (499), recomputes (498), tries again. Nobody blocked, no lock was held, and no update was lost. Under light contention this beats a lock comfortably; under heavy contention the retries pile up, which is where <code>LongAdder</code> comes in.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: counting and reserving without a lock</h3>
+
+  <pre data-code data-lang="java" data-file="Atomics.java" data-verify="Atomics" data-hi="15,16,17,18,19,20,21">
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
+
+public class Atomics {
+
+    /* A bounded decrement with compare-and-swap: read, compute, try to swap,
+       and retry if another thread moved the value first. No lock, and the
+       invariant (never below zero) still holds. */
+    static final class Stock {
+        private final AtomicInteger units;
+        Stock(int units) { this.units = new AtomicInteger(units); }
+
+        boolean reserve(int qty) {
+            while (true) {
+                int current = units.get();
+                if (current < qty) return false;            // refuse: nothing to swap
+                if (units.compareAndSet(current, current - qty)) return true;
+                // CAS failed: someone else changed units between get and CAS — loop
+            }
+        }
+        int units() { return units.get(); }
+    }
+
+    record Price(String sku, int cents) { }
+
+    static void runAll(int threads, Runnable body) throws InterruptedException {
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(threads);
+        for (int t = 0; t < threads; t++) {
+            new Thread(() -> {
+                try { start.await(); body.run(); } catch (InterruptedException e) { }
+                done.countDown();
+            }).start();
+        }
+        start.countDown();
+        done.await();
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        // ── incrementAndGet is one indivisible operation ────────────────────
+        AtomicInteger picks = new AtomicInteger();
+        runAll(8, () -> { for (int i = 0; i < 100_000; i++) picks.incrementAndGet(); });
+        System.out.println("picks            = " + picks.get() + " (expected 800000)");
+
+        // ── CAS loop: 8 threads fight over 600 units, 100 attempts each ─────
+        Stock stock = new Stock(600);
+        AtomicInteger reserved = new AtomicInteger(), refused = new AtomicInteger();
+        runAll(8, () -> {
+            for (int i = 0; i < 100; i++) {
+                if (stock.reserve(1)) reserved.incrementAndGet(); else refused.incrementAndGet();
+            }
+        });
+        System.out.println("reserved         = " + reserved.get());
+        System.out.println("refused          = " + refused.get());
+        System.out.println("units left       = " + stock.units());
+        System.out.println("never negative   = " + (stock.units() >= 0 && reserved.get() + stock.units() == 600));
+
+        // ── LongAdder: the counter for write-heavy contention ────────────────
+        LongAdder cents = new LongAdder();
+        runAll(8, () -> { for (int i = 0; i < 10_000; i++) cents.add(25); });
+        System.out.println("revenue (cents)  = " + cents.sum());
+
+        // ── AtomicReference: swap an immutable record atomically ────────────
+        AtomicReference<Price> price = new AtomicReference<>(new Price("BOLT-7", 80));
+        runAll(4, () -> {
+            for (int i = 0; i < 1_000; i++) {
+                Price old, updated;
+                do {
+                    old = price.get();
+                    updated = new Price(old.sku(), old.cents() + 1);
+                } while (!price.compareAndSet(old, updated));
+            }
+        });
+        System.out.println("price after 4000 = " + price.get());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Atomics">
+picks            = 800000 (expected 800000)
+reserved         = 600
+refused          = 200
+units left       = 0
+never negative   = true
+revenue (cents)  = 2000000
+price after 4000 = Price[sku=BOLT-7, cents=4080]
+  </pre>
+
+  <p>The <code>reserve</code> loop is the pattern to memorise: <em>read, decide, CAS, retry</em>. The refusal happens <em>before</em> the CAS, on the value you just read, and the CAS guarantees that the value you decided on is the value you are decrementing. Note that the result is deterministic even though the interleaving is not: 800 attempts against 600 units must produce exactly 600 reservations, because the invariant is enforced on every path. The <code>AtomicReference</code> variant shows the same loop on an object: because <code>Price</code> is an immutable record, "update" means "build a new one and swap the reference", and a torn read is impossible.</p>
+
+  <h3 class="mt-8 mb-3">Watch a CAS loop</h3>
+
+  <div class="lm-card" data-sandbox="cas-loop">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>
+      Contending threads retrying <code>compareAndSet</code> <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Contending threads <span class="lm-readout" data-sb-nout>4</span></span>
+        <input type="range" data-sb-n min="1" max="8" value="4" step="1">
+      </label>
+      <div class="lm-field">
+        <span>&nbsp;</span>
+        <div class="flex gap-2">
+          <button type="button" class="lm-btn lm-btn--primary" data-sb-step>Step</button>
+          <button type="button" class="lm-btn" data-sb-reset>Reset</button>
+        </div>
+      </div>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>Every round, all the threads that are still running read the same current value and compute the same candidate, exactly one CAS wins, and the rest discover their <code>expected</code> is stale and go round again. With <em>n</em> contenders, finishing the whole batch costs about <em>n(n+1)/2</em> CAS attempts for <em>n</em> successful updates — quadratic wasted work. That is the contention cost of optimism, and the reason the next two tools exist.</p>
+
+  <h3 class="mt-8 mb-3">LongAdder, and the ABA problem</h3>
+
+  <p><strong><code>LongAdder</code></strong> is a counter that notices contention and splits itself into per-thread cells; <code>sum()</code> adds them up on read. Writes stop colliding, so eight threads incrementing see almost no retries, at the cost of a <code>sum()</code> that is a snapshot rather than an atomic value and cannot be used for a CAS. Use it for statistics and metrics — things you increment constantly and read occasionally. Use <code>AtomicLong</code> when you need <code>compareAndSet</code> or an exact read-modify-write result.</p>
+
+  <p><strong>ABA</strong> is the one blind spot of CAS. Thread 1 reads value <em>A</em> and gets descheduled. Thread 2 changes <em>A</em> to <em>B</em> and back to <em>A</em>. Thread 1 wakes, its CAS sees <em>A</em>, and succeeds — even though the world changed underneath it. For a plain counter that is harmless. For a reference to the head of a lock-free list it is a corruption, because the node that looks the same may now have a different <code>next</code>. <code>AtomicStampedReference</code> pairs the reference with a version counter so that an <em>A</em> that went away and came back no longer compares equal. In practice you will rarely write such a structure; you need to recognise the hazard when reading one.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: the concurrent collections</h3>
+
+  <p>Each collection in <code>java.util.concurrent</code> makes a specific promise, and the shape of the API tells you what it is. <code>ConcurrentHashMap.merge</code> is atomic <em>for that key</em>, which is what makes it safe to count from eight threads without a lock. <code>computeIfAbsent</code> is atomic too, which is what makes "create the list if missing, then add" safe. A <code>CopyOnWriteArrayList</code> lets you iterate while others write, by copying the array on every write. An <code>ArrayBlockingQueue</code> blocks a producer when full and a consumer when empty. And a <code>ConcurrentSkipListMap</code> is the sorted map you reach for when a <code>TreeMap</code> would need a lock.</p>
+
+  <pre data-code data-lang="java" data-file="ConcurrentMaps.java" data-verify="ConcurrentMaps" data-hi="36,47,56">
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+
+public class ConcurrentMaps {
+
+    enum Category { FASTENER, STRUCTURAL, MOTION }
+    record Product(String sku, Category category) { }
+
+    static final List<Product> CATALOGUE = List.of(
+        new Product("BOLT-7", Category.FASTENER), new Product("NUT-3", Category.FASTENER),
+        new Product("PIN-2", Category.FASTENER),  new Product("GIRD-1", Category.STRUCTURAL),
+        new Product("ROD-4", Category.STRUCTURAL), new Product("CAM-9", Category.MOTION));
+
+    static void runAll(int threads, Runnable body) throws InterruptedException {
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(threads);
+        for (int t = 0; t < threads; t++) {
+            new Thread(() -> { try { start.await(); body.run(); } catch (InterruptedException e) { } done.countDown(); }).start();
+        }
+        start.countDown();
+        done.await();
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        // ── merge: an atomic read-modify-write per key ──────────────────────
+        ConcurrentHashMap<String, Integer> picks = new ConcurrentHashMap<>();
+        runAll(8, () -> {
+            for (int i = 0; i < 1_000; i++) {
+                Product p = CATALOGUE.get(i % CATALOGUE.size());
+                picks.merge(p.sku(), 1, Integer::sum);           // never lost, never double-counted
+            }
+        });
+        System.out.println("picks by sku       = " + new TreeMap<>(picks));
+        int total = picks.values().stream().mapToInt(Integer::intValue).sum();
+        System.out.println("total picks        = " + total + " (expected 8000)");
+
+        // ── computeIfAbsent: build a multimap without a race on the list ────
+        ConcurrentHashMap<Category, CopyOnWriteArrayList<String>> byCategory = new ConcurrentHashMap<>();
+        runAll(4, () -> {
+            for (Product p : CATALOGUE) {
+                byCategory.computeIfAbsent(p.category(), k -> new CopyOnWriteArrayList<>()).addIfAbsent(p.sku());
+            }
+        });
+        System.out.println("by category        = " + new TreeMap<>(byCategory));
+
+        // ── compute: a conditional decrement that cannot go negative ────────
+        ConcurrentHashMap<String, Integer> onHand = new ConcurrentHashMap<>(Map.of("BOLT-7", 500));
+        runAll(8, () -> {
+            for (int i = 0; i < 100; i++) {
+                onHand.compute("BOLT-7", (k, v) -> v != null && v > 0 ? v - 1 : v);   // 800 attempts, floor at 0
+            }
+        });
+        System.out.println("BOLT-7 on hand     = " + onHand.get("BOLT-7") + " (800 attempts against 500)");
+
+        // ── CopyOnWriteArrayList: iterate a snapshot while others write ─────
+        CopyOnWriteArrayList<String> listeners = new CopyOnWriteArrayList<>(List.of("audit", "metrics"));
+        for (String l : listeners) {                       // the iterator holds the old array ...
+            if (l.equals("audit")) listeners.add("alerts");  // ... so this write does not throw
+        }
+        System.out.println("listeners          = " + listeners);
+
+        // ── ArrayBlockingQueue: hand-off with a poison pill ─────────────────
+        BlockingQueue<Integer> queue = new ArrayBlockingQueue<>(8);
+        int n = 2_000;
+        long[] consumed = new long[1];
+        Thread producer = new Thread(() -> {
+            try { for (int i = 1; i <= n; i++) queue.put(i); queue.put(-1); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        Thread consumer = new Thread(() -> {
+            try { for (int v; (v = queue.take()) != -1; ) consumed[0] += v; }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        producer.start(); consumer.start();
+        producer.join(10_000); consumer.join(10_000);
+        System.out.println("consumed sum       = " + consumed[0] + " (expected " + ((long) n * (n + 1) / 2) + ")");
+        System.out.println("queue drained      = " + queue.isEmpty());
+
+        // ── ConcurrentSkipListMap: concurrent AND sorted ────────────────────
+        ConcurrentSkipListMap<String, Integer> sorted = new ConcurrentSkipListMap<>();
+        runAll(4, () -> { for (Product p : CATALOGUE) sorted.merge(p.sku(), 1, Integer::sum); });
+        System.out.println("skip list          = " + sorted);
+        System.out.println("first / last key   = " + sorted.firstKey() + " / " + sorted.lastKey());
+
+        // ── nulls are rejected at runtime, not by the compiler ──────────────
+        try { picks.put("HUB-8", null); }
+        catch (NullPointerException e) { System.out.println("null value         = NullPointerException"); }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ConcurrentMaps">
+picks by sku       = {BOLT-7=1336, CAM-9=1328, GIRD-1=1336, NUT-3=1336, PIN-2=1336, ROD-4=1328}
+total picks        = 8000 (expected 8000)
+by category        = {FASTENER=[BOLT-7, NUT-3, PIN-2], STRUCTURAL=[GIRD-1, ROD-4], MOTION=[CAM-9]}
+BOLT-7 on hand     = 0 (800 attempts against 500)
+listeners          = [audit, metrics, alerts]
+consumed sum       = 2001000 (expected 2001000)
+queue drained      = true
+skip list          = {BOLT-7=4, CAM-9=4, GIRD-1=4, NUT-3=4, PIN-2=4, ROD-4=4}
+first / last key   = BOLT-7 / ROD-4
+null value         = NullPointerException
+  </pre>
+
+  <p>Every printed line is a fact that holds on any machine — totals after every thread has joined, maps copied into a <code>TreeMap</code> for a stable order. The <code>CopyOnWriteArrayList</code> loop is the one that would have thrown <code>ConcurrentModificationException</code> on an <code>ArrayList</code> (Fundamentals §12); here the iterator walks the array that existed when it was created, and the write builds a new one. And the last line is a trap that compiles cleanly: <code>ConcurrentHashMap</code> rejects <code>null</code> keys and values at runtime, because in a concurrent map "<code>get</code> returned null" must mean <em>absent</em> unambiguously — there is no safe moment to call <code>containsKey</code> afterwards.</p>
+
+  <h3 class="mt-8 mb-3">Inside ConcurrentHashMap</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="ConcurrentHashMap internals">
+      <button type="button" class="lm-tab" role="tab" id="tab-concurrent-collections-bins" aria-controls="panel-concurrent-collections-bins" aria-selected="true" tabindex="0">Per-bin locking</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-concurrent-collections-atomic" aria-controls="panel-concurrent-collections-atomic" aria-selected="false" tabindex="-1">What is atomic</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-concurrent-collections-reads" aria-controls="panel-concurrent-collections-reads" aria-selected="false" tabindex="-1">Reads, size and iteration</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-concurrent-collections-bins" aria-labelledby="tab-concurrent-collections-bins" tabindex="0">
+      <p>The table is the same array of bins as <code>HashMap</code> (Intermediate §11). A write to an <em>empty</em> bin is a single CAS on the array slot — no lock at all. A write to an occupied bin synchronizes on that bin's first node, so two writers collide only if their keys hash to the same bin. With 16 bins that is frequent; with 65,536 it almost never happens. Resizing is cooperative: threads that arrive during a resize help move bins instead of waiting.</p>
+      <p class="mb-0">The older design, <strong>lock striping</strong> (Java 5–7's 16 "segments"), is where the mental model "a concurrent map is N small synchronized maps" comes from. It is still a useful picture, and still the right technique when you build your own.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-concurrent-collections-atomic" aria-labelledby="tab-concurrent-collections-atomic" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong>Atomic per key:</strong> <code>put</code>, <code>putIfAbsent</code>, <code>remove(k, v)</code>, <code>replace</code>, <code>compute</code>, <code>computeIfAbsent</code>, <code>computeIfPresent</code>, <code>merge</code>. The remapping function runs <em>while the bin is locked</em>, so it must be short and must not touch the same map — doing so throws <code>IllegalStateException: Recursive update</code>, or deadlocks on older versions.</li>
+        <li><strong>Not atomic across keys:</strong> moving stock from BOLT-7 to NUT-3 is two operations, and a reader in between sees the units in neither place. For a cross-key invariant you are back to a lock (§3) or a transaction.</li>
+        <li><strong>Not atomic at all:</strong> <code>if (!map.containsKey(k)) map.put(k, v)</code> — a check-then-act that another thread can interleave. The fix is the single-call <code>putIfAbsent</code>. The same bug on <code>Collections.synchronizedMap</code> is the classic one: every method is synchronized, and every <em>pair</em> of methods is a race.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-concurrent-collections-reads" aria-labelledby="tab-concurrent-collections-reads" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong>Reads never block.</strong> <code>get</code> takes no lock; it relies on <code>volatile</code> node fields (§2) to see a completed write. A read that races with a write sees either the old value or the new one, never a torn mixture.</li>
+        <li><strong><code>size()</code> is an estimate.</strong> It is computed from counter cells (the <code>LongAdder</code> trick) and may be stale by the time you read it. Use <code>mappingCount()</code>, which returns a <code>long</code>, and never write <code>if (map.size() == 0)</code> as a synchronisation device.</li>
+        <li><strong>Iterators are weakly consistent.</strong> They never throw <code>ConcurrentModificationException</code>, they reflect the state at some point since creation, and they may or may not show a write made during iteration. That is the right contract for a map being modified under you; it is also why you cannot <em>count on</em> an iteration seeing a concurrent insert.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Which collection?</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Concurrent collections and when to use each</caption>
+      <thead><tr><th scope="col">You need</th><th scope="col">Use</th><th scope="col">The trade-off</th></tr></thead>
+      <tbody>
+        <tr><td>A shared map, mostly reads, some writes</td><td><code>ConcurrentHashMap</code></td><td>no nulls; per-key atomicity only; <code>size()</code> approximate</td></tr>
+        <tr><td>A shared sorted map or set</td><td><code>ConcurrentSkipListMap</code> / <code>Set</code></td><td>O(log n) like <code>TreeMap</code>, more memory per entry</td></tr>
+        <tr><td>A list of listeners: read on every event, changed rarely</td><td><code>CopyOnWriteArrayList</code></td><td>every write copies the whole array — O(n) per add</td></tr>
+        <tr><td>Producer–consumer hand-off, bounded</td><td><code>ArrayBlockingQueue</code></td><td>fixed capacity; one lock for both ends</td></tr>
+        <tr><td>Producer–consumer, optionally bounded, higher throughput</td><td><code>LinkedBlockingQueue</code></td><td>separate locks per end; unbounded by default — a memory risk (§5)</td></tr>
+        <tr><td>Tasks ordered by priority or due time</td><td><code>PriorityBlockingQueue</code> / <code>DelayQueue</code></td><td>unbounded; head is the smallest, not the oldest</td></tr>
+        <tr><td>Direct hand-off with no buffering</td><td><code>SynchronousQueue</code></td><td><code>put</code> blocks until a <code>take</code> arrives — the queue behind cached thread pools</td></tr>
+        <tr><td>A non-blocking FIFO with no capacity bound</td><td><code>ConcurrentLinkedQueue</code></td><td>lock-free CAS; <code>size()</code> is O(n) and approximate</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Concurrent-collection gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A thread-safe collection does not make your code thread-safe.</strong> Every compound action — check-then-put, read-then-update, "get the list then add to it" — is still a race unless you use the single atomic method that does both.</li>
+        <li><strong>A mutable value inside a concurrent map is unprotected.</strong> <code>map.get(k).add(x)</code> on an <code>ArrayList</code> value races just as it would anywhere. Either the value is itself concurrent (as the <code>CopyOnWriteArrayList</code> above), or you update it inside <code>compute</code>.</li>
+        <li><strong><code>computeIfAbsent</code> with an expensive function</strong> runs it while the bin is locked, blocking other writers to that bin. Compute outside, then <code>putIfAbsent</code>, if the work is slow.</li>
+        <li><strong><code>CopyOnWriteArrayList</code> as a work queue</strong> is a classic performance bug: every add copies the array, so N adds cost O(N²). It is for rarely-changing lists only.</li>
+        <li><strong>Blocking queues and interruption.</strong> <code>put</code>/<code>take</code> throw <code>InterruptedException</code>; swallowing it and looping makes the thread uncancellable. Restore the flag or propagate.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-concurrent-collections-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Eight threads each run <code>if (!stock.containsKey(sku)) stock.put(sku, 100);</code> on a <code>ConcurrentHashMap</code>. What can go wrong?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-concurrent-collections-1"><span>Nothing — every method of a concurrent map is thread-safe <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-concurrent-collections-1"><span>Two threads can both see the key absent and both <code>put</code>; the second silently overwrites — use <code>putIfAbsent</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-concurrent-collections-1"><span>It throws <code>ConcurrentModificationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-concurrent-collections-1"><span>The map may end up with two entries for the same key <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>containsKey</code> and <code>put</code> are each atomic; the <em>pair</em> is not. Here the overwrite is harmless (same value), but with <code>put(sku, new Stock())</code> one thread's object is lost and any reference it handed out points at an orphan. <code>putIfAbsent</code> and <code>computeIfAbsent</code> make the check and the write one atomic step.</p>
+        <p class="mb-0"><strong>A</strong> is the misconception this section exists to remove. <strong>C</strong> — concurrent maps never throw it. <strong>D</strong> — the map's own invariant (one entry per key) is always maintained; the race is in <em>your</em> logic, not its structure.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-concurrent-collections-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A metrics counter is incremented by 64 threads thousands of times per second and read once a minute. Which type fits best?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-concurrent-collections-2"><span><code>AtomicLong</code> — <code>incrementAndGet</code> is lock-free <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-concurrent-collections-2"><span><code>volatile long</code> with <code>++</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-concurrent-collections-2"><span><code>LongAdder</code> — writes spread over cells, <code>sum()</code> on read <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-concurrent-collections-2"><span>A <code>synchronized</code> counter — simplest is best <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Write-heavy, read-rare, no need for an exact atomic read-modify-write: that is the <code>LongAdder</code> profile exactly. Sixty-four threads hitting one <code>AtomicLong</code> would spend most of their time retrying a failed CAS on the same cache line.</p>
+        <p class="mb-0"><strong>A</strong> is correct but slow under this contention. <strong>B</strong> is wrong, not merely slow: <code>volatile</code> makes the read and the write each visible, but <code>++</code> is still read-add-write and loses updates (§2). <strong>D</strong> works and serialises 64 threads through one monitor.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-concurrent-collections-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about <code>ConcurrentHashMap</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Its iterators never throw <code>ConcurrentModificationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It accepts <code>null</code> values, like <code>HashMap</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>merge</code> on two different keys from one thread is a single atomic operation <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>The function passed to <code>compute</code> runs while that key's bin is locked <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Weakly consistent iteration is the contract; and the remapping function executing under the bin lock is why it must be fast and must not re-enter the map.</p>
+        <p class="mb-0"><strong>B</strong> is false — <code>null</code> is rejected with <code>NullPointerException</code>, because <code>get</code> returning <code>null</code> must unambiguously mean absent. <strong>C</strong> is false — atomicity is per key; two <code>merge</code> calls are two independent operations with a visible gap between them.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="concurrent-collections"> Mark this section complete
+  </label>
+</section>

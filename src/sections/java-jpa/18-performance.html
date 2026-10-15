@@ -1,0 +1,444 @@
+<section class="lm-section" id="performance" data-title="Batching, projections and caching" data-num="9">
+  <p class="lm-eyebrow">Section 9</p>
+  <h2 class="mb-4">Batching, projections and caching</h2>
+
+  <p>Everything Hibernate does ends as a round trip to the database, and round trips are what you pay for. A persistence layer that is "slow" is almost never slow because Hibernate is slow; it is slow because it makes ten thousand trips where twenty would do, hydrates ten thousand entities to read two columns, or drags a persistence context the size of the table through a loop. This section is about seeing those trips &mdash; with <code>Statistics</code>, not guesswork &mdash; and removing them.</p>
+
+  <p>The tool matters, because <code>show_sql</code> misleads here: it prints one line per <em>logical</em> statement, so a hundred batched inserts and a hundred unbatched ones look identical on the console. Only the statistics tell you how many statements were actually prepared and sent.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: counting the trips</h3>
+
+  <p>Three phases on one in-memory database. Phases A and B insert a hundred products each with the SQL echo <em>off</em> and the statistics on, so the numbers are the whole story; phase C turns the echo back on for the read paths, where the SQL itself is the lesson.</p>
+
+  <pre data-code data-lang="java" data-file="Batching.java" data-verify="Batching" data-hi="16,62,63,96,126,133,142,151">
+import jakarta.persistence.*;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.StatelessSession;
+import org.hibernate.stat.Statistics;
+
+import java.util.List;
+
+public class Batching {
+
+    /* Phase A: IDENTITY ids — the database assigns the id when the row is inserted,
+       so Hibernate must execute every INSERT immediately to learn it. */
+    @Entity(name = "IdProduct")
+    @Table(name = "id_product")
+    public static class IdProduct {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;
+        @Column(nullable = false, unique = true, length = 16) private String sku;
+        private int priceInCents;
+        protected IdProduct() {}
+        IdProduct(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+    }
+
+    /* Phase B: SEQUENCE ids — the id is known before the INSERT, so inserts can be
+       queued and sent in batches. */
+    @Entity(name = "SeqProduct")
+    @Table(name = "seq_product")
+    public static class SeqProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+        @Column(nullable = false, unique = true, length = 16) private String sku;
+        private int priceInCents;
+        protected SeqProduct() {}
+        SeqProduct(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+    }
+
+    /* Phase C: the read paths, on a tiny table, with the SQL echoed. */
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+        @Column(nullable = false, unique = true, length = 16) private String sku;
+        private int priceInCents;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+        void setPriceInCents(int p) { this.priceInCents = p; }
+        @Override public String toString() { return sku + "=" + priceInCents + "c"; }
+    }
+
+    /* A projection: no identity, no dirty checking, no persistence context entry. */
+    public record ProductView(String sku, int priceInCents) {}
+
+    static EntityManagerFactory emf(boolean showSql, boolean batching, Class<?>... entities) {
+        var cfg = new PersistenceConfiguration("warehouse")
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Batching;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", String.valueOf(showSql))
+            .property("hibernate.generate_statistics", "true");
+        if (batching) {
+            cfg.property("hibernate.jdbc.batch_size", "20")
+               .property("hibernate.order_inserts", "true")
+               .property("hibernate.order_updates", "true");
+        }
+        for (Class<?> c : entities) cfg.managedClass(c);
+        return cfg.createEntityManagerFactory();
+    }
+
+    static Statistics stats(EntityManagerFactory emf) {
+        return emf.unwrap(SessionFactory.class).getStatistics();
+    }
+
+    public static void main(String[] args) {
+        System.out.println("-- phase A: 100 inserts, IDENTITY ids, batch_size=20 --");
+        try (EntityManagerFactory emf = emf(false, true, IdProduct.class)) {
+            Statistics st = stats(emf);
+            st.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                for (int i = 1; i <= 100; i++) em.persist(new IdProduct("ID-" + i, i));
+                em.getTransaction().commit();
+            }
+            System.out.println("statements prepared = " + st.getPrepareStatementCount());
+            System.out.println("entities inserted   = " + st.getEntityInsertCount());
+        }
+
+        System.out.println("-- phase B: 100 inserts, SEQUENCE ids, batch_size=20, flush+clear every 20 --");
+        try (EntityManagerFactory emf = emf(false, true, SeqProduct.class)) {
+            Statistics st = stats(emf);
+            st.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                for (int i = 1; i <= 100; i++) {
+                    em.persist(new SeqProduct("SEQ-" + i, i));
+                    if (i % 20 == 0) { em.flush(); em.clear(); }   // bound the persistence context
+                }
+                em.getTransaction().commit();
+            }
+            System.out.println("statements prepared = " + st.getPrepareStatementCount());
+            System.out.println("entities inserted   = " + st.getEntityInsertCount());
+        }
+
+        System.out.println("-- phase C: read paths --");
+        try (EntityManagerFactory emf = emf(true, false, Product.class)) {
+            Statistics st = stats(emf);
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(new Product("BOLT-7", 80));
+                em.persist(new Product("NUT-3", 25));
+                em.persist(new Product("CAM-9", 2300));
+                em.getTransaction().commit();
+            }
+
+            System.out.println("- entity query -");
+            st.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                List<Product> all = em.createQuery("select p from Product p order by p.sku", Product.class).getResultList();
+                System.out.println("rows = " + all + ", entities hydrated = " + st.getEntityLoadCount());
+            }
+
+            System.out.println("- DTO projection -");
+            st.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                List<ProductView> views = em.createQuery(
+                        "select p.sku, p.priceInCents from Product p order by p.sku", ProductView.class).getResultList();
+                System.out.println("rows = " + views + ", entities hydrated = " + st.getEntityLoadCount());
+            }
+
+            System.out.println("- read-only session: a change is not written -");
+            st.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                em.unwrap(Session.class).setDefaultReadOnly(true);
+                em.getTransaction().begin();
+                Product bolt = em.createQuery("select p from Product p where p.sku = 'BOLT-7'", Product.class).getSingleResult();
+                bolt.setPriceInCents(999);
+                em.getTransaction().commit();
+            }
+            System.out.println("entity updates = " + st.getEntityUpdateCount());
+
+            System.out.println("- StatelessSession: no persistence context at all -");
+            try (StatelessSession ss = emf.unwrap(SessionFactory.class).openStatelessSession()) {
+                ss.getTransaction().begin();
+                ss.insert(new Product("PIN-2", 15));
+                ss.getTransaction().commit();
+            }
+
+            System.out.println("- bulk update in one statement -");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                int changed = em.createQuery("update Product p set p.priceInCents = p.priceInCents + 5").executeUpdate();
+                em.getTransaction().commit();
+                System.out.println("rows changed = " + changed);
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("after = " + em.createQuery("select p from Product p order by p.sku", Product.class).getResultList());
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Batching">
+-- phase A: 100 inserts, IDENTITY ids, batch_size=20 --
+statements prepared = 100
+entities inserted   = 100
+-- phase B: 100 inserts, SEQUENCE ids, batch_size=20, flush+clear every 20 --
+statements prepared = 8
+entities inserted   = 100
+-- phase C: read paths --
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create table product (priceInCents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: select next value for product_SEQ
+Hibernate: select next value for product_SEQ
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+- entity query -
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 order by p1_0.sku
+rows = [BOLT-7=80c, CAM-9=2300c, NUT-3=25c], entities hydrated = 3
+- DTO projection -
+Hibernate: select p1_0.sku,p1_0.priceInCents from product p1_0 order by p1_0.sku
+rows = [ProductView[sku=BOLT-7, priceInCents=80], ProductView[sku=CAM-9, priceInCents=2300], ProductView[sku=NUT-3, priceInCents=25]], entities hydrated = 0
+- read-only session: a change is not written -
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.sku='BOLT-7'
+entity updates = 0
+- StatelessSession: no persistence context at all -
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+- bulk update in one statement -
+Hibernate: update product p1_0 set priceInCents=(p1_0.priceInCents+5)
+rows changed = 4
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 order by p1_0.sku
+after = [BOLT-7=85c, CAM-9=2305c, NUT-3=30c, PIN-2=20c]
+  </pre>
+
+  <p>Read the two counts first. Phase A prepared <strong>100</strong> statements for 100 rows even though <code>batch_size</code> was set: with <code>IDENTITY</code> the database invents the id during the <code>INSERT</code>, and Hibernate must have an id for every managed entity, so each <code>persist</code> runs immediately and there is never anything to batch. Phase B prepared <strong>8</strong>: three round trips to the sequence (the pooled optimiser fetches a value per block of 50, plus one call to establish its first block) and five batched <code>INSERT</code> executions carrying 20 rows each. Same rows, same table shape, twelve times fewer trips &mdash; and the <code>flush(); clear()</code> every twenty rows means the persistence context never holds more than twenty entities and their snapshots.</p>
+
+  <p>Phase C is about what a read costs <em>after</em> the SQL returns. The entity query hydrated three managed objects &mdash; each with a snapshot for dirty checking, a place in the identity map, and the obligation to be scanned at flush. The projection into <code>ProductView</code> selected only the two columns it needed and hydrated <strong>zero</strong> entities: Hibernate 6 and later build a record straight from the row when you pass the record class as the result type. The read-only session proves the other half: the price was changed to 999 and committed, and <code>entity updates = 0</code> &mdash; no snapshot, no dirty check, no <code>UPDATE</code>. The <code>StatelessSession</code> skips the persistence context entirely (one <code>INSERT</code>, nothing cached, no cascades, no lazy loading), and the bulk <code>update</code> changed four rows in one statement instead of loading four entities to change them one by one.</p>
+
+  <h3 class="mt-8 mb-3">Plan a bulk write</h3>
+
+  <div class="lm-card" data-sandbox="batch-planner">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      How many round trips will this insert cost?
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Rows to insert</span>
+        <select data-sb-rows>
+          <option value="100">100</option><option value="1000">1,000</option><option value="10000" selected>10,000</option><option value="100000">100,000</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Id strategy</span>
+        <select data-sb-id>
+          <option value="identity">IDENTITY</option><option value="sequence" selected>SEQUENCE, allocation 50</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>hibernate.jdbc.batch_size</span>
+        <select data-sb-batch>
+          <option value="0">off</option><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>flush + clear every</span>
+        <select data-sb-flush>
+          <option value="0" selected>never</option><option value="20">20 rows</option><option value="50">50 rows</option><option value="100">100 rows</option><option value="1000">1,000 rows</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The write side: rules that decide the trip count</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Settings that affect batching and what each does</caption>
+      <thead><tr><th scope="col">Lever</th><th scope="col">Effect</th><th scope="col">Watch out</th></tr></thead>
+      <tbody>
+        <tr><td><code>hibernate.jdbc.batch_size</code></td><td>Queues up to N inserts/updates/deletes for the same table and sends them as one JDBC batch at flush.</td><td>Off by default. Pointless with <code>IDENTITY</code> ids.</td></tr>
+        <tr><td><code>hibernate.order_inserts</code> / <code>order_updates</code></td><td>Sorts queued statements by entity type so a batch is not broken every time the loop alternates between <code>Order</code> and <code>OrderLine</code>.</td><td>Without it, interleaved types yield batches of size 1.</td></tr>
+        <tr><td><code>hibernate.jdbc.batch_versioned_data</code></td><td>Allows batching of <code>UPDATE</code>s on <code>@Version</code>ed entities (§7); on by default since 5.x for drivers that report correct update counts.</td><td>An old driver that returns <code>SUCCESS_NO_INFO</code> silently disables optimistic-lock checks in batches.</td></tr>
+        <tr><td><code>SEQUENCE</code> allocation size</td><td>One sequence call per block of ids (50 by default). The id is known before the insert, which is what makes batching possible.</td><td>Ids have gaps after a restart. That is fine; ids are identifiers, not counters.</td></tr>
+        <tr><td><code>flush()</code> + <code>clear()</code></td><td>Sends the queued batch and empties the context, so memory stays flat and each flush scans only the current chunk.</td><td>After <code>clear()</code> every previously loaded entity is detached; keep nothing from before the clear.</td></tr>
+        <tr><td><code>StatelessSession</code></td><td>Direct JDBC-ish operations: <code>insert</code>, <code>update</code>, <code>delete</code>, <code>get</code>. No context, no dirty checking, no cascades, no lazy loading, no first-level cache.</td><td>Callbacks and listeners do not fire. Batches still apply if <code>batch_size</code> is set.</td></tr>
+        <tr><td>Bulk JPQL <code>update</code> / <code>delete</code></td><td>One statement for the whole set. The persistence context is <em>not</em> updated: entities already loaded keep their old values.</td><td>Clear or refresh after a bulk statement if you continue in the same context.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">The read side: fetch what the screen needs</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Read-path techniques">
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-dto" aria-controls="panel-performance-dto" aria-selected="true" tabindex="0">Projections</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-ro" aria-controls="panel-performance-ro" aria-selected="false" tabindex="-1">Read-only</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-page" aria-controls="panel-performance-page" aria-selected="false" tabindex="-1">Paging and fetch size</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-dto" aria-labelledby="tab-performance-dto" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+// 1. a record, instantiated by Hibernate from the selected columns
+record StockRow(String sku, int onHand) {}
+List<StockRow> rows = em.createQuery(
+    "select p.sku, s.onHand from Product p join p.stock s where s.onHand < 10", StockRow.class)
+    .getResultList();
+
+// 2. the JPA-standard spelling, any class with a matching constructor
+List<StockRow> rows2 = em.createQuery(
+    "select new com.acme.StockRow(p.sku, s.onHand) from Product p join p.stock s", StockRow.class)
+    .getResultList();
+
+// 3. untyped columns when the shape is ad hoc
+List<Tuple> t = em.createQuery("select p.sku as sku, count(l) as lines from Product p join p.lines l group by p.sku", Tuple.class)
+    .getResultList();
+long lines = t.get(0).get("lines", Long.class);
+      </pre>
+      <p class="mb-0">A projection is the single biggest read optimisation available: fewer columns over the wire, no entity hydration, no snapshot, no dirty-check scan at flush, and nothing to accidentally lazy-load later. Report screens, lists and exports should almost never load entities.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-ro" aria-labelledby="tab-performance-ro" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// whole session: no snapshots are taken, flush has nothing to compare
+em.unwrap(Session.class).setDefaultReadOnly(true);
+
+// one query: the entities it returns are read-only
+em.createQuery("select o from Order o", Order.class)
+  .setHint("org.hibernate.readOnly", true)
+  .getResultList();
+
+// one entity, after the fact
+em.unwrap(Session.class).setReadOnly(order, true);
+      </pre>
+      <p class="mb-0">Read-only entities are still managed &mdash; identity map, lazy loading, the lot &mdash; they just cannot be dirty. Hibernate skips the snapshot copy on load and the comparison on flush, which for a page that loads a thousand entities to render them is most of the flush cost. Changes you make are silently discarded; that is the contract, not a bug.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-page" aria-labelledby="tab-performance-page" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+List<Order> page = em.createQuery("select o from Order o order by o.placed desc, o.id", Order.class)
+    .setFirstResult(40)        // OFFSET
+    .setMaxResults(20)         // LIMIT — Hibernate renders the dialect's syntax
+    .getResultList();
+
+// streaming a large result instead of materialising it
+try (Stream<Order> s = em.createQuery("select o from Order o", Order.class)
+        .setHint("org.hibernate.fetchSize", 500)
+        .getResultStream()) {
+    s.forEach(this::export);
+}
+      </pre>
+      <p class="mb-0">Always order a paged query by something unique, or pages overlap. Offset paging degrades as the offset grows (the database still walks the skipped rows); keyset paging &mdash; <code>where o.placed &lt; :lastSeen</code> &mdash; does not. <code>fetchSize</code> is a JDBC hint for how many rows the driver pulls per network read; PostgreSQL ignores it unless the connection is in a transaction with auto-commit off.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Caching: what it can and cannot do</h3>
+
+  <p>Hibernate has three caches and they are routinely confused. The <strong>first-level cache</strong> is the persistence context itself (§3): per <code>EntityManager</code>, always on, guarantees one object per row and is the reason the same <code>find</code> twice in one context hits the database once. The <strong>second-level cache</strong> is shared across the whole <code>EntityManagerFactory</code> and caches entity <em>rows by id</em> (and collections by owner id) &mdash; not query results, and not the object graph. The <strong>query cache</strong> caches the <em>ids</em> returned by a particular query with particular parameters, and is invalidated the moment any table the query touches is written.</p>
+
+  <pre data-code data-lang="java" data-nobar>
+// configuration shape only — no cache provider is on this page's class path, so this block is not verified
+.property("hibernate.cache.use_second_level_cache", "true")
+.property("hibernate.cache.region.factory_class", "jcache")       // hibernate-jcache + a provider such as Ehcache or Caffeine
+.property("hibernate.javax.cache.uri", "classpath:ehcache.xml")
+.property("hibernate.cache.use_query_cache", "true")              // only if you also set the hint per query
+
+@Entity @Cacheable
+@org.hibernate.annotations.Cache(usage = CacheConcurrencyStrategy.READ_WRITE)
+public class Product { ... }
+
+@Entity @Immutable @Cacheable
+@org.hibernate.annotations.Cache(usage = CacheConcurrencyStrategy.READ_ONLY)   // the ideal cache citizen
+public class Currency { ... }
+
+em.createQuery("select p from Product p where p.category = :c", Product.class)
+  .setHint("org.hibernate.cacheable", true)                         // opt in, per query
+  .setParameter("c", Category.FASTENER).getResultList();
+  </pre>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">When a second-level cache is a win, and when it is a trap</div>
+      <ul class="mb-0">
+        <li><strong>Win:</strong> reference data read constantly and written rarely &mdash; categories, currencies, tax rates &mdash; especially <code>@Immutable</code> entities under <code>READ_ONLY</code>, which need no locking at all.</li>
+        <li><strong>Win:</strong> <code>find</code> by id and the <code>@NaturalId</code> lookup (§11), which consult the cache before the database. JPQL never does, unless the query cache is on for that query.</li>
+        <li><strong>Trap:</strong> entities written by anything other than this application. The cache does not know, and serves stale rows until the entry expires.</li>
+        <li><strong>Trap:</strong> the query cache on a busy table. Every write to the table invalidates every cached query touching it, so the hit rate collapses while the bookkeeping cost stays.</li>
+        <li><strong>Trap:</strong> caching to fix an N+1 problem. The queries are still issued; they are just served from memory. Fix the fetch plan (§5) first.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Measuring, and the pool underneath</h3>
+
+  <p>Turn on <code>hibernate.generate_statistics</code> in any environment where you are investigating &mdash; it is cheap &mdash; and read <code>getPrepareStatementCount</code>, <code>getEntityLoadCount</code>, <code>getCollectionFetchCount</code> and <code>getQueryExecutionCount</code> around the operation you care about. <code>getQueryExecutionMaxTime</code> is also there; it was deliberately never printed in this module because a wall-clock number is not reproducible, and that is also why it is a poor thing to assert on in a test. For a running service, <code>hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS=50</code> logs every statement that exceeds the threshold, with its SQL, which is usually how a slow page is first located.</p>
+
+  <p>Beneath all of it sits the connection pool. The warning you have seen on every run in this module &mdash; <code>Using built-in connection pool (not intended for production use)</code> &mdash; is Hibernate telling you its bundled pool is a toy. Production uses HikariCP (<code>hibernate-hikaricp</code>, <code>hibernate.hikari.maximumPoolSize</code>), sized small: a pool of ten connections outperforms a pool of a hundred on most databases, because connections beyond the core count mostly queue inside the database instead of outside it. A transaction that holds a connection while it calls a remote service is the classic way to exhaust even a well-sized pool.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Performance gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>show_sql</code> cannot show batching.</strong> It logs each logical statement. Only <code>Statistics</code> or the driver's own logging (<code>p6spy</code>, <code>datasource-proxy</code>) reveal what was actually sent.</li>
+        <li><strong>A bulk JPQL statement bypasses the context.</strong> Entities already loaded keep stale values and a later flush can overwrite the bulk change with them. Clear first, or run the bulk statement in its own transaction.</li>
+        <li><strong><code>@DynamicUpdate</code> is not free.</strong> It writes only changed columns, but Hibernate must then build and prepare a different statement per combination of changed columns, which defeats statement caching. Use it for wide tables with hot contention, not by default.</li>
+        <li><strong>Loading to count.</strong> <code>findAll().size()</code> hydrates the table; <code>select count(p) from Product p</code> moves one number.</li>
+        <li><strong>The pool is the real ceiling.</strong> Ten slow queries with a pool of ten freeze every other request. Measure pool wait time before adding threads.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-performance-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>You set <code>hibernate.jdbc.batch_size=50</code>, insert 1,000 <code>Order</code> entities in one transaction, and <code>Statistics</code> still reports 1,000 prepared statements. Which is the most likely cause?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-performance-1"><span>Batching only applies to updates, not inserts <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-performance-1"><span>You forgot <code>flush()</code>; batches are only sent on an explicit flush <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-performance-1"><span><code>Order</code> uses <code>GenerationType.IDENTITY</code>, so each insert must execute immediately to obtain its id <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-performance-1"><span>H2 does not support JDBC batching <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Exactly phase A of the worked example. An <code>IDENTITY</code> id exists only after the row is inserted, Hibernate needs the id to manage the entity, so <code>persist</code> cannot be deferred and there is never a queue to batch. Switch to <code>SEQUENCE</code>.</p>
+        <p class="mb-0"><strong>A</strong> is false: inserts, updates and deletes all batch. <strong>B</strong> is false: commit flushes, and the queued statements are batched then. <strong>D</strong> is false: H2 supports batching, and phase B proved it on this very database.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-performance-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A report page lists 5,000 products with their SKU and price. It runs <code>select p from Product p</code> and maps each entity to a row. The query takes 40 ms; the page takes 900 ms. What is the first change to make?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-performance-2"><span>Enable the second-level cache for <code>Product</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-performance-2"><span>Select a DTO/record projection of the two columns instead of entities <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-performance-2"><span>Enable the query cache with the <code>org.hibernate.cacheable</code> hint <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-performance-2"><span>Increase <code>hibernate.jdbc.batch_size</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The database is not the problem (40 ms); hydrating 5,000 managed entities, snapshotting each one and scanning them all at flush is. A projection hydrates nothing &mdash; the worked example showed <code>entities hydrated = 0</code> &mdash; and the mapping step disappears too.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>C</strong> keep the 5,000-entity hydration; they only skip the 40 ms query. <strong>D</strong> affects writes, and this page writes nothing.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-performance-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about Hibernate's caches are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The second-level cache stores entity state by id, so a JPQL <code>where</code> query is not served from it unless the query cache is also on <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>The first-level cache is shared by all <code>EntityManager</code>s created from one factory <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>The query cache stores the full entity objects a query returned <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A cached query result is invalidated by any write to a table the query reads <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> The second-level cache is a map from id to row state; a query has to run to discover which ids match. The query cache keys on the query and its parameters and is dropped whenever a touched table changes, which is why it rarely pays on busy tables.</p>
+        <p class="mb-0"><strong>B</strong> describes the second-level cache; the first-level cache is the persistence context, one per <code>EntityManager</code>. <strong>C</strong> is wrong: the query cache stores ids (and scalar values) and then looks each entity up in the second-level cache, or in the database if it is not there &mdash; which can turn one cached query into N lookups.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="performance"> Mark this section complete
+  </label>
+</section>

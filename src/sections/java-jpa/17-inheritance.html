@@ -1,0 +1,367 @@
+<section class="lm-section" id="inheritance" data-title="Inheritance mapping" data-num="8">
+  <p class="lm-eyebrow">Section 8</p>
+  <h2 class="mb-4">Inheritance mapping</h2>
+
+  <p>Tables do not inherit. A relational schema has no way to say "a <code>CardPayment</code> is a <code>Payment</code> with two extra columns", so when your Java model has a hierarchy — Intermediate §9's sealed <code>Discount</code> family, a <code>Payment</code> with card and bank-transfer variants — something has to decide how the hierarchy is laid out as rows. JPA offers three layouts, plus a fourth option that is not a layout at all. Each one is a real trade-off between normalisation, query cost and constraints, and the choice is visible in every statement Hibernate generates afterwards.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Three small hierarchies, one per strategy, in a single factory so that the DDL for all of them appears together. Read the <code>create table</code> lines first, then the polymorphic queries.</p>
+
+  <pre data-code data-lang="java" data-file="InheritanceMapping.java" data-verify="InheritanceMapping" data-hi="17,50,78,8">
+import jakarta.persistence.*;
+import java.time.LocalDate;
+import java.util.List;
+
+public class InheritanceMapping {
+
+    /** Not an entity: its columns are copied into every entity table that extends it. */
+    @MappedSuperclass
+    public static abstract class Auditable {
+        @Column(nullable = false)
+        protected LocalDate createdOn = LocalDate.of(2026, 10, 15);
+    }
+
+    // ── SINGLE_TABLE: one table, a discriminator column, nullable subclass columns ──
+    @Entity(name = "Discount")
+    @Table(name = "discount")
+    @Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+    @DiscriminatorColumn(name = "kind", length = 8)
+    public static abstract class Discount extends Auditable {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        protected Long id;
+        @Column(nullable = false, length = 16)
+        protected String code;
+        protected Discount() {}
+        Discount(String code) { this.code = code; }
+        abstract long apply(long cents);
+        @Override public String toString() { return getClass().getSimpleName() + "(" + code + ")"; }
+    }
+
+    @Entity(name = "PercentOff") @DiscriminatorValue("PCT")
+    public static class PercentOff extends Discount {
+        private Integer percent;                 // Integer, not int: the column must be nullable for other kinds
+        protected PercentOff() {}
+        PercentOff(String code, int percent) { super(code); this.percent = percent; }
+        int percent() { return percent; }
+        @Override long apply(long cents) { return cents - cents * percent / 100; }
+    }
+
+    @Entity(name = "FixedOff") @DiscriminatorValue("FIX")
+    public static class FixedOff extends Discount {
+        private Integer offCents;
+        protected FixedOff() {}
+        FixedOff(String code, int offCents) { super(code); this.offCents = offCents; }
+        @Override long apply(long cents) { return Math.max(0, cents - offCents); }
+    }
+
+    // ── JOINED: one table per class, subclass tables share the parent's primary key ──
+    @Entity(name = "Payment")
+    @Table(name = "payment")
+    @Inheritance(strategy = InheritanceType.JOINED)
+    public static abstract class Payment {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        protected Long id;
+        protected long amountCents;
+        protected Payment() {}
+        Payment(long amountCents) { this.amountCents = amountCents; }
+        @Override public String toString() { return getClass().getSimpleName() + "(" + amountCents + "c)"; }
+    }
+
+    @Entity(name = "CardPayment") @Table(name = "card_payment")
+    public static class CardPayment extends Payment {
+        @Column(nullable = false, length = 4)
+        private String last4;                    // NOT NULL is possible: the column lives in its own table
+        protected CardPayment() {}
+        CardPayment(long amountCents, String last4) { super(amountCents); this.last4 = last4; }
+    }
+
+    @Entity(name = "BankTransfer") @Table(name = "bank_transfer")
+    public static class BankTransfer extends Payment {
+        @Column(nullable = false, length = 34)
+        private String iban;
+        protected BankTransfer() {}
+        BankTransfer(long amountCents, String iban) { super(amountCents); this.iban = iban; }
+    }
+
+    // ── TABLE_PER_CLASS: one complete table per concrete class, polymorphic reads are a UNION ──
+    @Entity(name = "Shipment")
+    @Inheritance(strategy = InheritanceType.TABLE_PER_CLASS)
+    public static abstract class Shipment {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)   // IDENTITY is impossible here: ids must be unique ACROSS tables
+        protected Long id;
+        protected int weightKg;
+        protected Shipment() {}
+        Shipment(int weightKg) { this.weightKg = weightKg; }
+        @Override public String toString() { return getClass().getSimpleName() + "(" + weightKg + "kg)"; }
+    }
+
+    @Entity(name = "ParcelShipment") @Table(name = "parcel_shipment")
+    public static class ParcelShipment extends Shipment {
+        private String carrier;
+        protected ParcelShipment() {}
+        ParcelShipment(int weightKg, String carrier) { super(weightKg); this.carrier = carrier; }
+    }
+
+    @Entity(name = "FreightShipment") @Table(name = "freight_shipment")
+    public static class FreightShipment extends Shipment {
+        private int pallets;
+        protected FreightShipment() {}
+        FreightShipment(int weightKg, int pallets) { super(weightKg); this.pallets = pallets; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Discount.class).managedClass(PercentOff.class).managedClass(FixedOff.class)
+            .managedClass(Payment.class).managedClass(CardPayment.class).managedClass(BankTransfer.class)
+            .managedClass(Shipment.class).managedClass(ParcelShipment.class).managedClass(FreightShipment.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:InheritanceMapping;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    static void section(String title) { System.out.println("-- " + title + " --"); }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+            section("insert one of each");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(new PercentOff("SPRING10", 10));
+                em.persist(new FixedOff("WELCOME5", 500));
+                em.persist(new CardPayment(12_000, "4242"));
+                em.persist(new BankTransfer(250_000, "GB33BUKB20201555555555"));
+                em.persist(new ParcelShipment(2, "DHL"));
+                em.persist(new FreightShipment(900, 3));
+                em.getTransaction().commit();
+            }
+
+            try (EntityManager em = emf.createEntityManager()) {
+                section("SINGLE_TABLE polymorphic query: one select, filtered by the discriminator");
+                List<Discount> discounts = em.createQuery("select d from Discount d order by d.id", Discount.class).getResultList();
+                for (Discount d : discounts) System.out.println(d + " applied to 10000c = " + d.apply(10_000));
+
+                section("type() and treat(): asking for one subtype");
+                System.out.println(em.createQuery("select d from Discount d where type(d) = PercentOff", Discount.class).getResultList());
+                System.out.println(em.createQuery("select treat(d as PercentOff).percent from Discount d where type(d) = PercentOff", Integer.class).getResultList());
+
+                section("JOINED polymorphic query: the parent table left-joins every subclass table");
+                System.out.println(em.createQuery("select p from Payment p order by p.id", Payment.class).getResultList());
+
+                section("JOINED subtype query: an inner join to the parent");
+                System.out.println(em.createQuery("select c from CardPayment c", CardPayment.class).getResultList());
+
+                section("TABLE_PER_CLASS polymorphic query: a UNION of every concrete table");
+                System.out.println(em.createQuery("select s from Shipment s order by s.id", Shipment.class).getResultList());
+
+                section("find() by id works for every strategy");
+                System.out.println(em.find(Payment.class, 1L) + ", " + em.find(Shipment.class, 2L));
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="InheritanceMapping">
+Hibernate: create global temporary table HTE_discount(createdOn date, rn_ integer not null, class varchar(8) not null, id bigint, code varchar(16), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_discount1(createdOn date, percent integer, rn_ integer not null, class varchar(8) not null, id bigint, code varchar(16), primary key (rn_)) transactional
+Hibernate: create global temporary table HT_Shipment(id bigint not null, primary key (id)) transactional
+Hibernate: create global temporary table HTE_Shipment(rn_ integer not null, weightKg integer, id bigint, primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_parcel_shipment(rn_ integer not null, weightKg integer, id bigint, carrier varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_freight_shipment(pallets integer, rn_ integer not null, weightKg integer, id bigint, primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_discount2(createdOn date, offCents integer, rn_ integer not null, class varchar(8) not null, id bigint, code varchar(16), primary key (rn_)) transactional
+Hibernate: create global temporary table HT_payment(id bigint not null, primary key (id)) transactional
+Hibernate: create global temporary table HTE_payment(rn_ integer not null, amountCents bigint, id bigint, primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_card_payment(last4 varchar(4), rn_ integer not null, amountCents bigint, id bigint, primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_bank_transfer(rn_ integer not null, amountCents bigint, id bigint, iban varchar(34), primary key (rn_)) transactional
+Hibernate: drop table if exists bank_transfer cascade 
+Hibernate: drop table if exists card_payment cascade 
+Hibernate: drop table if exists discount cascade 
+Hibernate: drop table if exists freight_shipment cascade 
+Hibernate: drop table if exists parcel_shipment cascade 
+Hibernate: drop table if exists payment cascade 
+Hibernate: drop sequence if exists discount_SEQ
+Hibernate: drop sequence if exists payment_SEQ
+Hibernate: drop sequence if exists Shipment_SEQ
+Hibernate: create sequence discount_SEQ start with 1 increment by 50
+Hibernate: create sequence payment_SEQ start with 1 increment by 50
+Hibernate: create sequence Shipment_SEQ start with 1 increment by 50
+Hibernate: create table bank_transfer (id bigint not null, iban varchar(34) not null, primary key (id))
+Hibernate: create table card_payment (last4 varchar(4) not null, id bigint not null, primary key (id))
+Hibernate: create table discount (createdOn date not null, offCents integer, percent integer, id bigint not null, kind varchar(8) not null check ((kind in ('PCT','FIX'))), code varchar(16) not null, primary key (id))
+Hibernate: create table freight_shipment (pallets integer not null, weightKg integer not null, id bigint not null, primary key (id))
+Hibernate: create table parcel_shipment (weightKg integer not null, id bigint not null, carrier varchar(255), primary key (id))
+Hibernate: create table payment (amountCents bigint not null, id bigint not null, primary key (id))
+Hibernate: alter table if exists bank_transfer add constraint FK6dfmpkflvon09l2wpudp04vox foreign key (id) references payment
+Hibernate: alter table if exists card_payment add constraint FKj4yrj0k4nt3m0efcym09h3s3p foreign key (id) references payment
+-- insert one of each --
+Hibernate: select next value for discount_SEQ
+Hibernate: select next value for discount_SEQ
+Hibernate: select next value for payment_SEQ
+Hibernate: select next value for payment_SEQ
+Hibernate: select next value for Shipment_SEQ
+Hibernate: select next value for Shipment_SEQ
+Hibernate: insert into discount (code,createdOn,percent,kind,id) values (?,?,?,'PCT',?)
+Hibernate: insert into discount (code,createdOn,offCents,kind,id) values (?,?,?,'FIX',?)
+Hibernate: insert into payment (amountCents,id) values (?,?)
+Hibernate: insert into card_payment (last4,id) values (?,?)
+Hibernate: insert into payment (amountCents,id) values (?,?)
+Hibernate: insert into bank_transfer (iban,id) values (?,?)
+Hibernate: insert into parcel_shipment (weightKg,carrier,id) values (?,?,?)
+Hibernate: insert into freight_shipment (weightKg,pallets,id) values (?,?,?)
+-- SINGLE_TABLE polymorphic query: one select, filtered by the discriminator --
+Hibernate: select d1_0.id,d1_0.kind,d1_0.code,d1_0.createdOn,d1_0.offCents,d1_0.percent from discount d1_0 order by d1_0.id
+PercentOff(SPRING10) applied to 10000c = 9000
+FixedOff(WELCOME5) applied to 10000c = 9500
+-- type() and treat(): asking for one subtype --
+Hibernate: select d1_0.id,d1_0.kind,d1_0.code,d1_0.createdOn,d1_0.offCents,d1_0.percent from discount d1_0 where d1_0.kind='PCT'
+[PercentOff(SPRING10)]
+Hibernate: select d1_0.percent from discount d1_0 where d1_0.kind='PCT'
+[10]
+-- JOINED polymorphic query: the parent table left-joins every subclass table --
+Hibernate: select p1_0.id,case when p1_2.id is not null then 1 when p1_1.id is not null then 2 end,p1_0.amountCents,p1_1.iban,p1_2.last4 from payment p1_0 left join bank_transfer p1_1 on p1_0.id=p1_1.id left join card_payment p1_2 on p1_0.id=p1_2.id order by p1_0.id
+[CardPayment(12000c), BankTransfer(250000c)]
+-- JOINED subtype query: an inner join to the parent --
+Hibernate: select cp1_0.id,cp1_1.amountCents,cp1_0.last4 from card_payment cp1_0 join payment cp1_1 on cp1_0.id=cp1_1.id
+[CardPayment(12000c)]
+-- TABLE_PER_CLASS polymorphic query: a UNION of every concrete table --
+Hibernate: select s1_0.id,s1_0.clazz_,s1_0.weightKg,s1_0.pallets,s1_0.carrier from (select weightKg, id, carrier, null as pallets, 1 as clazz_ from parcel_shipment union all select weightKg, id, null as carrier, pallets, 2 as clazz_ from freight_shipment) s1_0 order by s1_0.id
+[ParcelShipment(2kg), FreightShipment(900kg)]
+-- find() by id works for every strategy --
+CardPayment(12000c), FreightShipment(900kg)
+  </pre>
+
+  <h3 class="mt-8 mb-3">Reading the schema</h3>
+
+  <ul>
+    <li><strong><code>SINGLE_TABLE</code> — <code>discount</code>.</strong> One table holds both subtypes; <code>kind</code> is the discriminator, with a check constraint Hibernate derived from the two <code>@DiscriminatorValue</code>s. <code>percent</code> and <code>offCents</code> are <strong>nullable</strong>, and must be: a <code>FIX</code> row has no percent. That is the strategy's defining weakness — a subclass field can never be <code>NOT NULL</code> at the database level. It is also the fastest: a polymorphic read is one <code>select … from discount</code>, a subtype read is the same with <code>where kind='PCT'</code>, and an insert is one row.</li>
+    <li><strong><code>JOINED</code> — <code>payment</code>, <code>card_payment</code>, <code>bank_transfer</code>.</strong> The parent table has the shared columns; each subclass table has its own columns plus the <em>same primary key</em>, enforced by a foreign key back to <code>payment</code>. <code>last4</code> and <code>iban</code> are <code>NOT NULL</code>, because each lives in a table where every row has it. The price is in the queries: a polymorphic read is the parent <code>left join</code>ed to every subclass table with a <code>case when … then 1 … then 2</code> expression deciding the type per row, a subtype read is an inner join, and an insert is two statements.</li>
+    <li><strong><code>TABLE_PER_CLASS</code> — <code>parcel_shipment</code>, <code>freight_shipment</code>.</strong> No <code>shipment</code> table exists; each concrete class gets a complete table with the inherited columns copied in. A polymorphic read is a <code>union all</code> over every concrete table with a synthetic <code>clazz_</code> column, which no index can help. Ids must be unique <em>across</em> the tables — hence one shared <code>Shipment_SEQ</code> — so <code>IDENTITY</code> generation is impossible here. Subtype reads and inserts are as cheap as they get, which is the only argument for it.</li>
+    <li><strong><code>@MappedSuperclass</code> — <code>Auditable</code>.</strong> Not an entity: no table, no discriminator, no polymorphic query. Its <code>createdOn</code> column simply appears in the <code>discount</code> table because <code>Discount</code> extends it. It is the right tool for "every entity has these audit columns" and the wrong tool for "I want to query all <code>Auditable</code> things".</li>
+    <li><strong><code>type()</code> and <code>treat()</code>.</strong> <code>where type(d) = PercentOff</code> became <code>where d1_0.kind='PCT'</code>; <code>treat(d as PercentOff).percent</code> let the query reach a subclass attribute. Under <code>JOINED</code> the same predicate becomes a test on which subclass table has a matching row.</li>
+    <li><strong>The last line printed no SQL.</strong> Both <code>find()</code> calls were served from the persistence context — the earlier polymorphic queries had already loaded those rows. §3's first-level cache applies to subclasses exactly as it does to any entity.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">See each strategy's tables and queries</h3>
+
+  <div class="lm-card" data-sandbox="inheritance-strategy">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h7l3 5-3 5H4M14 7h6M14 17h6"/></svg>
+      What a hierarchy becomes on disk
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Strategy</span>
+        <select data-sb-strategy>
+          <option value="SINGLE_TABLE" selected>SINGLE_TABLE</option>
+          <option value="JOINED">JOINED</option>
+          <option value="TABLE_PER_CLASS">TABLE_PER_CLASS</option>
+          <option value="MAPPED_SUPERCLASS">@MappedSuperclass (no inheritance mapping)</option>
+        </select>
+      </label>
+      <label class="lm-field grow">
+        <span>Concrete subclasses <span class="lm-readout" data-sb-nout>2</span></span>
+        <input type="range" data-sb-n min="2" max="5" value="2" step="1">
+      </label>
+      <fieldset class="lm-field"><legend class="text-sm font-semibold mb-1">Operation</legend>
+        <label class="lm-check"><input type="radio" name="sb-inh-op" data-sb-op value="base" checked> query the base type</label>
+        <label class="lm-check"><input type="radio" name="sb-inh-op" data-sb-op value="sub"> query one subtype</label>
+        <label class="lm-check"><input type="radio" name="sb-inh-op" data-sb-op value="insert"> insert one subtype</label>
+      </fieldset>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Choosing</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Inheritance strategies compared</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Tables</th><th scope="col">Polymorphic read</th><th scope="col">Insert</th><th scope="col">NOT NULL on subclass columns</th><th scope="col">Reach for it when</th></tr></thead>
+      <tbody>
+        <tr><td><code>SINGLE_TABLE</code></td><td>1</td><td>one select, discriminator filter</td><td>one row</td><td>no (use a <code>@Check</code> constraint)</td><td>the default: few subclass-specific fields, polymorphic queries common</td></tr>
+        <tr><td><code>JOINED</code></td><td>1 + one per subclass</td><td>left joins + <code>case</code></td><td>one row per level</td><td>yes</td><td>many mandatory subclass fields, normalised schema matters, hierarchy is shallow</td></tr>
+        <tr><td><code>TABLE_PER_CLASS</code></td><td>one per concrete class</td><td><code>union all</code>, unindexable</td><td>one row</td><td>yes</td><td>you never query the base type and cannot share a table — rare; many teams ban it</td></tr>
+        <tr><td><code>@MappedSuperclass</code></td><td>none of its own</td><td>impossible</td><td>—</td><td>yes</td><td>shared columns and behaviour without a shared type: audit fields, ids</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Two rules cover most decisions. Start with <code>SINGLE_TABLE</code>; move to <code>JOINED</code> when the nullable columns become embarrassing or the subclass-specific columns outnumber the shared ones. And model the hierarchy for the <em>data</em>, not for code reuse: if two kinds of thing share behaviour but no identity — a <code>Product</code> and a <code>ServicePlan</code> are both priced — give them an interface in Java and separate tables, not a <code>Priceable</code> entity hierarchy.</p>
+
+  <p>Polymorphic associations follow the strategy: <code>@ManyToOne Discount applied</code> on an <code>Order</code> works for any of the three, and loads whichever subtype the row is. Only the root carries <code>@Inheritance</code>; writing it on a subclass is ignored. Hibernate 6+ also allows <code>@ManyToOne</code> to an interface implemented by several unrelated entities via <code>@Any</code>, which is a different, discriminator-plus-id mapping and best left for when nothing else fits.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Where hierarchies go wrong</div>
+      <ul class="mb-0">
+        <li><strong>Discriminator values are data.</strong> Rename the class <code>PercentOff</code> and nothing changes; rename the value <code>PCT</code> and every existing row is unreadable. Set <code>@DiscriminatorValue</code> explicitly rather than relying on the default (the entity name), and never change it without a migration.</li>
+        <li><strong><code>SINGLE_TABLE</code> plus a <code>NOT NULL</code> requirement.</strong> The column cannot be <code>NOT NULL</code>; add <code>@Check(constraints = "kind &lt;&gt; 'PCT' or percent is not null")</code> on the root so the database still refuses a broken row.</li>
+        <li><strong><code>JOINED</code> with a deep hierarchy.</strong> Each level is another join on every read and another insert on every write. Three levels is the practical ceiling.</li>
+        <li><strong><code>TABLE_PER_CLASS</code> with <code>IDENTITY</code>.</strong> Fails at start-up: ids must be unique across the union, so a sequence or table generator is mandatory.</li>
+        <li><strong>Associations to a <code>@MappedSuperclass</code>.</strong> <code>@ManyToOne Auditable x</code> is a mapping error; the target of an association must be an entity.</li>
+        <li><strong>Querying the root when you meant a subtype.</strong> <code>select p from Payment p</code> under <code>JOINED</code> left-joins every subclass table even if your code immediately checks <code>instanceof CardPayment</code>. Ask for <code>CardPayment</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-inheritance-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In the worked example, <code>PercentOff.percent</code> is declared <code>Integer</code> and the column is created nullable, while <code>CardPayment.last4</code> is <code>NOT NULL</code>. Why the difference?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-inheritance-1"><span>Wrapper types are always mapped nullable and <code>String</code> is always <code>NOT NULL</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-inheritance-1"><span><code>last4</code> has <code>@Column(nullable = false)</code> and <code>percent</code> simply forgot it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-inheritance-1"><span>Under <code>SINGLE_TABLE</code> every row of every subtype shares the column, so a <code>FixedOff</code> row would violate <code>NOT NULL</code>; under <code>JOINED</code> the column lives in a table that only <code>CardPayment</code> rows occupy <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-inheritance-1"><span>Discriminated columns cannot carry constraints <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The strategy decides it. A single shared table must tolerate every subtype's absent fields, which is the one hard limitation of <code>SINGLE_TABLE</code>; the <code>@Check</code> constraint in the gotcha callout is the workaround. In <code>JOINED</code> (and <code>TABLE_PER_CLASS</code>) the subclass column lives where every row has a value, so the constraint is honest.</p>
+        <p class="mb-0"><strong>A</strong> is false — <code>nullable</code> is set by annotation, not by Java type, and a primitive <code>int percent</code> would have produced <code>not null</code> and then failed on the first <code>FixedOff</code> insert. <strong>B</strong> misses that adding <code>nullable = false</code> to <code>percent</code> would make the program fail. <strong>D</strong> is invented; the discriminator column itself carries a check constraint in the DDL.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-inheritance-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which strategy cannot use <code>GenerationType.IDENTITY</code>, and why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-inheritance-2"><span><code>JOINED</code> — the subclass table needs the parent's id before the parent row exists <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-inheritance-2"><span><code>TABLE_PER_CLASS</code> — ids must be unique across several independent tables, and each table's identity column would restart at 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-inheritance-2"><span><code>SINGLE_TABLE</code> — the discriminator and the id cannot both be generated <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-inheritance-2"><span>None; any strategy works with any generator <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> A polymorphic read is a <code>union all</code> over the concrete tables, and <code>find(Shipment.class, 2L)</code> only makes sense if id 2 exists in exactly one of them. Identity columns are per table, so two tables would both hand out 2. The worked example therefore shares one <code>Shipment_SEQ</code> sequence, and Hibernate rejects <code>IDENTITY</code> here at start-up.</p>
+        <p class="mb-0"><strong>A</strong> is backwards: under <code>JOINED</code> the parent row is inserted first and its generated id is reused for the subclass row — <code>IDENTITY</code> works fine. <strong>C</strong> is invented. <strong>D</strong> is the belief that fails at boot.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-inheritance-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about a <code>@MappedSuperclass</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>It has no table of its own <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>You can write <code>select a from Auditable a</code> to query every subclass at once <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Its mapped fields become columns in each entity table that extends it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>An entity can hold a <code>@ManyToOne</code> reference to it <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> A mapped superclass contributes mappings, not identity: its fields are copied into each subclass's table as if declared there, and no table or discriminator exists for it. That is exactly why audit columns and shared id fields are its natural use.</p>
+        <p class="mb-0"><strong>B</strong> fails — it is not an entity, so it has no name in JPQL and no polymorphic query. <strong>D</strong> is a mapping error for the same reason: associations target entities, and a foreign key needs a table to point at.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="inheritance"> Mark this section complete
+  </label>
+</section>

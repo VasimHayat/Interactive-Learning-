@@ -1,0 +1,11 @@
+{
+  "comment": "Spring Data JPA module. Resolved transitively by Maven (tools/fetch-deps.mjs) against the Spring Boot BOM, so every version is the one Spring Boot 4.1.1 manages: Spring Framework 7.0, Spring Data 2026.0, Hibernate 7.4.5, HikariCP 7, Logback 1.5, H2 2.4.",
+  "maven": {
+    "bom": "org.springframework.boot:spring-boot-dependencies:4.1.1",
+    "dependencies": [
+      "org.springframework.boot:spring-boot-starter-data-jpa",
+      "org.springframework.boot:spring-boot-starter-validation",
+      "com.h2database:h2"
+    ]
+  }
+}

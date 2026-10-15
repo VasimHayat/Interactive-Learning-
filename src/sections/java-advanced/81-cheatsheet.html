@@ -1,0 +1,280 @@
+<section class="lm-section" id="cheatsheet" data-title="Cheat sheet" data-num="C">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Cheat sheet</h2>
+  <p>Everything worth having in front of you while a service is misbehaving. This section is laid out to print cleanly — controls and navigation are hidden, and tables are kept whole across page breaks. Each block names the section it condenses.</p>
+
+  <h3 class="mt-8 mb-3">Thread states <span class="lm-badge">§1</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Thread states and what puts a thread in each</caption>
+      <thead><tr><th scope="col">State</th><th scope="col">Means</th><th scope="col">Gets there by</th><th scope="col">In a thread dump</th></tr></thead>
+      <tbody>
+        <tr><td><code>NEW</code></td><td>created, not started</td><td><code>new Thread(r)</code></td><td>not shown</td></tr>
+        <tr><td><code>RUNNABLE</code></td><td>running or eligible to run (includes blocking I/O)</td><td><code>start()</code></td><td><code>runnable</code></td></tr>
+        <tr><td><code>BLOCKED</code></td><td>waiting to <em>enter</em> a monitor</td><td><code>synchronized</code> held by another thread</td><td><code>waiting for monitor entry</code></td></tr>
+        <tr><td><code>WAITING</code></td><td>parked indefinitely</td><td><code>wait()</code>, <code>join()</code>, <code>LockSupport.park()</code>, <code>lock()</code></td><td><code>waiting on condition</code> / <code>in Object.wait()</code></td></tr>
+        <tr><td><code>TIMED_WAITING</code></td><td>parked with a deadline</td><td><code>sleep(ms)</code>, <code>wait(ms)</code>, <code>tryLock(t)</code>, <code>join(ms)</code></td><td><code>waiting on condition</code> with a timeout</td></tr>
+        <tr><td><code>TERMINATED</code></td><td><code>run()</code> returned or threw</td><td>—</td><td>not shown</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>count++</code> is <strong>load, add, store</strong> — three operations with a gap another thread can fall into. Interruption is a request: <code>interrupt()</code> sets a flag, blocking calls throw <code>InterruptedException</code> and <em>clear</em> it, so restore it with <code>Thread.currentThread().interrupt()</code> when you cannot propagate. The JVM exits when the last <em>non-daemon</em> thread ends.</p>
+
+  <h3 class="mt-8 mb-3">Happens-before edges <span class="lm-badge">§2</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The happens-before rules of the Java memory model</caption>
+      <thead><tr><th scope="col">Rule</th><th scope="col">Edge</th></tr></thead>
+      <tbody>
+        <tr><td>Program order</td><td>each action in a thread → every later action in that thread</td></tr>
+        <tr><td>Monitor lock</td><td><code>unlock</code> of M → every later <code>lock</code> of <em>the same</em> M</td></tr>
+        <tr><td>Volatile</td><td>write to <code>v</code> → every later read of <code>v</code> (and everything before the write becomes visible: piggybacking)</td></tr>
+        <tr><td>Thread start</td><td><code>t.start()</code> → every action in <code>t</code></td></tr>
+        <tr><td>Thread termination</td><td>every action in <code>t</code> → <code>t.join()</code> returning / <code>isAlive()</code> false</td></tr>
+        <tr><td>Interruption</td><td><code>t.interrupt()</code> → <code>t</code> detecting it</td></tr>
+        <tr><td>Final fields</td><td>constructor end → any thread that sees the reference sees the <code>final</code> fields</td></tr>
+        <tr><td>Transitivity</td><td>A → B and B → C gives A → C</td></tr>
+        <tr><td><code>java.util.concurrent</code></td><td>every submit → the task; task completion → <code>Future.get</code>; <code>countDown</code> → <code>await</code> returning; <code>put</code> → the matching <code>take</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">A <strong>data race</strong> is a write and a conflicting access with no happens-before edge between them. <code>volatile</code> gives visibility and ordering, <em>not</em> atomicity: <code>volatile int i; i++</code> still loses updates. Immutable objects published through any edge are safe; the holder idiom and <code>volatile</code> double-checked locking are the two correct lazy-init shapes.</p>
+
+  <h3 class="mt-8 mb-3">Which lock <span class="lm-badge">§3</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Lock types compared</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Reach for it when</th><th scope="col">Has</th><th scope="col">Lacks</th></tr></thead>
+      <tbody>
+        <tr><td><code>synchronized</code></td><td>the default; short critical sections, one condition</td><td>reentrancy, <code>wait/notifyAll</code>, auto-release on exception, JIT lock elision</td><td>timeouts, interruptible acquire, fairness, multiple conditions</td></tr>
+        <tr><td><code>ReentrantLock</code></td><td>you need <code>tryLock(timeout)</code>, <code>lockInterruptibly</code>, several <code>Condition</code>s, or fairness</td><td>all of the above</td><td>auto-release — <code>unlock()</code> must be in <code>finally</code></td></tr>
+        <tr><td><code>ReentrantReadWriteLock</code></td><td>many readers, rare writers, long reads</td><td>shared read lock, exclusive write lock</td><td>upgrade read → write (deadlocks); cheapness for short reads</td></tr>
+        <tr><td><code>StampedLock</code></td><td>read-mostly with very short reads</td><td>optimistic read (<code>tryOptimisticRead</code> + <code>validate</code>)</td><td>reentrancy, conditions</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Deadlock needs all four: mutual exclusion, hold-and-wait, no preemption, circular wait. Break the last one with a global lock order, or the second with <code>tryLock</code> and back-off:</p>
+  <pre data-code data-lang="java" data-nobar>
+void transfer(Account a, Account b, int qty) {
+    Account first  = a.id().compareTo(b.id()) < 0 ? a : b;   // global order, never identityHashCode
+    Account second = first == a ? b : a;
+    synchronized (first) { synchronized (second) { move(a, b, qty); } }
+}
+
+boolean transferWithTimeout(Account a, Account b, int qty) throws InterruptedException {
+    while (true) {
+        if (a.lock().tryLock(10, MILLISECONDS)) {
+            try {
+                if (b.lock().tryLock(10, MILLISECONDS)) {
+                    try { move(a, b, qty); return true; } finally { b.lock().unlock(); }
+                }
+            } finally { a.lock().unlock(); }
+        }
+        Thread.sleep(ThreadLocalRandom.current().nextInt(5));   // back off, or livelock
+    }
+}
+  </pre>
+  <p class="text-sm text-ink-muted">Lock on a <code>private final Object lock</code>, never on <code>this</code>, a <code>String</code>, or a boxed value. Always loop on the condition around <code>wait()</code>; prefer <code>notifyAll</code>.</p>
+
+  <h3 class="mt-8 mb-3">Atomics and concurrent collections by need <span class="lm-badge">§4</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Which concurrent type for which need</caption>
+      <thead><tr><th scope="col">You need</th><th scope="col">Use</th><th scope="col">Not</th></tr></thead>
+      <tbody>
+        <tr><td>a counter read as often as written</td><td><code>AtomicInteger</code> / <code>AtomicLong</code></td><td><code>volatile int</code> with <code>++</code></td></tr>
+        <tr><td>a hot counter read rarely (metrics)</td><td><code>LongAdder</code></td><td><code>AtomicLong</code> under heavy contention</td></tr>
+        <tr><td>bounded decrement / any read-modify-write</td><td><code>compareAndSet</code> loop, or <code>updateAndGet</code></td><td>check-then-act in two calls</td></tr>
+        <tr><td>swap an immutable snapshot</td><td><code>AtomicReference</code> + record</td><td>locks around a mutable object</td></tr>
+        <tr><td>keyed counters / caches / multimaps</td><td><code>ConcurrentHashMap</code> with <code>merge</code>, <code>compute</code>, <code>computeIfAbsent</code></td><td><code>containsKey</code> then <code>put</code>; <code>Collections.synchronizedMap</code></td></tr>
+        <tr><td>sorted concurrent map/set</td><td><code>ConcurrentSkipListMap</code> / <code>Set</code></td><td><code>TreeMap</code> under a lock</td></tr>
+        <tr><td>read-mostly listener list</td><td><code>CopyOnWriteArrayList</code></td><td>same type for frequent writes</td></tr>
+        <tr><td>producer → consumer, bounded</td><td><code>ArrayBlockingQueue</code> / <code>LinkedBlockingQueue(cap)</code></td><td>an unbounded queue (memory)</td></tr>
+        <tr><td>hand-off, no buffer</td><td><code>SynchronousQueue</code></td><td>—</td></tr>
+        <tr><td>by priority / by delay</td><td><code>PriorityBlockingQueue</code> / <code>DelayQueue</code></td><td>—</td></tr>
+        <tr><td>lock-free unbounded queue</td><td><code>ConcurrentLinkedQueue</code></td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>ConcurrentHashMap</code>: no <code>null</code> keys or values; per-bin locking on writes, lock-free reads; <code>compute*</code> is atomic <em>per key</em> only; iterators are weakly consistent; <code>size()</code> is an estimate under concurrent writes. CAS is one CPU instruction that succeeds only if the slot still holds the expected value — a retry loop, not a block. The ABA problem: the value went A → B → A and the CAS cannot tell; use <code>AtomicStampedReference</code> when identity matters.</p>
+
+  <h3 class="mt-8 mb-3">Thread pools <span class="lm-badge">§5</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">ThreadPoolExecutor parameters and the factory methods</caption>
+      <thead><tr><th scope="col">Factory</th><th scope="col">core / max</th><th scope="col">Queue</th><th scope="col">Hides</th></tr></thead>
+      <tbody>
+        <tr><td><code>newFixedThreadPool(n)</code></td><td>n / n</td><td>unbounded <code>LinkedBlockingQueue</code></td><td>unbounded memory when producers outrun consumers</td></tr>
+        <tr><td><code>newCachedThreadPool()</code></td><td>0 / <code>Integer.MAX_VALUE</code></td><td><code>SynchronousQueue</code></td><td>unbounded threads under a burst</td></tr>
+        <tr><td><code>newSingleThreadExecutor()</code></td><td>1 / 1</td><td>unbounded</td><td>same as fixed; serial order guaranteed</td></tr>
+        <tr><td><code>newScheduledThreadPool(n)</code></td><td>n / ∞ (unused)</td><td><code>DelayedWorkQueue</code></td><td>one exception silently cancels a periodic task</td></tr>
+        <tr><td><code>newWorkStealingPool()</code></td><td>cores</td><td>per-worker deques</td><td>it is a <code>ForkJoinPool</code>; daemon threads</td></tr>
+        <tr><td><code>newVirtualThreadPerTaskExecutor()</code></td><td>one virtual thread per task</td><td>none</td><td>nothing bounds concurrency — use a <code>Semaphore</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>ThreadPoolExecutor</code> growth rule: below <code>core</code> → new thread; at <code>core</code> → <strong>queue first</strong>; only when the queue is <em>full</em> → grow to <code>max</code>; then the <code>RejectedExecutionHandler</code> (<code>AbortPolicy</code> default, <code>CallerRunsPolicy</code> for back-pressure). Size: CPU-bound ≈ cores; I/O-bound ≈ cores × (1 + wait/compute). Always <code>shutdown()</code> then <code>awaitTermination</code>, or use the Java 19+ <code>close()</code> in try-with-resources; non-daemon pool threads keep the JVM alive. A task's exception goes into its <code>Future</code> — if nobody calls <code>get()</code>, nobody sees it.</p>
+
+  <h3 class="mt-8 mb-3">CompletableFuture by question <span class="lm-badge">§6</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">CompletableFuture methods by the question they answer</caption>
+      <thead><tr><th scope="col">Question</th><th scope="col">Method</th></tr></thead>
+      <tbody>
+        <tr><td>Start work on a pool</td><td><code>supplyAsync(supplier, executor)</code> — always pass your own executor</td></tr>
+        <tr><td>Transform the value (map)</td><td><code>thenApply</code></td></tr>
+        <tr><td>Chain a stage that returns a future (flatMap)</td><td><code>thenCompose</code></td></tr>
+        <tr><td>Combine two independent futures</td><td><code>thenCombine</code></td></tr>
+        <tr><td>Wait for all / any</td><td><code>allOf(...)</code> (then read each <code>join()</code>), <code>anyOf</code></td></tr>
+        <tr><td>Recover from failure</td><td><code>exceptionally</code> (only on failure), <code>handle</code> (both paths, returns a value), <code>whenComplete</code> (observe, pass through)</td></tr>
+        <tr><td>Time-box</td><td><code>orTimeout(t, unit)</code> → <code>TimeoutException</code>; <code>completeOnTimeout(fallback, t, unit)</code></td></tr>
+        <tr><td>Get the result</td><td><code>join()</code> (unchecked <code>CompletionException</code>) / <code>get()</code> (checked <code>ExecutionException</code>) — both wrap the cause</td></tr>
+        <tr><td>Which thread runs a stage</td><td>non-async: whichever thread <em>completes</em> the previous stage (the caller if already complete); <code>*Async</code>: the pool</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Virtual threads <span class="lm-badge">§7</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Virtual threads: do and do not</caption>
+      <thead><tr><th scope="col">Do</th><th scope="col">Do not</th></tr></thead>
+      <tbody>
+        <tr><td>one virtual thread per task (<code>newVirtualThreadPerTaskExecutor</code>, <code>Thread.ofVirtual()</code>)</td><td>pool them — they are cheap; pooling defeats the point</td></tr>
+        <tr><td>use them for blocking I/O, sleeps, <code>j.u.c</code> locks — the thread unmounts and the carrier serves others</td><td>expect CPU-bound work to speed up — the carriers are still ~cores</td></tr>
+        <tr><td>bound concurrency with a <code>Semaphore</code> around the scarce resource</td><td>hold a <code>synchronized</code> block across blocking I/O in JDK 21 — the carrier is <strong>pinned</strong> (<code>-Djdk.tracePinnedThreads</code>; fixed in JDK 24, JEP 491)</td></tr>
+        <tr><td>keep thread-locals small, or avoid them</td><td>cache expensive objects in <code>ThreadLocal</code> — a million threads means a million copies</td></tr>
+        <tr><td>know they are always daemon, priority is fixed, names are empty unless you set one</td><td>rely on <code>Thread.getId()</code> or names for anything</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Collectors compared <span class="lm-badge">§8</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Garbage collectors compared</caption>
+      <thead><tr><th scope="col">Collector</th><th scope="col">Optimises</th><th scope="col">Pauses</th><th scope="col">Pick for</th></tr></thead>
+      <tbody>
+        <tr><td>Serial</td><td>footprint</td><td>stop-the-world, single thread</td><td>tiny heaps, one core, containers under 2 cores</td></tr>
+        <tr><td>Parallel</td><td>throughput</td><td>stop-the-world, all cores</td><td>batch jobs where pauses do not matter</td></tr>
+        <tr><td>G1 (default)</td><td>balance; pause goal (<code>MaxGCPauseMillis</code>)</td><td>short young pauses; concurrent marking; mixed collections; a Full GC only when it falls behind</td><td>most services, heaps up to tens of GB</td></tr>
+        <tr><td>ZGC (<code>-XX:+ZGenerational</code> in 21)</td><td>latency</td><td>sub-millisecond; concurrent compaction via coloured pointers and load barriers</td><td>large heaps, strict latency</td></tr>
+        <tr><td>Shenandoah</td><td>latency</td><td>concurrent compaction via Brooks pointers</td><td>same niche as ZGC; not in all JDK builds</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Generational hypothesis: most objects die young, so eden is collected by <em>copying survivors</em> — cost is proportional to live objects, not garbage. Reference strength: strong → soft (cleared under memory pressure) → weak (cleared at the next GC) → phantom (post-mortem, via a <code>ReferenceQueue</code>). <code>finalize()</code> is gone; use <code>Cleaner</code>, and never capture <code>this</code> in the cleaning action. Four OOMs: <em>Java heap space</em>, <em>Metaspace</em>, <em>GC overhead limit exceeded</em>, <em>unable to create native thread</em>.</p>
+
+  <h3 class="mt-8 mb-3">The flags that matter <span class="lm-badge">§9</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Key JVM flags</caption>
+      <thead><tr><th scope="col">Flag</th><th scope="col">Sets</th></tr></thead>
+      <tbody>
+        <tr><td><code>-Xms</code> / <code>-Xmx</code></td><td>initial / maximum heap. Equal values avoid resize pauses.</td></tr>
+        <tr><td><code>-XX:MaxRAMPercentage=75</code></td><td>heap as a share of the <em>container</em> limit (default 25%). Leave room for metaspace, threads, code cache, native.</td></tr>
+        <tr><td><code>-XX:+UseG1GC</code> / <code>-XX:+UseZGC -XX:+ZGenerational</code> / <code>-XX:+UseParallelGC</code></td><td>the collector</td></tr>
+        <tr><td><code>-XX:MaxGCPauseMillis=200</code></td><td>G1's pause goal (a target, not a promise)</td></tr>
+        <tr><td><code>-Xss</code></td><td>per-thread stack (default ~1 MB; 10,000 platform threads ≈ 10 GB reserved)</td></tr>
+        <tr><td><code>-XX:MaxMetaspaceSize</code></td><td>cap on class metadata (unbounded by default)</td></tr>
+        <tr><td><code>-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=…</code></td><td>evidence when it dies</td></tr>
+        <tr><td><code>-Xlog:gc*:file=gc.log:time,uptime</code></td><td>GC logging (unified logging, JDK 9+)</td></tr>
+        <tr><td><code>-XX:+PrintFlagsFinal</code></td><td>every flag's effective value — pipe through <code>grep</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Reading <code>GC(5) Pause Young (Mixed) (G1 Evacuation Pause) 140M-&gt;40M(256M) 9.871ms</code>: collection number, pause kind, cause, heap used before → after (committed total), wall time. Old gen climbing after every Full GC is a <strong>leak</strong>; frequent Full GCs that do reclaim is an <strong>undersized heap</strong>; exit code 137 with a healthy heap is the <strong>kernel</strong> OOM-killing the container.</p>
+
+  <h3 class="mt-8 mb-3">Class loading <span class="lm-badge">§10</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Class initialization triggers and the loader hierarchy</caption>
+      <thead><tr><th scope="col">Initializes the class</th><th scope="col">Does not</th></tr></thead>
+      <tbody>
+        <tr><td><code>new</code>; a static method call; a non-constant static field read or write; <code>Class.forName(name)</code>; initializing a subclass; a reflective call; the <code>main</code> class at start-up</td><td>reading a compile-time constant (<code>static final</code> primitive/String literal — it is inlined); <code>loadClass</code>; <code>Class.forName(name, false, loader)</code>; an array type <code>Prices[]</code>; a <code>.class</code> literal; a subclass's static member that is <em>inherited</em> from a superclass (initializes only the declaring class)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Phases: <strong>loading</strong> (bytes → <code>Class</code>) → <strong>linking</strong> (verify, prepare defaults, resolve lazily) → <strong>initialization</strong> (<code>&lt;clinit&gt;</code>: superclass first, then textual order, once, under a lock). Loaders: bootstrap (<code>null</code>, <code>java.base</code>) ← platform ← app; <strong>parent delegation</strong> asks the parent first, so <code>java.lang.String</code> cannot be replaced. Identity is (loader, name): the same bytes in two loaders are two classes. <code>ClassNotFoundException</code> is "never found" (checked, from <code>forName</code>/<code>loadClass</code>); <code>NoClassDefFoundError</code> is "found at compile time, missing or broken now" — <em>Could not initialize class</em> means an earlier <code>ExceptionInInitializerError</code>.</p>
+
+  <h3 class="mt-8 mb-3">Reflection, handles and annotations <span class="lm-badge">§11</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Reflection versus method handles versus var handles</caption>
+      <thead><tr><th scope="col">Need</th><th scope="col">Tool</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        <tr><td>inspect members, read a record's components</td><td><code>Class</code> API, <code>getRecordComponents()</code></td><td>sort any listing you print — order is unspecified</td></tr>
+        <tr><td>read a private field in your own code (tests)</td><td><code>Field.setAccessible(true)</code></td><td>fails with <code>InaccessibleObjectException</code> on <code>java.base</code> unless <code>--add-opens</code></td></tr>
+        <tr><td>call a method chosen at start-up, millions of times</td><td><code>MethodHandles.lookup().findVirtual(...)</code> + <code>invokeExact</code></td><td>access checked once at lookup; the JIT can inline a constant handle</td></tr>
+        <tr><td>lock-free CAS / acquire-release on a field</td><td><code>VarHandle</code></td><td>the replacement for <code>Unsafe</code> and <code>AtomicXFieldUpdater</code></td></tr>
+        <tr><td>intercept calls to an interface</td><td><code>java.lang.reflect.Proxy</code></td><td>interfaces only; use a bytecode library for classes</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Annotations are metadata: <code>@Retention(RUNTIME)</code> or reflection cannot see them (the default is <code>CLASS</code>); <code>@Target</code> limits placement; <code>@Repeatable</code> needs a container; <code>@Inherited</code> applies to class annotations only. Reflection costs: no inlining, boxing of arguments, access checks per call — cache <code>Method</code> objects, or switch to handles.</p>
+
+  <h3 class="mt-8 mb-3">Module directives <span class="lm-badge">§12</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">module-info.java directives</caption>
+      <thead><tr><th scope="col">Directive</th><th scope="col">Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>requires m;</code></td><td>read <code>m</code>'s exported packages at compile and run time</td></tr>
+        <tr><td><code>requires transitive m;</code></td><td>…and everyone who requires <em>me</em> reads <code>m</code> too (use when <code>m</code>'s types appear in your API)</td></tr>
+        <tr><td><code>requires static m;</code></td><td>compile-time only (annotations, optional features)</td></tr>
+        <tr><td><code>exports p;</code> / <code>exports p to a, b;</code></td><td>public types in <code>p</code> are accessible at compile and run time (to everyone / to the named modules)</td></tr>
+        <tr><td><code>opens p;</code> / <code>opens p to a;</code></td><td>deep reflection into <code>p</code> at run time only (frameworks: Jackson, Hibernate)</td></tr>
+        <tr><td><code>open module m</code></td><td>every package is opened</td></tr>
+        <tr><td><code>uses S;</code> / <code>provides S with Impl;</code></td><td>consume / supply a <code>ServiceLoader</code> service</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><strong>Readability</strong> (requires) is necessary but not sufficient; <strong>accessibility</strong> also needs the package exported and the member public. Class-path code lives in the <em>unnamed module</em>, reads every module, and can reflect into any <code>opens</code> but not into <code>java.base</code> internals: the fix is <code>--add-opens java.base/java.lang=ALL-UNNAMED</code>, the cure is to stop needing it. A jar on the module path without <code>module-info</code> becomes an <em>automatic module</em> named from <code>Automatic-Module-Name</code> or its file name. Split packages are forbidden. <code>jdeps</code> finds your dependencies; <code>jlink</code> builds a runtime with only the modules you use.</p>
+
+  <h3 class="mt-8 mb-3">JIT tiers and JMH pitfalls <span class="lm-badge">§13</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">HotSpot compilation tiers</caption>
+      <thead><tr><th scope="col">Tier</th><th scope="col">Code</th><th scope="col">Entered after</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>interpreter, collecting counts</td><td>first call</td></tr>
+        <tr><td>1–3</td><td>C1 (3 = full profiling)</td><td>~200 invocations or hot loops (OSR)</td></tr>
+        <tr><td>4</td><td>C2, with inlining, escape analysis, scalar replacement</td><td>~5,000 invocations / ~15,000 back-edges</td></tr>
+        <tr><td>deopt</td><td>back to the interpreter</td><td>an uncommon trap: a new subclass broke a monomorphic inline, a null appeared, a branch never taken was taken</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Inlining limits (defaults): <code>MaxInlineSize</code> 35 bytecodes for cold calls, <code>FreqInlineSize</code> 325 for hot ones; megamorphic call sites (three or more receiver types) are not inlined. JMH pitfalls: <strong>dead-code elimination</strong> (return the value or sink it into a <code>Blackhole</code>), <strong>constant folding</strong> (read inputs from <code>@State</code> fields, not literals), <strong>no warm-up / no forks</strong> (<code>@Warmup</code>, <code>@Fork(1+)</code>), GC noise and CPU frequency. A result faster than a cycle is a bug in the benchmark, not a miracle. First three things to check for a slow service: the GC log, a thread dump under load, the hot methods from JFR.</p>
+
+  <h3 class="mt-8 mb-3">Serialization controls <span class="lm-badge">§14</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Serialization mechanisms and what they control</caption>
+      <thead><tr><th scope="col">Mechanism</th><th scope="col">Controls</th></tr></thead>
+      <tbody>
+        <tr><td><code>private static final long serialVersionUID</code></td><td>stream compatibility; mismatch → <code>InvalidClassException</code>. Always declare it.</td></tr>
+        <tr><td><code>transient</code></td><td>field skipped; reads back as the default (<code>null</code>/0), <em>not</em> the initializer value</td></tr>
+        <tr><td><code>writeObject</code> / <code>readObject</code></td><td>custom format; validate inside <code>readObject</code></td></tr>
+        <tr><td><code>writeReplace</code> / <code>readResolve</code></td><td>substitute another object (singletons, serialization proxy pattern)</td></tr>
+        <tr><td>records</td><td>always rebuilt through the canonical constructor, so compact-constructor validation runs on every read</td></tr>
+        <tr><td><code>ObjectInputFilter</code> (JEP 290/415)</td><td>allow-list classes, cap depth/array sizes; set per stream or globally via <code>jdk.serialFilter</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Deserializing untrusted bytes runs other people's <code>readObject</code> methods — a <em>gadget chain</em> turns that into remote code execution. Prefer JSON/Protobuf at trust boundaries; if you must use Java serialization, filter. <code>HttpClient</code>: build once, set <code>connectTimeout</code> on the client and <code>timeout</code> on each request, <code>BodyHandlers.ofString()</code>, <code>sendAsync</code> returns a <code>CompletableFuture</code>.</p>
+
+  <h3 class="mt-8 mb-3">Diagnostics in one place <span class="lm-badge">§1, §9, §13</span></h3>
+  <pre data-code data-lang="bash" data-nobar>
+jcmd                                   # list JVM pids
+jcmd &lt;pid&gt; Thread.print                # thread dump (also: jstack &lt;pid&gt;); run it three times, 10 s apart
+jcmd &lt;pid&gt; GC.heap_info                # generations and occupancy right now
+jcmd &lt;pid&gt; GC.heap_dump /tmp/heap.hprof  # then open in Eclipse MAT, look at the dominator tree
+jcmd &lt;pid&gt; VM.flags                    # the flags this JVM actually runs with
+jcmd &lt;pid&gt; VM.native_memory summary    # needs -XX:NativeMemoryTracking=summary
+jcmd &lt;pid&gt; Thread.dump_to_file -format=json dump.json   # includes virtual threads
+jcmd &lt;pid&gt; JFR.start duration=60s filename=rec.jfr
+jfr print --events jdk.ObjectAllocationSample rec.jfr | head
+jdeps --module-path out -s app.jar     # which modules you really depend on
+java -Xlog:gc*:file=gc.log -XX:+HeapDumpOnOutOfMemoryError -jar app.jar
+  </pre>
+</section>

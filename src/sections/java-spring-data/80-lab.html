@@ -1,0 +1,573 @@
+<section class="lm-section" id="lab" data-title="Hands-on lab" data-num="L">
+  <p class="lm-eyebrow">Put it together</p>
+  <h2 class="mb-4">Hands-on lab: the warehouse as a Spring Boot service</h2>
+
+  <p>Six steps that rebuild the JPA module's lab as a Spring application, each exercising a part of this module. Write each step before opening its solution. The steps share one application class, so by the end you have a single runnable program; the assembled version follows, compiled and run during the build of this page.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Starter</div>
+      <pre data-code data-lang="bash" data-nobar>
+node tools/fetch-deps.mjs java-spring-data        # once: resolves Spring Boot 4.1.1 into build/lib/java-spring-data
+mkdir -p lab/lm/lab &amp;&amp; cd lab
+# write lm/lab/SpringWarehouseLab.java as you go
+javac -d classes -cp "../build/lib/java-spring-data/*" lm/lab/SpringWarehouseLab.java
+java -cp "classes;../build/lib/java-spring-data/*" lm.lab.SpringWarehouseLab      # ':' instead of ';' on macOS/Linux
+      </pre>
+      <p class="mb-0 text-sm">Start from the bootstrap shape every program in this module uses: <code>@SpringBootApplication</code>, <code>@EnableJpaRepositories(considerNestedRepositories = true)</code>, a <code>CommandLineRunner</code>, and the deterministic property set from the How-to-use section. Add <code>spring.jpa.properties.hibernate.generate_statistics=true</code>; you will need it in step 4.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Step 1 — entities and derived queries <span class="lm-badge">§2, §3</span></h3>
+  <p>Map <code>Product</code> (unique <code>sku</code>, <code>name</code>, a <code>Category</code> enum stored as a string, <code>priceInCents</code>, an <code>active</code> flag), <code>StockLevel</code> (sharing the product's primary key, with a <code>@Version</code>), and an order with lines kept in sync by a helper. Give <code>ProductRepository</code> three derived queries: look up by SKU, list a category sorted by SKU, and test whether a SKU exists.</p>
+  <details class="lm-reveal"><summary>Solution — step 1</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Entity(name = "StockLevel") @Table(name = "stock_level")
+public static class StockLevel {
+    @Id Long id;
+    @OneToOne(fetch = FetchType.LAZY) @MapsId Product product;   // id = the product's id
+    int onHand;
+    @Version long version;                                        // optimistic locking in step 3
+}
+
+@Entity(name = "PurchaseOrder") @Table(name = "purchase_order")  // ORDER is a reserved word in SQL
+public static class PurchaseOrder {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    List&lt;OrderLine&gt; lines = new ArrayList&lt;&gt;();
+    void addLine(Product p, int qty) { lines.add(new OrderLine(this, p, qty)); }   // sets both sides
+}
+
+public interface ProductRepository extends JpaRepository&lt;Product, Long&gt; {
+    Optional&lt;Product&gt; findBySku(String sku);
+    List&lt;Product&gt; findByCategoryOrderBySkuAsc(Category category);
+    boolean existsBySku(String sku);
+}
+    </pre>
+    <p class="mb-0 text-sm"><code>@MapsId</code> makes the stock row's primary key the product's id, so there is no separate sequence and no join column to keep consistent. The entity is called <code>PurchaseOrder</code> because <code>order</code> is a reserved word; mapping a table called <code>order</code> works only with quoted identifiers, which then leak into every native query.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 2 — declared queries and projections <span class="lm-badge">§4</span></h3>
+  <p>Add three repository methods: revenue per category as a record DTO, products whose stock is below a threshold as an interface projection, and a bulk <code>reprice(category, delta)</code> that adds <code>delta</code> cents to every product in a category and returns the row count.</p>
+  <details class="lm-reveal"><summary>Solution — step 2</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+public record CategoryRevenue(Category category, long cents) {}
+public interface LowStock { String getSku(); int getOnHand(); }
+
+@Query("select new lm.lab.SpringWarehouseLab$CategoryRevenue(p.category, sum(l.qty * p.priceInCents)) " +
+       "from OrderLine l join l.product p group by p.category order by p.category")
+List&lt;CategoryRevenue&gt; revenueByCategory();
+
+@Query("select p.sku as sku, s.onHand as onHand from StockLevel s join s.product p " +
+       "where s.onHand &lt; :threshold order by p.sku")
+List&lt;LowStock&gt; lowStock(@Param("threshold") int threshold);
+
+@Transactional                                   // without it: TransactionRequiredException
+@Modifying(clearAutomatically = true)
+@Query("update Product p set p.priceInCents = p.priceInCents + :delta where p.category = :category")
+int reprice(@Param("category") Category category, @Param("delta") int delta);
+    </pre>
+    <p class="mb-0 text-sm">The <code>@Transactional</code> on <code>reprice</code> is not decoration. Spring Data runs a repository's query methods in a read-only transaction by default; an update or delete query there fails with <code>No active transaction for update or delete query</code>. The first draft of this lab hit exactly that. Either annotate the method, as here, or call it from a <code>@Transactional</code> service. The <code>$</code> in the DTO's name is the binary name of a nested record (§4).</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 3 — a transactional reservation with a retry <span class="lm-badge">§5</span></h3>
+  <p>Write <code>InventoryService.reserve(sku, qty)</code>: load the stock level, refuse with an exception if there is not enough, otherwise decrement — no explicit <code>save</code>. Then make a stale read fail and recover: one method loads the row, lets a second picker reserve the same SKU in its <em>own</em> committed transaction, then decrements. Wrap it in a gateway on a separate bean that retries once on <code>OptimisticLockingFailureException</code>.</p>
+  <details class="lm-reveal"><summary>Solution — step 3</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Service
+public static class InventoryService {
+    @Transactional
+    public int reserve(String sku, int qty) {
+        StockLevel level = stock.findByProductSku(sku).orElseThrow();
+        if (level.onHand &lt; qty) throw new OutOfStock("only " + level.onHand + " of " + sku);
+        level.onHand -= qty;                 // dirty checking: update ... where id=? and version=?
+        return level.onHand;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int reserveElsewhere(String sku, int qty) { return reserve(sku, qty); }   // a second picker
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int reserveWithInterference(String sku, int qty, Runnable interference) {
+        StockLevel level = stock.findByProductSku(sku).orElseThrow();   // reads version 0
+        if (interference != null) interference.run();                  // someone else commits version 1
+        level.onHand -= qty;                                            // update where version=0: 0 rows
+        return level.onHand;
+    }
+}
+
+@Component
+public static class ReservationGateway {           // a SEPARATE bean, so each attempt goes through the proxy
+    public String reserveWithRetry(String sku, int qty, Runnable firstAttemptInterference) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                int left = inventory.reserveWithInterference(sku, qty, attempt == 1 ? firstAttemptInterference : null);
+                return "attempts: " + attempt + ", left: " + left;
+            } catch (OptimisticLockingFailureException e) {
+                if (attempt == 3) throw e;
+            }
+        }
+    }
+}
+    </pre>
+    <p class="mb-0 text-sm">Three proxy rules from §5 decide whether this works. The interfering picker must be <code>REQUIRES_NEW</code>; a plain <code>@Transactional</code> method would <em>join</em> the attempt's transaction, share its persistence context and never conflict. The retry loop must live on another bean, or each attempt is a self-invocation that bypasses the proxy and runs in one transaction. And the exception surfaces at <em>commit</em>, which happens when <code>reserveWithInterference</code> returns through its proxy — so the <code>catch</code> belongs in the caller, not inside the method.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 4 — an N+1-free listing and a page of summaries <span class="lm-badge">§6, §7</span></h3>
+  <p>List every order with its lines and their products, walking the whole graph, in one SQL statement — prove the count with Hibernate's statistics. Then return the first page of order totals, two per page, as an interface projection with an explicit count query.</p>
+  <details class="lm-reveal"><summary>Solution — step 4</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@EntityGraph(attributePaths = {"lines", "lines.product"})
+@Query("select o from PurchaseOrder o order by o.id")
+List&lt;PurchaseOrder&gt; findAllWithLines();
+
+public interface OrderSummary { Long getId(); long getTotal(); }
+
+@Query(value = "select o.id as id, sum(l.qty * p.priceInCents) as total from PurchaseOrder o " +
+               "join o.lines l join l.product p group by o.id order by o.id",
+       countQuery = "select count(o) from PurchaseOrder o")
+Page&lt;OrderSummary&gt; summaries(Pageable pageable);
+
+// in the runner
+Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+stats.clear();
+List&lt;PurchaseOrder&gt; all = orders.findAllWithLines();
+// ... walk o.lines and l.product ...
+System.out.println("statements = " + stats.getPrepareStatementCount());   // 1
+    </pre>
+    <p class="mb-0 text-sm">The entity graph turns the lazy <code>lines</code> and <code>lines.product</code> into joins on this one query only, leaving the mapping lazy everywhere else. The explicit <code>countQuery</code> matters for <code>Page</code>: Spring Data's derived count of a <code>group by</code> query would count groups through a subquery at best, and a fetch-joined page would be paginated in memory (§7).</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 5 — auditing, events and a dynamic search <span class="lm-badge">§8, §9</span></h3>
+  <p>Stamp <code>createdAt</code> and <code>createdBy</code> on products automatically, with a fixed auditor. Publish an <code>OrderPlaced</code> event from an order service and count deliveries in a listener that runs only after commit. Finally, search products with a <code>Specification</code> combining category, a price range and the active flag.</p>
+  <details class="lm-reveal"><summary>Solution — step 5</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@EnableJpaAuditing                                   // on the application class
+@EntityListeners(AuditingEntityListener.class)       // on Product
+@CreatedDate Instant createdAt;
+@CreatedBy String createdBy;
+@Bean AuditorAware&lt;String&gt; auditor() { return () -&gt; Optional.of("picker-bot"); }
+
+@Transactional
+public Long place(LocalDate placed, LinkedHashMap&lt;Product, Integer&gt; items) {
+    PurchaseOrder order = new PurchaseOrder(placed);
+    items.forEach(order::addLine);
+    orders.save(order);
+    events.publishEvent(new OrderPlaced(order.id, order.lines.size()));
+    return order.id;
+}
+
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+public void on(OrderPlaced event) { delivered.incrementAndGet(); }
+
+public interface ProductRepository extends JpaRepository&lt;Product, Long&gt;, JpaSpecificationExecutor&lt;Product&gt; { … }
+
+static Specification&lt;Product&gt; inCategory(Category c) { return (root, q, cb) -&gt; cb.equal(root.get("category"), c); }
+static Specification&lt;Product&gt; priceBetween(int lo, int hi) { return (root, q, cb) -&gt; cb.between(root.get("priceInCents"), lo, hi); }
+static Specification&lt;Product&gt; active() { return (root, q, cb) -&gt; cb.isTrue(root.get("active")); }
+
+products.findAll(inCategory(FASTENER).and(priceBetween(0, 50)).and(active()), Sort.by("sku"));
+    </pre>
+    <p class="mb-0 text-sm">The event is published inside the transaction but the listener is held until commit. Had <code>place</code> thrown after <code>publishEvent</code>, the order would have rolled back and the listener would never have run — exactly the guarantee you want before sending a confirmation email. The <code>LinkedHashMap</code> is deliberate: <code>Map.of</code> has no defined iteration order, so line ids could differ between runs.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 6 — validation and configuration <span class="lm-badge">§10, §12</span></h3>
+  <p>Put <code>@NotBlank</code> on the SKU and <code>@Positive</code> on the price, and show that an invalid product is rejected before it reaches the table. Bind the low-stock threshold used in step 2 from a <code>warehouse.reorder-threshold</code> property into a <code>@ConfigurationProperties</code> record.</p>
+  <details class="lm-reveal"><summary>Solution — step 6</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@NotBlank @Column(nullable = false, unique = true, length = 16) String sku;
+@Positive int priceInCents;
+
+try {
+    products.saveAndFlush(new Product("  ", "Nameless", Category.MOTION, 0));
+} catch (ConstraintViolationException e) {
+    List&lt;String&gt; paths = e.getConstraintViolations().stream()
+        .map(v -&gt; v.getPropertyPath().toString()).sorted().toList();     // [priceInCents, sku]
+}
+
+@ConfigurationProperties(prefix = "warehouse")
+public record LabProps(int reorderThreshold) {}
+@EnableConfigurationProperties(SpringWarehouseLab.LabProps.class)        // on the application class
+// warehouse.reorder-threshold=20 in the properties
+    </pre>
+    <p class="mb-0 text-sm">Hibernate Validator runs on the persist event, so the <code>insert</code> is never issued: the table still holds four products afterwards. Sorting the property paths keeps the output stable; a <code>Set</code> of violations has no defined order.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">The finished thing</h3>
+
+  <p>All six steps in one application. The program runs with <code>show-sql</code> <strong>off</strong>: four entities' worth of DDL plus every statement of every step would bury the results, and the two claims that depend on SQL — one statement for the listing, a retry after a stale write — are proved more precisely by Hibernate's statistics and by the exception the retry catches. Turn <code>show-sql</code> on locally to watch the versioned <code>update</code> fail.</p>
+
+  <pre data-code data-lang="java" data-file="SpringWarehouseLab.java" data-verify="SpringWarehouseLab" data-package="lm.lab" data-hi="119,120,130,159,164,184,206,214">
+package lm.lab;
+
+import jakarta.persistence.*;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Bean;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.annotation.CreatedBy;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.domain.*;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+import org.springframework.data.jpa.repository.EntityGraph;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+@EnableJpaAuditing
+@EnableConfigurationProperties(SpringWarehouseLab.LabProps.class)
+public class SpringWarehouseLab {
+
+    // ── step 1: entities ──────────────────────────────────────────────────
+    public enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    @Entity(name = "Product") @Table(name = "product")
+    @EntityListeners(AuditingEntityListener.class)
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @NotBlank @Column(nullable = false, unique = true, length = 16) String sku;
+        @Column(nullable = false) String name;
+        @Enumerated(EnumType.STRING) @Column(nullable = false, length = 16) Category category;
+        @Positive int priceInCents;
+        boolean active = true;
+        @CreatedDate Instant createdAt;
+        @CreatedBy String createdBy;
+        protected Product() {}
+        Product(String sku, String name, Category category, int priceInCents) {
+            this.sku = sku; this.name = name; this.category = category; this.priceInCents = priceInCents;
+        }
+        @Override public String toString() { return sku + "@" + priceInCents; }
+    }
+
+    @Entity(name = "StockLevel") @Table(name = "stock_level")
+    public static class StockLevel {
+        @Id Long id;
+        @OneToOne(fetch = FetchType.LAZY) @MapsId Product product;
+        int onHand;
+        @Version long version;
+        protected StockLevel() {}
+        StockLevel(Product product, int onHand) { this.product = product; this.onHand = onHand; }
+    }
+
+    @Entity(name = "PurchaseOrder") @Table(name = "purchase_order")
+    public static class PurchaseOrder {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false) LocalDate placed;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+        List&lt;OrderLine&gt; lines = new ArrayList&lt;&gt;();
+        protected PurchaseOrder() {}
+        PurchaseOrder(LocalDate placed) { this.placed = placed; }
+        void addLine(Product p, int qty) { OrderLine l = new OrderLine(this, p, qty); lines.add(l); }
+    }
+
+    @Entity(name = "OrderLine") @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) PurchaseOrder order;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) Product product;
+        int qty;
+        protected OrderLine() {}
+        OrderLine(PurchaseOrder order, Product product, int qty) { this.order = order; this.product = product; this.qty = qty; }
+    }
+
+    // ── step 2: repositories, projections, a modifying query ─────────────
+    public record CategoryRevenue(Category category, long cents) {}
+    public interface LowStock { String getSku(); int getOnHand(); }
+    public interface OrderSummary { Long getId(); long getTotal(); }
+
+    public interface ProductRepository extends JpaRepository&lt;Product, Long&gt;, JpaSpecificationExecutor&lt;Product&gt; {
+        Optional&lt;Product&gt; findBySku(String sku);
+        List&lt;Product&gt; findByCategoryOrderBySkuAsc(Category category);
+        boolean existsBySku(String sku);
+
+        @org.springframework.data.jpa.repository.Query("select new lm.lab.SpringWarehouseLab$CategoryRevenue(p.category, sum(l.qty * p.priceInCents)) " +
+               "from OrderLine l join l.product p group by p.category order by p.category")
+        List&lt;CategoryRevenue&gt; revenueByCategory();
+
+        @org.springframework.data.jpa.repository.Query("select p.sku as sku, s.onHand as onHand from StockLevel s join s.product p " +
+               "where s.onHand &lt; :threshold order by p.sku")
+        List&lt;LowStock&gt; lowStock(@Param("threshold") int threshold);
+
+        @Transactional                       // repository query methods are read-only by default
+        @Modifying(clearAutomatically = true)
+        @org.springframework.data.jpa.repository.Query("update Product p set p.priceInCents = p.priceInCents + :delta where p.category = :category")
+        int reprice(@Param("category") Category category, @Param("delta") int delta);
+    }
+
+    public interface StockRepository extends JpaRepository&lt;StockLevel, Long&gt; {
+        Optional&lt;StockLevel&gt; findByProductSku(String sku);
+    }
+
+    public interface OrderRepository extends JpaRepository&lt;PurchaseOrder, Long&gt; {
+        @org.springframework.data.jpa.repository.EntityGraph(attributePaths = {"lines", "lines.product"})
+        @org.springframework.data.jpa.repository.Query("select o from PurchaseOrder o order by o.id")
+        List&lt;PurchaseOrder&gt; findAllWithLines();
+
+        @org.springframework.data.jpa.repository.Query(value = "select o.id as id, sum(l.qty * p.priceInCents) as total from PurchaseOrder o " +
+                       "join o.lines l join l.product p group by o.id order by o.id",
+               countQuery = "select count(o) from PurchaseOrder o")
+        Page&lt;OrderSummary&gt; summaries(Pageable pageable);
+    }
+
+    // ── step 3: a transactional service with an optimistic retry ──────────
+    public static class OutOfStock extends RuntimeException {
+        OutOfStock(String msg) { super(msg); }
+    }
+
+    @Service
+    public static class InventoryService {
+        private final StockRepository stock;
+        InventoryService(StockRepository stock) { this.stock = stock; }
+
+        @Transactional
+        public int reserve(String sku, int qty) {
+            StockLevel level = stock.findByProductSku(sku).orElseThrow();
+            if (level.onHand &lt; qty) throw new OutOfStock("only " + level.onHand + " of " + sku);
+            level.onHand -= qty;                       // dirty checking issues the versioned update at commit
+            return level.onHand;
+        }
+
+        /* A second picker: its own transaction, committed before it returns. */
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public int reserveElsewhere(String sku, int qty) { return reserve(sku, qty); }
+
+        /* Loads the row, then lets `interference` run in its own committed
+           transaction, then updates — exactly what a concurrent picker does. */
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public int reserveWithInterference(String sku, int qty, Runnable interference) {
+            StockLevel level = stock.findByProductSku(sku).orElseThrow();
+            if (interference != null) interference.run();
+            if (level.onHand &lt; qty) throw new OutOfStock("only " + level.onHand + " of " + sku);
+            level.onHand -= qty;
+            return level.onHand;
+        }
+    }
+
+    @Component
+    public static class ReservationGateway {
+        private final InventoryService inventory;
+        ReservationGateway(InventoryService inventory) { this.inventory = inventory; }
+
+        public String reserveWithRetry(String sku, int qty, Runnable firstAttemptInterference) {
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    int left = inventory.reserveWithInterference(sku, qty, attempt == 1 ? firstAttemptInterference : null);
+                    return "attempts: " + attempt + ", left: " + left;
+                } catch (OptimisticLockingFailureException e) {
+                    if (attempt == 3) throw e;
+                    System.out.println("  attempt " + attempt + " failed with " + e.getClass().getSimpleName() + ", retrying");
+                }
+            }
+        }
+    }
+
+    // ── step 5: auditing, domain events, specifications ───────────────────
+    public record OrderPlaced(Long orderId, int lineCount) {}
+
+    @Service
+    public static class OrderService {
+        private final OrderRepository orders;
+        private final ApplicationEventPublisher events;
+        OrderService(OrderRepository orders, ApplicationEventPublisher events) { this.orders = orders; this.events = events; }
+
+        @Transactional
+        public Long place(LocalDate placed, LinkedHashMap&lt;Product, Integer&gt; items) {
+            PurchaseOrder order = new PurchaseOrder(placed);
+            items.forEach(order::addLine);
+            orders.save(order);
+            events.publishEvent(new OrderPlaced(order.id, order.lines.size()));   // delivered only after commit
+            return order.id;
+        }
+    }
+
+    @Component
+    public static class OrderPlacedListener {
+        final AtomicInteger delivered = new AtomicInteger();
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        public void on(OrderPlaced event) { delivered.incrementAndGet(); }
+    }
+
+    static Specification&lt;Product&gt; inCategory(Category c) { return (root, q, cb) -&gt; cb.equal(root.get("category"), c); }
+    static Specification&lt;Product&gt; priceBetween(int lo, int hi) { return (root, q, cb) -&gt; cb.between(root.get("priceInCents"), lo, hi); }
+    static Specification&lt;Product&gt; active() { return (root, q, cb) -&gt; cb.isTrue(root.get("active")); }
+
+    // ── step 6: configuration ─────────────────────────────────────────────
+    @ConfigurationProperties(prefix = "warehouse")
+    public record LabProps(int reorderThreshold) {}
+
+    @Bean org.springframework.data.domain.AuditorAware&lt;String&gt; auditor() { return () -&gt; Optional.of("picker-bot"); }
+
+    /* Map.of has no defined iteration order; a LinkedHashMap keeps line ids stable. */
+    static LinkedHashMap&lt;Product, Integer&gt; lines(Object... pairs) {
+        LinkedHashMap&lt;Product, Integer&gt; m = new LinkedHashMap&lt;&gt;();
+        for (int i = 0; i &lt; pairs.length; i += 2) m.put((Product) pairs[i], (Integer) pairs[i + 1]);
+        return m;
+    }
+
+    // ── the run ───────────────────────────────────────────────────────────
+    @Bean CommandLineRunner run(ProductRepository products, StockRepository stock, OrderRepository orders,
+                                InventoryService inventory, ReservationGateway gateway, OrderService orderService,
+                                OrderPlacedListener listener, LabProps props, EntityManagerFactory emf) {
+        return args -&gt; {
+            Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+
+            // step 1 — seed through repositories
+            Product bolt = products.save(new Product("BOLT-7", "Hex bolt M7", Category.FASTENER, 80));
+            Product nut = products.save(new Product("NUT-3", "Nut M3", Category.FASTENER, 25));
+            Product gird = products.save(new Product("GIRD-1", "Girder 1m", Category.STRUCTURAL, 120_000));
+            Product cam = products.save(new Product("CAM-9", "Cam follower", Category.MOTION, 2_300));
+            stock.saveAll(List.of(new StockLevel(bolt, 400), new StockLevel(nut, 12), new StockLevel(gird, 3), new StockLevel(cam, 30)));
+            System.out.println("step 1  products        = " + products.count() + ", stock rows = " + stock.count());
+            System.out.println("step 1  fasteners       = " + products.findByCategoryOrderBySkuAsc(Category.FASTENER));
+            System.out.println("step 1  exists NUT-3    = " + products.existsBySku("NUT-3") + ", exists ROD-4 = " + products.existsBySku("ROD-4"));
+            System.out.println("step 1  findBySku       = " + products.findBySku("CAM-9").map(p -&gt; p.name).orElse("?"));
+
+            // step 5 (events need orders) — place three orders
+            orderService.place(LocalDate.of(2026, 10, 1), lines(bolt, 10, nut, 4));
+            orderService.place(LocalDate.of(2026, 10, 2), lines(gird, 1));
+            orderService.place(LocalDate.of(2026, 10, 3), lines(cam, 2, bolt, 5));
+            System.out.println("step 5  events after commit = " + listener.delivered.get());
+
+            // step 2 — projections and a modifying query
+            System.out.println("step 2  revenue         = " + products.revenueByCategory());
+            products.lowStock(props.reorderThreshold()).forEach(l -&gt;
+                System.out.println("step 2  low stock       = " + l.getSku() + " on hand " + l.getOnHand() + " (threshold " + props.reorderThreshold() + ")"));
+            System.out.println("step 2  repriced rows   = " + products.reprice(Category.FASTENER, 5));
+            System.out.println("step 2  after reprice   = " + products.findByCategoryOrderBySkuAsc(Category.FASTENER));
+
+            // step 3 — reservations
+            System.out.println("step 3  reserve 3 GIRD  = " + inventory.reserve("GIRD-1", 3) + " left");
+            try { inventory.reserve("GIRD-1", 1); }
+            catch (OutOfStock e) { System.out.println("step 3  refused         = " + e.getMessage()); }
+            String outcome = gateway.reserveWithRetry("BOLT-7", 50, () -&gt; inventory.reserveElsewhere("BOLT-7", 1));
+            System.out.println("step 3  retry outcome   = " + outcome + "   (399 after the interfering picker, then 349)");
+            System.out.println("step 3  version BOLT-7  = " + stock.findByProductSku("BOLT-7").orElseThrow().version);
+
+            // step 4 — N+1-free listing and a projection page
+            stats.clear();
+            List&lt;PurchaseOrder&gt; all = orders.findAllWithLines();
+            int lineTotal = 0;
+            for (PurchaseOrder o : all) for (OrderLine l : o.lines) lineTotal += l.qty * l.product.priceInCents;
+            System.out.println("step 4  orders          = " + all.size() + ", lines walked = " + all.stream().mapToInt(o -&gt; o.lines.size()).sum()
+                    + ", statements = " + stats.getPrepareStatementCount());
+            Page&lt;OrderSummary&gt; page = orders.summaries(PageRequest.of(0, 2));
+            System.out.println("step 4  page 0/2        = " + page.getContent().stream().map(s -&gt; s.getId() + "=" + s.getTotal()).toList()
+                    + ", total elements " + page.getTotalElements() + ", pages " + page.getTotalPages());
+
+            // step 5 — auditing and specifications
+            Product audited = products.findBySku("BOLT-7").orElseThrow();
+            System.out.println("step 5  audit           = createdBy " + audited.createdBy + ", createdAt set " + (audited.createdAt != null));
+            Specification&lt;Product&gt; spec = inCategory(Category.FASTENER).and(priceBetween(0, 50)).and(active());
+            System.out.println("step 5  spec search     = " + products.findAll(spec, Sort.by("sku")));
+
+            // step 6 — validation at the boundary
+            try {
+                products.saveAndFlush(new Product("  ", "Nameless", Category.MOTION, 0));
+            } catch (ConstraintViolationException e) {
+                List&lt;String&gt; paths = e.getConstraintViolations().stream().map(ConstraintViolation::getPropertyPath).map(Object::toString).sorted().toList();
+                System.out.println("step 6  rejected        = " + e.getClass().getSimpleName() + " on " + paths);
+            }
+            System.out.println("step 6  products        = " + products.count() + "   (the invalid one never reached the table)");
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(SpringWarehouseLab.class);
+        app.setDefaultProperties(Map.ofEntries(
+            Map.entry("spring.main.web-application-type", "none"),
+            Map.entry("spring.main.banner-mode", "off"),
+            Map.entry("spring.main.log-startup-info", "false"),
+            Map.entry("logging.level.root", "WARN"),
+            Map.entry("logging.pattern.console", "%level %logger{0}: %msg%n"),
+            Map.entry("spring.datasource.url", "jdbc:h2:mem:springlab;DB_CLOSE_DELAY=-1"),
+            Map.entry("spring.jpa.hibernate.ddl-auto", "create-drop"),
+            Map.entry("spring.jpa.show-sql", "false"),
+            Map.entry("spring.jpa.open-in-view", "false"),
+            Map.entry("spring.jpa.properties.hibernate.generate_statistics", "true"),
+            Map.entry("warehouse.reorder-threshold", "20")));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="SpringWarehouseLab">
+step 1  products        = 4, stock rows = 4
+step 1  fasteners       = [BOLT-7@80, NUT-3@25]
+step 1  exists NUT-3    = true, exists ROD-4 = false
+step 1  findBySku       = Cam follower
+step 5  events after commit = 3
+step 2  revenue         = [CategoryRevenue[category=FASTENER, cents=1300], CategoryRevenue[category=MOTION, cents=4600], CategoryRevenue[category=STRUCTURAL, cents=120000]]
+step 2  low stock       = GIRD-1 on hand 3 (threshold 20)
+step 2  low stock       = NUT-3 on hand 12 (threshold 20)
+step 2  repriced rows   = 2
+step 2  after reprice   = [BOLT-7@85, NUT-3@30]
+step 3  reserve 3 GIRD  = 0 left
+step 3  refused         = only 0 of GIRD-1
+  attempt 1 failed with ObjectOptimisticLockingFailureException, retrying
+step 3  retry outcome   = attempts: 2, left: 349   (399 after the interfering picker, then 349)
+step 3  version BOLT-7  = 2
+step 4  orders          = 3, lines walked = 5, statements = 1
+step 4  page 0/2        = [1=970, 2=120000], total elements 3, pages 2
+step 5  audit           = createdBy picker-bot, createdAt set true
+step 5  spec search     = [NUT-3@30]
+step 6  rejected        = ConstraintViolationException on [priceInCents, sku]
+step 6  products        = 4   (the invalid one never reached the table)
+  </pre>
+
+  <p>Every number can be derived by hand, which is the point of checking it:</p>
+  <ul class="max-w-prose">
+    <li><strong>Events before step 2.</strong> The orders are placed early because the revenue query in step 2 needs them; the <code>step 5</code> line reports the three after-commit deliveries at that moment.</li>
+    <li><strong>Revenue.</strong> Fasteners: <code>10 × 80 + 4 × 25 + 5 × 80 = 1300</code>. Motion: <code>2 × 2300 = 4600</code>. Structural: one girder at <code>120000</code>.</li>
+    <li><strong>Low stock below 20.</strong> <code>GIRD-1</code> (3) and <code>NUT-3</code> (12); <code>CAM-9</code> has 30 and <code>BOLT-7</code> 400.</li>
+    <li><strong>Reprice.</strong> Two fasteners, each 5 cents dearer: <code>BOLT-7</code> 85, <code>NUT-3</code> 30.</li>
+    <li><strong>Reservations.</strong> Three girders leave 0, so the next request is refused. For <code>BOLT-7</code>, attempt 1 reads 400 at version 0; the interfering picker commits 399 at version 1; attempt 1's <code>update … where version = 0</code> matches no row and fails. Attempt 2 reads 399 at version 1 and leaves 349 at version 2.</li>
+    <li><strong>One statement</strong> for three orders and five lines, products included — the entity graph at work.</li>
+    <li><strong>The page.</strong> Order 1 is <code>10 × 85 + 4 × 30 = 970</code>, priced <em>after</em> the reprice: the summary query reads current prices, because the order lines store no price of their own. A real order should copy the unit price onto the line at placement — the first extension below.</li>
+    <li><strong>The search.</strong> Fasteners between 0 and 50 cents that are active: only <code>NUT-3</code> at 30 after the reprice.</li>
+  </ul>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Extensions worth attempting</div>
+      <ul class="mb-0">
+        <li><strong>A REST layer.</strong> Add <code>spring-boot-starter-web</code> and a controller that returns <code>OrderSummary</code> pages and accepts a <code>PlaceOrderRequest</code> record validated with <code>@Valid</code>. Never return an entity: the lazy associations and the <code>@Version</code> field are not part of your API. Copy the unit price onto <code>OrderLine</code> while you are there.</li>
+        <li><strong>A Testcontainers test.</strong> Write a <code>@DataJpaTest</code> against PostgreSQL with <code>@ServiceConnection</code> that asserts the listing still takes one statement. Then run the reservation retry against it: PostgreSQL's locking differs from H2's, and the test will tell you whether your retry still holds.</li>
+        <li><strong>A Flyway migration.</strong> Generate the schema once with Hibernate's script export (JPA §10), commit it as <code>V1__init.sql</code>, switch <code>ddl-auto</code> to <code>validate</code>, and add a <code>V2</code> that introduces the unit-price column with a backfill.</li>
+      </ul>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lab"> Mark this section complete
+  </label>
+</section>

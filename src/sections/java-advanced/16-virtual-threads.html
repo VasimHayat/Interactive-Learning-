@@ -1,0 +1,278 @@
+<section class="lm-section" id="virtual-threads" data-title="Virtual threads and structured concurrency" data-num="7">
+  <p class="lm-eyebrow">Section 7</p>
+  <h2 class="mb-4">Virtual threads and structured concurrency</h2>
+
+  <p>Every thread you have met so far in this module is a <strong>platform thread</strong>: a thin wrapper over an operating-system thread, with a stack reserved up front (half a megabyte or more), created and scheduled by the kernel. That is why §5 taught you to pool them: you can afford a few hundred, not a few hundred thousand, and the thread-per-request server that is the simplest thing to write runs out of threads long before it runs out of CPU. §6 was one response to that — stop blocking, describe the work as a pipeline of callbacks, let a small pool execute it. It works, and it is hard to read, debug, and cancel.</p>
+
+  <p>Java 21's answer (JEP 444) is to make the thread itself cheap. A <strong>virtual thread</strong> is a thread whose stack lives on the heap as an ordinary object and which is scheduled not by the kernel but by the JVM, onto a small pool of platform threads called <strong>carriers</strong>. When a virtual thread blocks — on a socket, a sleep, a lock from <code>java.util.concurrent</code> — the JVM copies its frames off the carrier (<em>unmounts</em> it), and the carrier picks up another virtual thread. When the I/O completes, the virtual thread is mounted again on whichever carrier is free. The cost of a blocked virtual thread is a few hundred bytes of heap. You can have a million of them. And the code you write is the sequential, blocking code from Fundamentals, with no callbacks at all.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Ten thousand pickers each wait ten milliseconds for a scanner. On platform threads that is either a 100-second sequential run or ten thousand OS threads. On virtual threads it is neither.</p>
+
+  <pre data-code data-lang="java" data-file="VirtualThreads.java" data-verify="VirtualThreads" data-hi="12,15,21">
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.ReentrantLock;
+
+public class VirtualThreads {
+    public static void main(String[] args) throws Exception {
+        LongAdder done = new LongAdder();
+        LongAdder virtualInside = new LongAdder();
+
+        long t0 = System.nanoTime();
+        try (ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < 10_000; i++) {
+                ex.submit(() -> {
+                    Thread.sleep(10);                               // a blocking call: the thread unmounts
+                    if (Thread.currentThread().isVirtual()) virtualInside.increment();
+                    done.increment();
+                    return null;
+                });
+            }
+        }                                                           // close() waits for every task
+        long seconds = (System.nanoTime() - t0) / 1_000_000_000L;
+        System.out.println("tasks completed       = " + done.sum());
+        System.out.println("all ran virtual       = " + (virtualInside.sum() == 10_000));
+        System.out.println("100 s of sleeps took under 30 s = " + (seconds < 30));
+
+        Thread picker = Thread.ofVirtual().name("picker-", 0).unstarted(() -> { });
+        System.out.println("isVirtual             = " + picker.isVirtual());
+        System.out.println("isDaemon              = " + picker.isDaemon());
+        System.out.println("name                  = " + picker.getName());
+        System.out.println("priority              = " + picker.getPriority() + " (always NORM_PRIORITY)");
+        System.out.println("platform isVirtual    = " + Thread.ofPlatform().unstarted(() -> { }).isVirtual());
+
+        // ThreadLocal is per thread, virtual or not. That is what makes it expensive at a million threads.
+        ThreadLocal<String> tenant = ThreadLocal.withInitial(() -> "unset");
+        Thread vt = Thread.startVirtualThread(() -> tenant.set("warehouse-A"));
+        vt.join();
+        System.out.println("main sees ThreadLocal = " + tenant.get());
+
+        // A j.u.c. lock parks the virtual thread and frees its carrier for someone else.
+        ReentrantLock lock = new ReentrantLock();
+        LongAdder counter = new LongAdder();
+        try (ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < 1_000; i++) {
+                ex.submit(() -> { lock.lock(); try { counter.increment(); } finally { lock.unlock(); } });
+            }
+        }
+        System.out.println("locked increments     = " + counter.sum());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="VirtualThreads">
+tasks completed       = 10000
+all ran virtual       = true
+100 s of sleeps took under 30 s = true
+isVirtual             = true
+isDaemon              = true
+name                  = picker-0
+priority              = 5 (always NORM_PRIORITY)
+platform isVirtual    = false
+main sees ThreadLocal = unset
+locked increments     = 1000
+  </pre>
+
+  <p>On the machine this page was built on, the ten thousand sleeps finished in well under a second; the output says "under 30 s" only because a verified output must be true on any machine. Read the rest of it:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>newVirtualThreadPerTaskExecutor</code> creates a thread per task</strong> and never reuses one. It is an <code>ExecutorService</code>, so the submit/shutdown API from §5 is unchanged, and it is <code>AutoCloseable</code>: the try-with-resources block ends only when every task has finished. That is the simplest form of <em>structured</em> concurrency — the tasks cannot outlive the block that started them.</li>
+    <li><strong>Virtual threads are always daemon threads with normal priority</strong>, and <code>setDaemon(false)</code> or <code>setPriority</code> on one is ignored or rejected. The JVM does not wait for them at exit; your executor's close does.</li>
+    <li><strong><code>ThreadLocal</code> works exactly as before</strong>, which is the problem: a value cached per thread is now cached per task, a million times over. Prefer passing context as parameters, and watch for scoped values (<code>ScopedValue</code>, preview in 21, final in a later release) which were designed for this.</li>
+    <li><strong>A <code>ReentrantLock</code> unmounts cleanly.</strong> A thousand virtual threads contended for one lock; each one that had to wait was parked off its carrier, so the carriers kept serving others. The same program with a <code>synchronized</code> block behaves differently in 21, as the next part shows.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Mounting, parking and pinning</h3>
+
+  <p>The scheduler is a <code>ForkJoinPool</code> whose size defaults to the number of cores. Those are the carriers. Watch what happens to them under three kinds of task, with a handful of carriers and many virtual threads.</p>
+
+  <div class="lm-card" data-sandbox="carrier-mount">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+      Virtual threads on carriers
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Carriers <span class="lm-readout" data-sb-carriersout>2</span></span>
+        <input type="range" data-sb-carriers min="1" max="8" value="2" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Virtual threads <span class="lm-readout" data-sb-vtsout>12</span></span>
+        <input type="range" data-sb-vts min="1" max="64" value="12" step="1">
+      </label>
+      <label class="lm-field grow">
+        <span>Each task does</span>
+        <select data-sb-task>
+          <option value="io" selected>1 tick of CPU, 3 ticks blocked on I/O, 1 tick of CPU</option>
+          <option value="cpu">5 ticks of pure CPU (never blocks)</option>
+          <option value="sync">the I/O task, but blocked inside a synchronized block</option>
+        </select>
+      </label>
+    </div>
+    <div class="flex flex-wrap gap-2 mb-3">
+      <button type="button" class="lm-btn lm-btn--primary" data-sb-step>Step one tick</button>
+      <button type="button" class="lm-btn" data-sb-run>Run to the end</button>
+      <button type="button" class="lm-btn" data-sb-reset>Reset</button>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>The three cases are the whole story of when virtual threads help:</p>
+  <ul class="max-w-prose">
+    <li><strong>Blocking I/O</strong> is the design target. Each virtual thread needs a carrier only for its two ticks of CPU; while it waits, its carrier serves someone else. Throughput is bounded by the I/O, not by the thread count, and two carriers finish sixty-four tasks almost as fast as sixty-four would.</li>
+    <li><strong>CPU-bound work gains nothing.</strong> A virtual thread that never blocks never unmounts, so at most <em>carriers</em> tasks progress at once — exactly the fixed pool of §5, with extra bookkeeping. Virtual threads do not create parallelism; they make waiting cheap.</li>
+    <li><strong>Pinning</strong> is the trap in Java 21. A virtual thread that blocks while holding a monitor (<code>synchronized</code>) or inside a native frame cannot be unmounted, so its carrier sits idle for the whole wait. With a handful of carriers, a few pinned threads collapse throughput to that of a tiny platform pool. The fix in 21 is to use <code>ReentrantLock</code> on blocking paths; JEP 491 (Java 24) removes the <code>synchronized</code> limitation. <code>-Djdk.tracePinnedThreads=full</code> prints a stack whenever it happens.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">What changes, and what does not</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Virtual threads compared with platform threads">
+      <button type="button" class="lm-tab" role="tab" id="tab-virtual-threads-model" aria-controls="panel-virtual-threads-model" aria-selected="true" tabindex="0">The model</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-virtual-threads-dont" aria-controls="panel-virtual-threads-dont" aria-selected="false" tabindex="-1">Do not pool them</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-virtual-threads-structured" aria-controls="panel-virtual-threads-structured" aria-selected="false" tabindex="-1">Structured concurrency</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-virtual-threads-observe" aria-controls="panel-virtual-threads-observe" aria-selected="false" tabindex="-1">Observing them</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-virtual-threads-model" aria-labelledby="tab-virtual-threads-model" tabindex="0">
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Platform versus virtual thread</caption>
+          <thead><tr><th scope="col"></th><th scope="col">Platform thread</th><th scope="col">Virtual thread</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Backed by</th><td>one OS thread, for its whole life</td><td>a heap object; borrows a carrier only while running</td></tr>
+            <tr><th scope="row">Stack</th><td>reserved up front, typically 512 kB–1 MB</td><td>grows and shrinks on the heap; frames copied on unmount</td></tr>
+            <tr><th scope="row">Scheduled by</th><td>the kernel, pre-emptively</td><td>the JVM's <code>ForkJoinPool</code>, at blocking points only</td></tr>
+            <tr><th scope="row">Sensible count</th><td>hundreds</td><td>millions</td></tr>
+            <tr><th scope="row">Blocking call</th><td>the OS thread waits</td><td>the virtual thread unmounts; the carrier is reused</td></tr>
+            <tr><th scope="row">Daemon / priority</th><td>configurable</td><td>always daemon, always normal priority</td></tr>
+            <tr><th scope="row">Creation</th><td><code>new Thread</code>, <code>Thread.ofPlatform()</code></td><td><code>Thread.ofVirtual()</code>, <code>Thread.startVirtualThread</code>, <code>newVirtualThreadPerTaskExecutor</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0 text-sm">Underneath is a <em>continuation</em>: the JVM can freeze a running frame stack into an object and thaw it later on any carrier. That mechanism is internal, but it explains why a virtual thread's identity, stack trace and <code>ThreadLocal</code>s survive a move from one carrier to another.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-virtual-threads-dont" aria-labelledby="tab-virtual-threads-dont" tabindex="0" hidden>
+      <p>A pool exists to amortise the cost of creating a thread. A virtual thread costs about as much as a small object, so pooling it saves nothing and loses the one-task-per-thread model that makes stack traces and cancellation make sense. The rule is: <strong>never pool virtual threads; create one per task</strong>, and if you need to limit concurrency on a scarce resource — a database that allows 50 connections — limit <em>that</em> with a <code>Semaphore</code>, not by capping the threads.</p>
+      <pre data-code data-lang="java" data-nobar>
+// WRONG: a fixed pool of virtual threads caps concurrency for no benefit
+ExecutorService wrong = Executors.newFixedThreadPool(200, Thread.ofVirtual().factory());
+
+// RIGHT: one virtual thread per task; bound the scarce resource instead
+Semaphore dbSlots = new Semaphore(50);
+try (var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (Order o : orders) {
+        ex.submit(() -> {
+            dbSlots.acquire();
+            try { return reserve(o); } finally { dbSlots.release(); }
+        });
+    }
+}
+      </pre>
+      <p class="mb-0 text-sm">Cheap is not free. Each virtual thread still allocates its stack chunks on the heap and still carries its <code>ThreadLocal</code> map, so a million threads each caching a 1 MB buffer in a <code>ThreadLocal</code> is a terabyte. Audit what libraries stash per thread before you turn the dial up.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-virtual-threads-structured" aria-labelledby="tab-virtual-threads-structured" tabindex="0" hidden>
+      <p>Cheap threads make a new discipline affordable: a task that forks sub-tasks waits for all of them before it returns, so the sub-tasks are <em>scoped</em> to a block like local variables. If one fails, the others are cancelled; if the parent is cancelled, so are the children; a thread dump shows the tree. <code>StructuredTaskScope</code> is a <strong>preview API in Java 21</strong> (JEP 453; it needs <code>--enable-preview</code>, so this block is not compiled at build time) and the shape is:</p>
+      <pre data-code data-lang="java" data-nobar>
+// PREVIEW in Java 21 — requires --enable-preview; shape only
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    Subtask<Integer> price = scope.fork(() -> priceService.lookup(sku));
+    Subtask<Integer> stock = scope.fork(() -> stockService.lookup(sku));
+
+    scope.join()            // wait for both
+         .throwIfFailed();  // rethrow the first failure, after cancelling the other
+
+    return new Quote(sku, price.get(), stock.get());
+}   // leaving the block guarantees no sub-task is still running
+      </pre>
+      <p class="mb-0 text-sm">Compare this with the <code>thenCombine</code> of §6: same two lookups, but the code reads top to bottom, the failure propagates as a normal exception on the caller's thread, and cancelling the lost sibling is automatic. Until the API is final, <code>newVirtualThreadPerTaskExecutor</code> in a try-with-resources gives you the "cannot outlive the block" half of the guarantee today.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-virtual-threads-observe" aria-labelledby="tab-virtual-threads-observe" tabindex="0" hidden>
+      <p>A classic <code>jstack</code> dump lists platform threads only, and a million virtual threads would not fit in it anyway. The JDK 21 tools:</p>
+      <pre data-code data-lang="bash" data-nobar>
+# every thread, grouped by the executor / scope that owns it, as JSON
+jcmd &lt;pid&gt; Thread.dump_to_file -format=json threads.json
+
+# JFR records virtual-thread starts, ends and pinning events
+java -XX:StartFlightRecording=filename=rec.jfr ... MyApp
+jfr print --events jdk.VirtualThreadPinned rec.jfr
+
+# print a stack trace whenever a virtual thread pins its carrier
+java -Djdk.tracePinnedThreads=full MyApp
+      </pre>
+      <p class="mb-0 text-sm">Two knobs you will meet: <code>-Djdk.virtualThreadScheduler.parallelism</code> sets the carrier count (default: cores), and <code>-Djdk.virtualThreadScheduler.maxPoolSize</code> caps the extra carriers the scheduler may add temporarily to compensate for pinned ones.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Where teams get burnt in the first month</div>
+      <ul class="mb-0">
+        <li><strong><code>synchronized</code> on a blocking path.</strong> A JDBC driver or an old HTTP client that synchronises around socket reads pins every carrier it touches. Check the libraries before you check your own code; the pinned-threads trace will tell you.</li>
+        <li><strong>Unbounded fan-out.</strong> "One thread per task" with no limit on tasks means one virtual thread per row of a ten-million-row table, all of them opening a connection. Virtual threads remove the thread limit, not the limits of the things the threads talk to.</li>
+        <li><strong>Expecting speed-ups on CPU work.</strong> A parallel sort does not get faster on virtual threads; it may get slower. Keep the §5 fixed pool for compute.</li>
+        <li><strong>Relying on daemon semantics.</strong> The JVM exits while virtual threads are still running. Always own them in an executor you close, or join them.</li>
+        <li><strong>Thread-identity assumptions.</strong> Code that keyed caches or locks by thread, or counted "active threads" to size itself, now sees a different thread for every request. That is usually a sign the design was leaning on the pool.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-virtual-threads-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A service does CPU-heavy price optimisation, no I/O. It moves from a fixed pool of 8 platform threads to one virtual thread per request on an 8-core box. What happens to throughput?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-virtual-threads-1"><span>It rises sharply: thousands of requests now run concurrently <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-virtual-threads-1"><span>About the same or slightly worse: at most 8 run at once either way, and the scheduler adds overhead <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-virtual-threads-1"><span>It falls to zero: virtual threads cannot run CPU-bound code <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-virtual-threads-1"><span>It doubles, because virtual threads use hyper-threads the kernel hides <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> A virtual thread that never blocks never unmounts, so only as many run as there are carriers — eight, the core count. The CPU was the bottleneck before and still is. Virtual threads make <em>waiting</em> cheap; they do not add cores.</p>
+        <p class="mb-0"><strong>A</strong> describes an I/O-bound service, where the old pool spent most of its time blocked. <strong>C</strong>: they run any code; they just cannot be descheduled mid-computation. <strong>D</strong> is invented; the scheduler is an ordinary <code>ForkJoinPool</code> of platform threads.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-virtual-threads-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>In Java 21 a virtual thread calls <code>socket.read()</code> inside a <code>synchronized</code> method. Which is true while the read waits?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-virtual-threads-2"><span>It unmounts normally; <code>synchronized</code> makes no difference <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-virtual-threads-2"><span>The JVM throws <code>IllegalMonitorStateException</code> because virtual threads may not use monitors <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-virtual-threads-2"><span>It is pinned: its carrier stays blocked for the whole read, and cannot serve other virtual threads <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-virtual-threads-2"><span>The scheduler silently converts it to a platform thread for the rest of its life <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> In 21 the monitor's ownership is tied to the carrier's native frame, so the virtual thread cannot be unmounted while it holds one. The scheduler may compensate by adding a temporary carrier, up to <code>maxPoolSize</code>, but under load the effect is a tiny platform pool. <code>ReentrantLock</code> avoids it; JEP 491 in Java 24 fixes it for <code>synchronized</code> too.</p>
+        <p class="mb-0"><strong>A</strong> is true for <code>java.util.concurrent</code> locks and for blocking calls outside a monitor. <strong>B</strong>: monitors work; they just pin. <strong>D</strong>: nothing converts thread kinds; a virtual thread stays virtual.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-virtual-threads-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about <code>Executors.newVirtualThreadPerTaskExecutor()</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Every submitted task gets a brand-new virtual thread <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It keeps a bounded number of threads and queues the rest, like a fixed pool <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Closing it with try-with-resources waits for every task to finish <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>The JVM will not exit while tasks submitted to it are still running, even if nobody closes it <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> The name says it: a thread per task, unbounded, never reused. <code>close()</code> (which try-with-resources calls) shuts the executor down and waits for termination, which is what makes the worked example's counts reliable.</p>
+        <p class="mb-0"><strong>B</strong> is a fixed pool; there is no queue here because there is no reason to wait for a thread. <strong>D</strong> is backwards: virtual threads are daemon threads, so an un-closed executor's tasks die with the JVM — the opposite of a platform pool, which keeps the JVM alive until you shut it down.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="virtual-threads"> Mark this section complete
+  </label>
+</section>

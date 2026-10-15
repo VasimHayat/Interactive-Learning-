@@ -1,0 +1,31 @@
+<section class="lm-section" id="objectives" data-title="Learning objectives" data-num="iii">
+  <p class="lm-eyebrow">The contract</p>
+  <h2 class="mb-4">Learning objectives</h2>
+
+  <p>By the end of this module you will be able to do each of the following without reaching for a reference. The final quiz tests exactly these fourteen.</p>
+
+  <ol class="max-w-prose">
+    <li><strong>Explain</strong> what a thread owns (its stack and program counter) and shares (the heap), why <code>count++</code> is three operations, and how to read a thread dump.</li>
+    <li><strong>State</strong> the happens-before rules that make a write visible to another thread, and why <code>volatile</code> guarantees visibility but not atomicity.</li>
+    <li><strong>Choose</strong> between <code>synchronized</code>, <code>ReentrantLock</code>, <code>ReadWriteLock</code> and <code>StampedLock</code>, and prevent deadlock by lock ordering or <code>tryLock</code> with a timeout.</li>
+    <li><strong>Use</strong> <code>AtomicInteger</code>/<code>LongAdder</code>, <code>ConcurrentHashMap.compute*</code>/<code>merge</code>, <code>CopyOnWriteArrayList</code> and <code>BlockingQueue</code> correctly, and explain compare-and-swap.</li>
+    <li><strong>Size</strong> a thread pool for CPU-bound versus I/O-bound work, handle rejected tasks, and shut a pool down so the JVM can exit.</li>
+    <li><strong>Compose</strong> <code>CompletableFuture</code> chains with <code>thenCompose</code>, <code>thenCombine</code>, <code>exceptionally</code>/<code>handle</code>, timeouts and <code>allOf</code>, and say which thread runs each stage.</li>
+    <li><strong>Explain</strong> what a virtual thread is, how it mounts on a carrier, what pinning is, and when virtual threads do not help.</li>
+    <li><strong>Describe</strong> generational collection, what G1 and ZGC each optimise for, the three categories of GC pause, and how to read a GC log line.</li>
+    <li><strong>Reason</strong> about heap sizing flags (<code>-Xms</code>, <code>-Xmx</code>, <code>-XX:MaxRAMPercentage</code>), metaspace, and the symptoms of an undersized heap versus a leak.</li>
+    <li><strong>Trace</strong> class loading, linking and initialization order, and the parent-delegation model, and diagnose <code>NoClassDefFoundError</code> versus <code>ClassNotFoundException</code>.</li>
+    <li><strong>Use</strong> reflection and annotations safely (and say what they cost), and state when a <code>MethodHandle</code> or <code>VarHandle</code> is the better tool.</li>
+    <li><strong>Declare</strong> a module with <code>requires</code>, <code>exports</code>, <code>opens</code> and <code>uses</code>/<code>provides</code>, and explain strong encapsulation and <code>--add-opens</code>.</li>
+    <li><strong>Measure</strong> before optimising: name the JIT tiers, the JMH pitfalls (dead-code elimination, constant folding, warm-up), and what JFR records.</li>
+    <li><strong>Serialize</strong> safely: why <code>Serializable</code> is a liability, how records serialize, and the shape of an <code>HttpClient</code> call with a timeout.</li>
+  </ol>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Deliberately out of scope</div>
+      <p class="mb-0">Frameworks — Spring, Jakarta EE, Micronaut, Quarkus — and build tools such as Maven and Gradle are not covered: every one of them is built from the mechanisms this module teaches, and they make far more sense once you know what a class loader, a proxy and a thread pool actually do. The Foreign Function &amp; Memory API (the successor to JNI) and GraalVM native image each get a single mention where they fit, not a treatment. Distributed systems, databases and networking beyond one HTTP call are other courses entirely.</p>
+    </div>
+  </div>
+</section>

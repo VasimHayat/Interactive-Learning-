@@ -1,0 +1,152 @@
+<section class="lm-section" id="glossary" data-title="Glossary" data-num="G">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Glossary</h2>
+  <p>Thirty terms, each linked back to the section that introduces it. The same entries drive the flashcard deck below — one list, two ways to use it.</p>
+
+  <div data-flash>
+
+    <div class="lm-card" data-print="hide">
+      <div class="lm-card-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M7 3h14v14"/></svg>
+        Flashcards
+      </div>
+      <div class="lm-flash">
+        <button type="button" class="lm-flash-card" aria-pressed="false" aria-label="Flashcard — activate to flip between term and definition">
+          <span class="lm-flash-face"><span class="text-h3" data-flash-front></span><span class="text-caption text-ink-subtle">click, or press Space, to flip</span></span>
+          <span class="lm-flash-face lm-flash-face--back"><span data-flash-back></span></span>
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <button type="button" class="lm-btn" data-flash-prev>Previous</button>
+        <button type="button" class="lm-btn lm-btn--primary" data-flash-next>Next</button>
+        <button type="button" class="lm-btn" data-flash-known>I knew it</button>
+        <button type="button" class="lm-btn" data-flash-shuffle>Shuffle</button>
+        <span class="text-caption text-ink-subtle" data-flash-count></span>
+      </div>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    </div>
+
+    <dl class="mt-6">
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g1">
+        <dt class="font-semibold" data-term>ABA problem</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A compare-and-swap sees the expected value A and succeeds, not knowing the slot went A → B → A in between. Harmless for counters; dangerous when identity matters, which is what <code>AtomicStampedReference</code> is for. <a href="#concurrent-collections">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g2">
+        <dt class="font-semibold" data-term>Atomicity</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An operation that other threads see either entirely done or not at all. <code>count++</code> is not atomic: it is load, add, store, and another thread can fall into the gaps. <a href="#threads">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g3">
+        <dt class="font-semibold" data-term>Automatic module</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A jar without <code>module-info.class</code> placed on the module path. It gets a name from <code>Automatic-Module-Name</code> or its file name, exports every package and reads every module — the bridge for libraries that have not modularised. <a href="#modules">§12</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g4">
+        <dt class="font-semibold" data-term>Carrier thread</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A platform thread in the virtual-thread scheduler's <code>ForkJoinPool</code> on which a virtual thread is <em>mounted</em> to run. When the virtual thread blocks it unmounts and the carrier picks up another. <a href="#virtual-threads">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g5">
+        <dt class="font-semibold" data-term>Class loader delegation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Before defining a class itself, a loader asks its parent — app → platform → bootstrap. It is why <code>java.lang.String</code> cannot be replaced from the class path, and why class identity is the pair (loader, name). <a href="#classloading">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g6">
+        <dt class="font-semibold" data-term>Compare-and-swap</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>One CPU instruction: "if this location still holds X, store Y and report success". The primitive under every atomic and lock-free structure; a failure means retry, never block. <a href="#concurrent-collections">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g7">
+        <dt class="font-semibold" data-term>Completion stage</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>One step of a <code>CompletableFuture</code> pipeline: a function that runs when the previous stage completes, on the completing thread (non-async) or on an executor (<code>*Async</code>). A failed stage skips value stages until a recovery stage. <a href="#completable-future">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g8">
+        <dt class="font-semibold" data-term>Data race</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A write and a conflicting access to the same variable from two threads with no happens-before edge between them. The JMM then permits stale, reordered or torn values; the program is incorrect even if it appears to work. <a href="#memory-model">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g9">
+        <dt class="font-semibold" data-term>Deadlock</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Two or more threads each holding a lock the other needs, forever. Requires mutual exclusion, hold-and-wait, no preemption and a circular wait; cured by a global lock order or <code>tryLock</code> with a timeout. <a href="#locks">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g10">
+        <dt class="font-semibold" data-term>Deoptimization</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The JIT throwing away compiled code when an assumption it made stops holding — a new subclass breaks an inlined monomorphic call, an untaken branch is taken — and falling back to the interpreter until it recompiles. <a href="#performance">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g11">
+        <dt class="font-semibold" data-term>Escape analysis</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>C2 proving that an object never leaves the compiled method, so it can be replaced by its fields in registers (scalar replacement) and never allocated at all — the reason short-lived objects are often free. <a href="#performance">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g12">
+        <dt class="font-semibold" data-term>G1 region</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>G1 divides the heap into equal regions (1–32 MB) and assigns each a role — eden, survivor, old, humongous — dynamically. A collection evacuates the regions with the most garbage first, which is the "garbage first" in the name. <a href="#gc">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g13">
+        <dt class="font-semibold" data-term>Gadget chain</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A sequence of classes already on the class path whose <code>readObject</code> methods, invoked in order by deserializing a crafted stream, end in arbitrary code execution. Why untrusted Java serialization is treated as remote code execution. <a href="#serialization">§14</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g14">
+        <dt class="font-semibold" data-term>Generational hypothesis</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Most objects die young. Collectors exploit it by collecting the young generation often and by copying the few survivors, so the cost tracks live data rather than garbage. <a href="#gc">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g15">
+        <dt class="font-semibold" data-term>Happens-before</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The JMM's partial order. If A happens-before B, B sees A's effects. The edges: program order, monitor unlock → lock, volatile write → read, <code>start</code>, <code>join</code>, and transitivity; everything in <code>java.util.concurrent</code> is built to provide them. <a href="#memory-model">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g16">
+        <dt class="font-semibold" data-term>Initialization trigger</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The first active use that runs a class's static initializers: <code>new</code>, a static method call, a non-constant static field access, <code>Class.forName</code>, or initializing a subclass. Reading a compile-time constant is not one. <a href="#classloading">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g17">
+        <dt class="font-semibold" data-term>Inlining</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The JIT copying a callee's body into the caller, removing the call and enabling every other optimisation. Limited by bytecode size (35 cold, 325 hot by default) and by megamorphic call sites. <a href="#performance">§13</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g18">
+        <dt class="font-semibold" data-term>Livelock</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Threads that keep running but make no progress — two <code>tryLock</code> loops that both back off and retry in step. Cured with randomised back-off or a bound on retries. <a href="#locks">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g19">
+        <dt class="font-semibold" data-term>Load barrier</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A few instructions ZGC runs on every reference load that check the pointer's colour bits and, if the object has moved, fix the reference up. The mechanism that lets ZGC relocate objects while the application runs. <a href="#gc">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g20">
+        <dt class="font-semibold" data-term>Metaspace</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Native memory holding class metadata, unbounded by default. It grows with every class loader that cannot be collected, which is how hot-redeploy and plugin systems leak until <code>OutOfMemoryError: Metaspace</code>. <a href="#jvm-tuning">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g21">
+        <dt class="font-semibold" data-term>Monitor</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The lock every object carries for <code>synchronized</code>: one owner, an entry set of threads blocked trying to enter, and a wait set of threads parked in <code>wait()</code> that must re-acquire it after <code>notify</code>. Reentrant. <a href="#locks">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g22">
+        <dt class="font-semibold" data-term>Pinning</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A virtual thread that cannot unmount from its carrier while blocked — in JDK 21, inside a <code>synchronized</code> block or a native frame. Pinned carriers are the usual reason virtual threads fail to scale; JEP 491 fixes the monitor case in 24. <a href="#virtual-threads">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g23">
+        <dt class="font-semibold" data-term>Poison pill</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A sentinel object placed on a <code>BlockingQueue</code> to tell a consumer to stop — one per consumer — so shutdown needs no flag polling and no interrupt. <a href="#concurrent-collections">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g24">
+        <dt class="font-semibold" data-term>Reachability</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An object is live if a chain of references leads to it from a GC root — a thread stack, a static field, a JNI handle. Collectors reclaim everything else; a "leak" in Java is an object that is reachable but no longer wanted. <a href="#gc">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g25">
+        <dt class="font-semibold" data-term>Reentrancy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A thread that holds a lock may acquire it again without blocking; the lock counts the depth. Both <code>synchronized</code> and <code>ReentrantLock</code> are reentrant, which is what lets one synchronized method call another on the same object. <a href="#locks">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g26">
+        <dt class="font-semibold" data-term>Rejection policy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>What a <code>ThreadPoolExecutor</code> does with a task when its queue is full and it is at <code>maximumPoolSize</code>: throw (<code>AbortPolicy</code>, the default), run it on the submitting thread (<code>CallerRunsPolicy</code>, back-pressure), drop it, or drop the oldest. <a href="#executors">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g27">
+        <dt class="font-semibold" data-term>Safe publication</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Making an object visible to other threads through a happens-before edge — a volatile field, a lock, a concurrent collection, a thread start — so they see its fully constructed state rather than a half-built one. Immutable objects with <code>final</code> fields are safe through any route. <a href="#memory-model">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g28">
+        <dt class="font-semibold" data-term>Stop-the-world</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A GC phase during which every application thread is halted at a safepoint so the collector can see a consistent object graph. All of Serial and Parallel, the evacuation pauses of G1, and only the brief phase boundaries of ZGC. <a href="#gc">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g29">
+        <dt class="font-semibold" data-term>Strong encapsulation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The module system's rule that a package is accessible only if exported, and open to deep reflection only if opened. Enforced for the JDK's own internals since Java 16; <code>--add-opens</code> is the per-package escape hatch. <a href="#modules">§12</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g30">
+        <dt class="font-semibold" data-term>Tiered compilation</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>HotSpot's pipeline from the interpreter (tier 0) through C1 with profiling (tiers 1–3) to C2's optimised code (tier 4), driven by invocation and loop counters, with deoptimization back down when a speculation fails. <a href="#performance">§13</a></dd>
+      </div>
+    </dl>
+  </div>
+</section>

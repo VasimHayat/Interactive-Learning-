@@ -1,0 +1,412 @@
+<section class="lm-section" id="fetching" data-title="Fetching: lazy, eager and the N+1 problem" data-num="5">
+  <p class="lm-eyebrow">Section 5</p>
+  <h2 class="mb-4">Fetching: lazy, eager and the N+1 problem</h2>
+
+  <p>When Hibernate loads an <code>Order</code>, what happens to its <code>lines</code>? The mapping says <code>LAZY</code> for collections by default, so Hibernate puts a <strong>proxy collection</strong> in the field: an object that knows which order it belongs to and nothing else. The first time you call <code>size()</code>, <code>iterator()</code> or <code>get(0)</code> on it, it runs a <code>select … where order_id = ?</code> and fills itself. That is exactly right for one order. For a list of five hundred orders in a loop it is one query for the list and five hundred more for the lines — the <strong>N+1 problem</strong>, the single most common performance bug in JPA applications, and one you cannot see in the code because every line of it looks innocent.</p>
+
+  <p>The cure is never "make it eager". <code>fetch = EAGER</code> on the mapping changes how <em>every</em> load behaves, forever, including the loads that did not need the lines, and (as the sandbox shows) does not even remove the extra statements for JPQL queries. The cure is to decide <em>per query</em> what the query needs and fetch that in one or two statements: <code>join fetch</code>, an entity graph, or batch fetching. This section measures all three against the problem with Hibernate's own statistics, so the numbers are facts rather than folklore.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: counting statements</h3>
+
+  <p>Five orders, three lines each. The report in <code>totalQty</code> is the same every time; only the fetch plan changes. <code>hibernate.generate_statistics</code> lets the program count prepared statements, and the <code>Hibernate:</code> lines show what they were.</p>
+
+  <pre data-code data-lang="java" data-file="NPlusOne.java" data-verify="NPlusOne" data-hi="16,47,54,85,93,94,104">
+import jakarta.persistence.*;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import java.util.ArrayList;
+import java.util.List;
+
+public class NPlusOne {
+
+    @Entity(name = "Order")
+    @Table(name = "orders")
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        private String reference;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL)   // lazy by default
+        private List<OrderLine> lines = new ArrayList<>();
+        protected Order() {}
+        Order(String reference) { this.reference = reference; }
+        List<OrderLine> lines() { return lines; }
+        void addLine(OrderLine l) { lines.add(l); l.order = this; }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false)
+        @JoinColumn(name = "order_id")
+        private Order order;
+        private String sku;
+        private int qty;
+        protected OrderLine() {}
+        OrderLine(String sku, int qty) { this.sku = sku; this.qty = qty; }
+        int qty() { return qty; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Order.class).managedClass(OrderLine.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:NPlusOne;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .property("hibernate.generate_statistics", "true")
+            .createEntityManagerFactory();
+    }
+
+    // the "report": walks every order's lines — touching lines() initialises the collection
+    static int totalQty(List<Order> orders) {
+        int total = 0;
+        for (Order o : orders) for (OrderLine l : o.lines()) total += l.qty();
+        return total;
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+            Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                for (int i = 1; i <= 5; i++) {
+                    Order o = new Order("ORD-" + i);
+                    o.addLine(new OrderLine("BOLT-7", i));
+                    o.addLine(new OrderLine("NUT-3", i * 2));
+                    o.addLine(new OrderLine("CAM-9", 1));
+                    em.persist(o);
+                }
+                em.getTransaction().commit();
+            }
+
+            System.out.println("-- A. lazy default: 1 query for the orders, then 1 per order for its lines --");
+            stats.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                List<Order> orders = em.createQuery("select o from Order o order by o.id", Order.class).getResultList();
+                System.out.println("total qty: " + totalQty(orders) + ", statements: " + stats.getPrepareStatementCount());
+            }
+
+            System.out.println("-- B. join fetch: one query, lines arrive with their orders --");
+            stats.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                List<Order> orders = em.createQuery(
+                        "select o from Order o join fetch o.lines order by o.id", Order.class).getResultList();
+                System.out.println("orders: " + orders.size() + " (no duplicates: Hibernate 6+ de-duplicates root entities)");
+                System.out.println("total qty: " + totalQty(orders) + ", statements: " + stats.getPrepareStatementCount());
+            }
+
+            System.out.println("-- C. entity graph: the same plan, declared instead of written into the query --");
+            stats.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                EntityGraph<Order> graph = em.createEntityGraph(Order.class);
+                graph.addAttributeNodes("lines");
+                List<Order> orders = em.createQuery("select o from Order o order by o.id", Order.class)
+                                       .setHint("jakarta.persistence.fetchgraph", graph)
+                                       .getResultList();
+                System.out.println("total qty: " + totalQty(orders) + ", statements: " + stats.getPrepareStatementCount());
+            }
+
+            System.out.println("-- D. batch fetching (size 10): 1 + ceil(5/10) queries --");
+            stats.clear();
+            try (EntityManager em = emf.createEntityManager()) {
+                em.unwrap(Session.class).setFetchBatchSize(10);   // same effect as @BatchSize(size = 10) on the mapping
+                List<Order> orders = em.createQuery("select o from Order o order by o.id", Order.class).getResultList();
+                System.out.println("total qty: " + totalQty(orders) + ", statements: " + stats.getPrepareStatementCount());
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="NPlusOne">
+Hibernate: create global temporary table HTE_orders(rn_ integer not null, id bigint, reference varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_order_line(qty integer, rn_ integer not null, id bigint, order_id bigint, sku varchar(255), primary key (rn_)) transactional
+Hibernate: drop table if exists order_line cascade
+Hibernate: drop table if exists orders cascade
+Hibernate: drop sequence if exists order_line_SEQ
+Hibernate: drop sequence if exists orders_SEQ
+Hibernate: create sequence order_line_SEQ start with 1 increment by 50
+Hibernate: create sequence orders_SEQ start with 1 increment by 50
+Hibernate: create table order_line (qty integer not null, id bigint not null, order_id bigint not null, sku varchar(255), primary key (id))
+Hibernate: create table orders (id bigint not null, reference varchar(255), primary key (id))
+Hibernate: alter table if exists order_line add constraint FKk9f9t1tmkbq5w27u8rrjbxxg6 foreign key (order_id) references orders
+Hibernate: select next value for orders_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: select next value for orders_SEQ
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+-- A. lazy default: 1 query for the orders, then 1 per order for its lines --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 order by o1_0.id
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+total qty: 50, statements: 6
+-- B. join fetch: one query, lines arrive with their orders --
+Hibernate: select o1_0.id,l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku,o1_0.reference from orders o1_0 join order_line l1_0 on o1_0.id=l1_0.order_id order by o1_0.id
+orders: 5 (no duplicates: Hibernate 6+ de-duplicates root entities)
+total qty: 50, statements: 1
+-- C. entity graph: the same plan, declared instead of written into the query --
+Hibernate: select o1_0.id,l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku,o1_0.reference from orders o1_0 left join order_line l1_0 on o1_0.id=l1_0.order_id order by o1_0.id
+total qty: 50, statements: 1
+-- D. batch fetching (size 10): 1 + ceil(5/10) queries --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 order by o1_0.id
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id in (?,?,?,?,?,?,?,?,?,?)
+total qty: 50, statements: 2
+  </pre>
+
+  <p>Before the four phases, notice the seeding: fifteen separate <code>insert</code> statements, each its own round trip. §9 turns those into two batched statements. Now the phases, same report, same answer of 50 every time:</p>
+  <ul class="max-w-prose">
+    <li><strong>A — six statements.</strong> One for the orders, then the loop touches <code>o.lines()</code> five times and the proxy collection runs its <code>select … where order_id=?</code> each time. With 500 orders it would be 501. The cost is round trips, not rows: each query is tiny, and that is what makes N+1 invisible in a local test and ruinous over a network.</li>
+    <li><strong>B — one statement.</strong> <code>join fetch o.lines</code> tells Hibernate to pull the lines in the same query. Fifteen result rows come back (each order repeated per line) and Hibernate assembles five <code>Order</code> objects with their collections already initialised. Since Hibernate 6 the duplicates are removed automatically; the old <code>select distinct</code> idiom is unnecessary and would only push a pointless <code>DISTINCT</code> to the database.</li>
+    <li><strong>C — one statement, as a plan rather than a query.</strong> An entity graph says "when you run this query, also fetch <code>lines</code>". The query text stays reusable and the SQL is the same join — a <code>left join</code> this time, because a fetch graph must not drop orders that have no lines, whereas <code>join fetch</code> is an inner join unless you write <code>left join fetch</code>.</li>
+    <li><strong>D — two statements.</strong> Batch fetching leaves the collection lazy but, when the first one is touched, loads it for up to ten orders at once with <code>where order_id in (?, …)</code>. For 500 orders that is 1 + 50 statements, no cartesian product, and no change to the query. The ten placeholders are padded (Hibernate rounds the batch to a fixed size so the database can cache the plan) even though only five ids exist.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">The exception you will meet first</h3>
+
+  <p>A lazy collection needs its context to load itself. Close the <code>EntityManager</code>, keep the entity, touch the collection:</p>
+
+  <pre data-code data-lang="java" data-file="LazyInit.java" data-verify="LazyInit" data-verify-throws="LazyInitializationException" data-hi="57,58" data-bad="61">
+import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class LazyInit {
+
+    @Entity(name = "Order")
+    @Table(name = "orders")
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        private String reference;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL)
+        private List<OrderLine> lines = new ArrayList<>();
+        protected Order() {}
+        Order(String reference) { this.reference = reference; }
+        Long id() { return id; }
+        List<OrderLine> lines() { return lines; }
+        void addLine(OrderLine l) { lines.add(l); l.order = this; }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false)
+        @JoinColumn(name = "order_id")
+        private Order order;
+        private String sku;
+        protected OrderLine() {}
+        OrderLine(String sku) { this.sku = sku; }
+    }
+
+    public static void main(String[] args) {
+        EntityManagerFactory emf = new PersistenceConfiguration("warehouse")
+            .managedClass(Order.class).managedClass(OrderLine.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:LazyInit;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+
+        Long id;
+        try (EntityManager em = emf.createEntityManager()) {
+            em.getTransaction().begin();
+            Order o = new Order("ORD-1");
+            o.addLine(new OrderLine("BOLT-7"));
+            em.persist(o);
+            em.getTransaction().commit();
+            id = o.id();
+        }
+
+        Order detached;
+        try (EntityManager em = emf.createEntityManager()) {
+            detached = em.find(Order.class, id);          // lines is an uninitialised proxy collection
+        }                                                 // the context that owned it is now closed
+
+        System.out.println("order loaded, context closed; touching lines() ...");
+        System.out.println("lines: " + detached.lines().size());   // LazyInitializationException escapes here
+        emf.close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="LazyInit">
+Hibernate: create global temporary table HTE_order_line(rn_ integer not null, id bigint, order_id bigint, sku varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_orders(rn_ integer not null, id bigint, reference varchar(255), primary key (rn_)) transactional
+Hibernate: drop table if exists order_line cascade
+Hibernate: drop table if exists orders cascade
+Hibernate: drop sequence if exists order_line_SEQ
+Hibernate: drop sequence if exists orders_SEQ
+Hibernate: create sequence order_line_SEQ start with 1 increment by 50
+Hibernate: create sequence orders_SEQ start with 1 increment by 50
+Hibernate: create table order_line (id bigint not null, order_id bigint not null, sku varchar(255), primary key (id))
+Hibernate: create table orders (id bigint not null, reference varchar(255), primary key (id))
+Hibernate: alter table if exists order_line add constraint FKk9f9t1tmkbq5w27u8rrjbxxg6 foreign key (order_id) references orders
+Hibernate: select next value for orders_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,sku,id) values (?,?,?)
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 where o1_0.id=?
+order loaded, context closed; touching lines() ...
+  </pre>
+
+  <pre data-output data-label="Standard error" data-variant="error">
+Exception in thread "main" org.hibernate.LazyInitializationException: Cannot lazily initialize collection of role 'LazyInit$Order.lines' with key '1' (no session)
+  </pre>
+
+  <p>The message names the collection role and the key, and the cause is always the same: the entity outlived its context. In a web application that context is usually the service method's transaction, and the touch happens later, in the view. The tempting fix is <em>open session in view</em> — keep the <code>EntityManager</code> open until the response is written — and it is a trap: it hides the exception while leaving every one of those lazy loads in place, now running N+1 from the template with a database connection pinned for the whole request. The real fixes are to fetch what the view needs inside the service (join fetch, entity graph) or to return a DTO that already contains it (§6, §9).</p>
+
+  <h3 class="mt-8 mb-3">Plan a fetch</h3>
+
+  <div class="lm-card" data-sandbox="fetch-plan">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      How many statements will this plan cost?
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Parent rows returned <span class="lm-readout" data-sb-nout>20</span></span>
+        <input type="range" data-sb-n min="1" max="100" value="20" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Lazy collections touched per parent</span>
+        <select data-sb-k>
+          <option value="1" selected>1 (lines)</option>
+          <option value="2">2 (lines, notes)</option>
+          <option value="3">3 (lines, notes, payments)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Strategy</span>
+        <select data-sb-strategy>
+          <option value="lazy" selected>Lazy (default), touched in a loop</option>
+          <option value="eager">fetch = EAGER on the mapping</option>
+          <option value="join">join fetch in the query</option>
+          <option value="graph">Entity graph (fetchgraph hint)</option>
+          <option value="batch">Batch fetching</option>
+          <option value="subselect">@Fetch(SUBSELECT)</option>
+        </select>
+      </label>
+      <label class="lm-field grow" data-sb-batchfield hidden>
+        <span>Batch size <span class="lm-readout" data-sb-batchout>10</span></span>
+        <input type="range" data-sb-batch min="2" max="50" value="10" step="1">
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Choosing between the fixes</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Fetch strategies compared</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Statements</th><th scope="col">Where it is declared</th><th scope="col">Best for</th><th scope="col">Watch out</th></tr></thead>
+      <tbody>
+        <tr><td><code>join fetch</code></td><td>1</td><td>The JPQL query</td><td>Loading one aggregate (an order and its lines) or a small list with one collection</td><td>Two <code>List</code> collections → <code>MultipleBagFetchException</code>; two <code>Set</code>s → cartesian product. Pagination (<code>setMaxResults</code>) with a fetched collection is done in memory, with a warning.</td></tr>
+        <tr><td>Entity graph</td><td>1</td><td><code>@NamedEntityGraph</code> on the entity, or built at runtime; applied as a query hint or a <code>find</code> option</td><td>The same query used by several screens that need different parts of the graph</td><td><code>fetchgraph</code> treats everything not listed as lazy (even <code>EAGER</code> mappings); <code>loadgraph</code> adds to the mapping's defaults. Same cartesian caveat as join fetch.</td></tr>
+        <tr><td><code>@BatchSize</code> / <code>setFetchBatchSize</code></td><td>1 + ⌈N / size⌉ per collection</td><td>The mapping, the class, or the session</td><td>Lists where every row shows a collection; several collections at once (no cartesian product)</td><td>Loads whole batches of collections even when the loop stops early. Padded <code>in (…)</code> lists.</td></tr>
+        <tr><td><code>@Fetch(SUBSELECT)</code></td><td>1 + 1 per collection</td><td>The mapping (Hibernate-specific)</td><td>A query whose result's collections are always all needed</td><td>Loads every collection of the original result the moment one is touched; re-runs the original query as a subquery.</td></tr>
+        <tr><td>DTO projection</td><td>1</td><td>The query's <code>select new …</code> or <code>Tuple</code></td><td>Read-only screens — most of them</td><td>No entities, so no dirty checking and no lazy anything; that is the point (§6).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Fetching gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>EAGER</code> is a mapping-level decision you cannot undo per query.</strong> A <code>@ManyToOne</code> left at its <code>EAGER</code> default drags the parent into every load of the child, and a chain of them (line → order → customer → account) loads half the schema for a <code>find</code>. Mark every <code>@ManyToOne</code> and <code>@OneToOne</code> <code>LAZY</code> and fetch deliberately.</li>
+        <li><strong>EAGER does not even help JPQL.</strong> Only <code>em.find</code> turns an eager association into a join; a JPQL query runs the extra selects immediately after the main query instead — the same N+1, just without the loop.</li>
+        <li><strong>A proxy is not the entity.</strong> <code>ref.getClass()</code> is a generated subclass, <code>instanceof</code> works but a pattern match on the concrete class fails, and <code>Hibernate.unproxy(ref)</code> or <code>Hibernate.isInitialized(ref)</code> are the tools when you must know. Also: accessing the proxy's <code>id</code> does <em>not</em> trigger a load — Hibernate knows the key — but any other getter does.</li>
+        <li><strong>Pagination plus <code>join fetch</code> = in-memory paging.</strong> Hibernate cannot apply <code>LIMIT</code> to a joined result without truncating a collection, so it fetches everything and pages in Java, logging <code>HHH90003004</code>. Page the parents first, then batch-fetch the collections.</li>
+        <li><strong>Lazy loading in <code>toString</code>, <code>equals</code> or a JSON serialiser</strong> is how N+1 and <code>LazyInitializationException</code> arrive from code you did not write. Keep associations out of <code>toString</code>, and never hand an entity to a serialiser; serialise a DTO.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-fetching-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A page lists 200 orders and shows each order's line count. The service runs <code>select o from Order o</code> and the template calls <code>order.getLines().size()</code> inside a transaction. How many SQL statements run?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-fetching-1"><span>1 — the collection is loaded with the orders <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-fetching-1"><span>2 — one for orders, one for all their lines <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-fetching-1"><span>201 — one for orders, then one per order when <code>size()</code> initialises each collection <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-fetching-1"><span>200 — <code>size()</code> runs a <code>count</code> query per order and the orders come from the cache <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The textbook N+1: <code>size()</code> initialises the proxy collection, which selects the lines for that one order. The worked example's phase A is this at N = 5.</p>
+        <p class="mb-0"><strong>A</strong> would need <code>join fetch</code> or an entity graph. <strong>B</strong> is what batch fetching with a size ≥ 200, or <code>@Fetch(SUBSELECT)</code>, would give. <strong>D</strong>: <code>size()</code> loads the whole collection, not a count (Hibernate's <code>@LazyCollection(EXTRA)</code> once did a count and is deprecated); and the orders still cost one query.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-fetching-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You add <code>fetch = FetchType.EAGER</code> to <code>Order.lines</code> to fix that page. The page now runs <code>select o from Order o</code> again. What changed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-fetching-2"><span>One joined query now loads orders and lines together <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-fetching-2"><span>Still 201 statements — the 200 collection loads just happen right after the query instead of in the template; and every other load of an <code>Order</code> anywhere now pays for lines too <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-fetching-2"><span>The query fails: a JPQL query cannot select an entity with an eager collection <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-fetching-2"><span>Two statements: Hibernate switches eager collections to subselect fetching <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> For a JPQL query, an eager collection is honoured by issuing the secondary selects immediately — the statement count does not drop. And because the setting lives on the mapping, a <code>find(Order.class, id)</code> on a checkout page that never shows lines now joins them in as well.</p>
+        <p class="mb-0"><strong>A</strong> is only what <code>em.find</code> does for eager associations. <strong>C</strong>: the query is legal. <strong>D</strong>: subselect fetching is an explicit Hibernate annotation, never a default.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-fetching-3" data-answer="b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>An <code>Order</code> has <code>List&lt;OrderLine&gt; lines</code> and <code>List&lt;Note&gt; notes</code>, both lazy. A screen needs both for 50 orders. Which approaches work without an exception <em>and</em> without a cartesian product? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>select o from Order o join fetch o.lines join fetch o.notes</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Load the orders, then rely on <code>@BatchSize(size = 50)</code> on both collections <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Change both to <code>Set</code> and <code>join fetch</code> both <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Run <code>join fetch o.lines</code>, then a second query <code>select o from Order o join fetch o.notes where o in :orders</code> in the same context <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B and D.</strong> Batch fetching loads each collection in <code>in (…)</code> chunks — three statements for 50 orders — with no joins to multiply. Two queries in one context also work: the second query's fetched <code>notes</code> attach to the <code>Order</code> instances the identity map already holds.</p>
+        <p class="mb-0"><strong>A</strong> throws <code>MultipleBagFetchException: cannot simultaneously fetch multiple bags</code> — two <code>List</code>s cannot be joined in one result. <strong>C</strong> runs, but every order row is repeated <em>lines × notes</em> times: 50 orders with 10 of each is 5,000 rows for 1,050 useful ones, and it gets worse quadratically.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="fetching"> Mark this section complete
+  </label>
+</section>

@@ -19,7 +19,7 @@ the `Category` enum from Intermediate may be redeclared (nested) where a program
 | 11-memory-model.html | memory-model | 2 | The Java memory model: visibility and happens-before | `Visibility` | `happens-before` | `reordering` |
 | 12-locks.html | locks | 3 | synchronized, ReentrantLock and deadlock | `Synchronized`, `LockOrdering` | `lock-ordering` | `monitor` |
 | 13-concurrent-collections.html | concurrent-collections | 4 | Atomics and concurrent collections | `Atomics`, `ConcurrentMaps` | `cas-loop` | — |
-| 14-executors.html | executors | 5 | Executors, thread pools and Future | `Executors` | `pool-sizer` | `work-queue` |
+| 14-executors.html | executors | 5 | Executors, thread pools and Future | `PoolExecutors` (not `Executors` — it would shadow java.util.concurrent.Executors for every other program) | `pool-sizer` | `work-queue` |
 | 15-completable-future.html | completable-future | 6 | CompletableFuture: composing asynchronous work | `Composing` | — | `cf-chain` |
 | 16-virtual-threads.html | virtual-threads | 7 | Virtual threads and structured concurrency | `VirtualThreads` | `carrier-mount` | — |
 | 17-gc.html | gc | 8 | Garbage collection: generations, G1 and ZGC | `Reachability` | `gc-generations` | `g1-cycle` |

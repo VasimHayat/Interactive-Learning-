@@ -1,0 +1,362 @@
+<section class="lm-section" id="mapping" data-title="Mapping entities to tables" data-num="2">
+  <p class="lm-eyebrow">Section 2</p>
+  <h2 class="mb-4">Mapping entities to tables</h2>
+
+  <p>An entity is a class whose instances correspond to rows. The mapping says which class, which table, which field goes in which column with which type, and — the decision with the longest consequences — where the primary key comes from. Every annotation in this section is a sentence in that contract, and the generated DDL is the database's reading of it. The rules an entity class must obey come first, because Hibernate enforces them at bootstrap and the error messages assume you know them:</p>
+
+  <ul class="max-w-prose">
+    <li><strong>A no-argument constructor</strong>, at least <code>protected</code>. Hibernate instantiates the class reflectively when it loads a row, then sets the fields. The constructor you actually use can take whatever it likes.</li>
+    <li><strong>Not <code>final</code></strong>, and ideally no <code>final</code> methods: lazy loading (§5) works by subclassing the entity at runtime to make a proxy, and a <code>final</code> class cannot be subclassed.</li>
+    <li><strong>Exactly one identifier</strong> — an <code>@Id</code> field (or an <code>@EmbeddedId</code>) — and it must not change once the row exists.</li>
+    <li><strong>A top-level or <code>static</code> nested class.</strong> An inner class carries a hidden reference to its outer instance and cannot be instantiated without one.</li>
+    <li><strong>Not a record.</strong> Records are final and immutable; an entity is neither, because Hibernate needs to set its id after insert and track changes to its fields. Records are the right type for everything an entity is <em>not</em>: projections, value objects passed around the application, API payloads (Intermediate §8, §11 here).</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>One factory, three entities, three id strategies, and most of the column mappings you will ever need. Read the DDL Hibernate generated against the annotations that produced it — and watch where the inserts happen, because one of the three strategies changes <em>when</em> rows are written.</p>
+
+  <pre data-code data-lang="java" data-file="Mapping.java" data-verify="Mapping" data-hi="27,38,39,42,50,54,57,60,61,62,63,66,67,69,95,107">
+import jakarta.persistence.*;
+import org.hibernate.annotations.NaturalId;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.UUID;
+
+public class Mapping {
+
+    enum Category { FASTENER, STRUCTURAL, TOOLING }
+
+    /** A value object stored inline in the owner's row: three columns, no identity, no table. */
+    @Embeddable
+    public static class Dimensions {
+        private int widthMm, heightMm, depthMm;
+        protected Dimensions() {}
+        Dimensions(int w, int h, int d) { widthMm = w; heightMm = h; depthMm = d; }
+        long volumeMm3() { return (long) widthMm * heightMm * depthMm; }
+        @Override public String toString() { return widthMm + "x" + heightMm + "x" + depthMm + " mm"; }
+    }
+
+    /** A domain type the database never sees: the converter stores it as one bigint of cents. */
+    record Money(long cents) {
+        @Override public String toString() { return String.format("%d.%02d", cents / 100, cents % 100); }
+    }
+    @Converter(autoApply = true)
+    public static class MoneyConverter implements AttributeConverter<Money, Long> {
+        @Override public Long convertToDatabaseColumn(Money m) { return m == null ? null : m.cents(); }
+        @Override public Money convertToEntityAttribute(Long cents) { return cents == null ? null : new Money(cents); }
+    }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    @Access(AccessType.FIELD)                                   // map fields, not getters
+    public static class Product {
+        @Id
+        @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "product_seq")
+        @SequenceGenerator(name = "product_seq", sequenceName = "product_seq", allocationSize = 10)
+        private Long id;
+
+        @NaturalId                                              // Hibernate: a business key with its own lookup
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+
+        @Basic(optional = false)
+        @Column(length = 80)
+        private String name;
+
+        @Enumerated(EnumType.STRING)                            // never ORDINAL
+        @Column(nullable = false, length = 20)
+        private Category category;
+
+        @Column(name = "unit_price")
+        private Money unitPrice;                                // MoneyConverter applies automatically
+
+        @Column(precision = 8, scale = 3)
+        private BigDecimal weightKg;
+
+        @Embedded
+        @AttributeOverride(name = "widthMm",  column = @Column(name = "dim_w_mm"))
+        @AttributeOverride(name = "heightMm", column = @Column(name = "dim_h_mm"))
+        @AttributeOverride(name = "depthMm",  column = @Column(name = "dim_d_mm"))
+        private Dimensions dimensions;
+
+        private LocalDate introducedOn;                         // java.time maps directly: no @Temporal
+        private Instant createdAt;
+
+        @Transient
+        private String label;                                   // derived, never a column
+
+        protected Product() {}
+        Product(String sku, String name, Category category, Money unitPrice, BigDecimal weightKg,
+                Dimensions dimensions, LocalDate introducedOn, Instant createdAt) {
+            this.sku = sku; this.name = name; this.category = category; this.unitPrice = unitPrice;
+            this.weightKg = weightKg; this.dimensions = dimensions; this.introducedOn = introducedOn; this.createdAt = createdAt;
+        }
+        Long id() { return id; }
+        String sku() { return sku; }
+        Category category() { return category; }
+        Money unitPrice() { return unitPrice; }
+        BigDecimal weightKg() { return weightKg; }
+        Dimensions dimensions() { return dimensions; }
+        LocalDate introducedOn() { return introducedOn; }
+        Instant createdAt() { return createdAt; }
+        String label() {
+            if (label == null) label = sku + " / " + name;      // computed on demand, cached in the object only
+            return label;
+        }
+    }
+
+    @Entity(name = "Warehouse")
+    @Table(name = "warehouse")
+    public static class Warehouse {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY)   // the database assigns the id at insert
+        private Long id;
+        @Column(nullable = false, length = 40)
+        private String name;
+        protected Warehouse() {}
+        Warehouse(String name) { this.name = name; }
+        Long id() { return id; }
+    }
+
+    @Entity(name = "AuditEvent")
+    @Table(name = "audit_event")
+    public static class AuditEvent {
+        @Id @GeneratedValue(strategy = GenerationType.UUID)       // generated in the JVM, random
+        private UUID id;
+        @Column(nullable = false, length = 120)
+        private String message;
+        protected AuditEvent() {}
+        AuditEvent(String message) { this.message = message; }
+        UUID id() { return id; }
+    }
+
+    static EntityManagerFactory emf(Class<?>... managed) {
+        var cfg = new PersistenceConfiguration("warehouse")
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Mapping;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true");
+        for (Class<?> c : managed) cfg.managedClass(c);
+        return cfg.createEntityManagerFactory();
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf(Product.class, Warehouse.class, AuditEvent.class, MoneyConverter.class)) {
+
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = new Product("BOLT-7", "M8 hex bolt", Category.FASTENER, new Money(80),
+                        new BigDecimal("0.012"), new Dimensions(8, 8, 40),
+                        LocalDate.of(2024, 3, 1), Instant.parse("2026-10-15T08:30:00Z"));
+                Warehouse main = new Warehouse("Main");
+                AuditEvent event = new AuditEvent("catalogue seeded");
+                em.persist(bolt);
+                em.persist(main);
+                em.persist(event);
+                System.out.println("ids before commit: product=" + bolt.id() + " warehouse=" + main.id()
+                        + " audit assigned=" + (event.id() != null));
+                em.getTransaction().commit();
+            }
+
+            try (EntityManager em = emf.createEntityManager()) {
+                Product p = em.find(Product.class, 1L);
+                System.out.println("category   = " + p.category());
+                System.out.println("unitPrice  = " + p.unitPrice());
+                System.out.println("weightKg   = " + p.weightKg());
+                System.out.println("dimensions = " + p.dimensions() + " -> " + p.dimensions().volumeMm3() + " mm3");
+                System.out.println("introduced = " + p.introducedOn() + ", createdAt kept = "
+                        + p.createdAt().equals(Instant.parse("2026-10-15T08:30:00Z")));
+                System.out.println("label      = " + p.label());
+
+                Object[] raw = (Object[]) em.createNativeQuery(
+                        "select category, unit_price, dim_w_mm from product where id = 1").getSingleResult();
+                System.out.println("raw row    = " + raw[0] + " | " + raw[1] + " | " + raw[2]);
+
+                Product bySku = em.createQuery("select p from Product p where p.sku = :sku", Product.class)
+                        .setParameter("sku", "BOLT-7").getSingleResult();
+                System.out.println("by sku     = same instance: " + (bySku == p));
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Mapping">
+Hibernate: create global temporary table HTE_product(dimensions_depthMm integer, dimensions_heightMm integer, dimensions_widthMm integer, introducedOn date, rn_ integer not null, weightKg numeric(8,3), createdAt timestamp(6) with time zone, id bigint, unitPrice bigint, sku varchar(16), name varchar(80), category enum ('FASTENER','STRUCTURAL','TOOLING'), primary key (rn_)) transactional
+Hibernate: drop table if exists audit_event cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop table if exists warehouse cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 10
+Hibernate: create table audit_event (id uuid not null, message varchar(120) not null, primary key (id))
+Hibernate: create table product (dim_d_mm integer, dim_h_mm integer, dim_w_mm integer, introducedOn date, weightKg numeric(8,3), createdAt timestamp(6) with time zone, id bigint not null, unit_price bigint, sku varchar(16) not null unique, name varchar(80) not null, category enum ('FASTENER','STRUCTURAL','TOOLING') not null, primary key (id))
+Hibernate: create table warehouse (id bigint generated by default as identity, name varchar(40) not null, primary key (id))
+Hibernate: select next value for product_seq
+Hibernate: insert into product (category,createdAt,dim_d_mm,dim_h_mm,dim_w_mm,introducedOn,name,sku,unit_price,weightKg,id) values (?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into warehouse (name,id) values (?,default)
+ids before commit: product=1 warehouse=1 audit assigned=true
+Hibernate: insert into audit_event (message,id) values (?,?)
+Hibernate: select p1_0.id,p1_0.category,p1_0.createdAt,p1_0.dim_d_mm,p1_0.dim_h_mm,p1_0.dim_w_mm,p1_0.introducedOn,p1_0.name,p1_0.sku,p1_0.unit_price,p1_0.weightKg from product p1_0 where p1_0.id=?
+category   = FASTENER
+unitPrice  = 0.80
+weightKg   = 0.012
+dimensions = 8x8x40 mm -> 2560 mm3
+introduced = 2024-03-01, createdAt kept = true
+label      = BOLT-7 / M8 hex bolt
+Hibernate: select category, unit_price, dim_w_mm from product where id = 1
+raw row    = FASTENER | 80 | 8
+Hibernate: select p1_0.id,p1_0.category,p1_0.createdAt,p1_0.dim_d_mm,p1_0.dim_h_mm,p1_0.dim_w_mm,p1_0.introducedOn,p1_0.name,p1_0.sku,p1_0.unit_price,p1_0.weightKg from product p1_0 where p1_0.sku=?
+by sku     = same instance: true
+  </pre>
+
+  <p>Reading the DDL against the annotations:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>create table product (dim_d_mm integer, dim_h_mm integer, dim_w_mm integer, …)</code></strong> — the <code>@Embeddable Dimensions</code> became three columns in the <em>owner's</em> table, renamed by <code>@AttributeOverride</code>. There is no <code>dimensions</code> table; a value object has no identity and no row of its own. (The scratch <code>HTE_</code> table ignores the overrides — it is internal, never yours.)</li>
+    <li><strong><code>weightKg numeric(8,3)</code></strong> from <code>@Column(precision = 8, scale = 3)</code>; <strong><code>createdAt timestamp(6) with time zone</code></strong> from a plain <code>Instant</code> field and <strong><code>introducedOn date</code></strong> from a <code>LocalDate</code>. The <code>java.time</code> types need no <code>@Temporal</code>; that annotation exists for the legacy <code>java.util.Date</code>, which is ambiguous about what it stores.</li>
+    <li><strong><code>category enum ('FASTENER','STRUCTURAL','TOOLING') not null</code></strong> — H2 and PostgreSQL have native enum types and Hibernate 7 uses them; on MySQL this is also <code>enum</code>, on Oracle a <code>varchar2</code> with a check constraint. Either way the <em>name</em> is stored, because of <code>EnumType.STRING</code>. The gotcha callout below explains why the alternative is a trap.</li>
+    <li><strong><code>unit_price bigint</code></strong> — the <code>Money</code> record exists only in Java. The <code>@Converter(autoApply = true)</code> turns it into a <code>long</code> on the way out and back on the way in, for every entity that has a <code>Money</code> field, with no annotation at the field. The native query confirms the column really holds <code>80</code>.</li>
+    <li><strong><code>name varchar(80) not null</code></strong> came from <code>@Basic(optional = false)</code>; <strong><code>sku … not null unique</code></strong> from <code>@Column</code>. Both are hints that become real constraints only because schema generation ran. In production the constraints must exist in the migration script too (§10): Hibernate never checks them on read, and a <code>null</code> in a <code>not null</code> column from some other writer is still a bug on its way to you.</li>
+    <li><strong>No <code>label</code> column.</strong> <code>@Transient</code> fields are invisible to the mapping; the field is recomputed lazily in each loaded instance.</li>
+  </ul>
+
+  <p>Now the three id strategies, which is where the output stops being a transcript of DDL and becomes a transcript of <em>timing</em>:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>Product</code>: SEQUENCE.</strong> <code>create sequence product_seq … increment by 10</code>, then one <code>select next value</code> at <code>persist</code>. The id is known immediately — <code>product=1</code> prints before commit — but the insert can wait, so it would be batched with others (§9).</li>
+    <li><strong><code>Warehouse</code>: IDENTITY.</strong> The column is <code>generated by default as identity</code> and the insert sends <code>default</code> for the id. The database assigns it, and Hibernate must read it back before it can register the entity — so <strong>the insert runs at <code>persist</code>, not at commit</strong>. Look at the order of the output: the product insert, which was queued, was forced out <em>before</em> the warehouse insert to keep the two in program order. IDENTITY makes write-behind impossible for that entity, and makes insert batching impossible with it (§9).</li>
+    <li><strong><code>AuditEvent</code>: UUID.</strong> Generated in the JVM, random, assigned at <code>persist</code> with no database call at all; its insert waits for commit like the sequence-backed one. The value is random, so the program prints only <code>audit assigned=true</code>. Random UUIDs are convenient and terrible for index locality on large tables, as the sandbox explains.</li>
+  </ul>
+
+  <p>Two last lines. The native query shows the raw row: the enum as text, the money as an integer, the embedded width as its own column. And the JPQL lookup by <code>sku</code> returned <em>the same instance</em> as <code>find</code> had — not an equal object, the same reference. That is the persistence context's identity guarantee, and §3 is about it.</p>
+
+  <h3 class="mt-8 mb-3">What each id strategy costs</h3>
+
+  <p>The identifier strategy is the mapping decision you cannot cheaply change later, because the key is in every foreign key. Pick the strategy and the database, and read the consequences.</p>
+
+  <div class="lm-card" data-sandbox="id-strategy">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="19" cy="17" r="2"/></svg>
+      How 100 inserts reach the database
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Strategy</span>
+        <select data-sb-strategy>
+          <option value="identity">IDENTITY</option>
+          <option value="seq1">SEQUENCE, allocationSize = 1</option>
+          <option value="seq50" selected>SEQUENCE, allocationSize = 50 (default)</option>
+          <option value="table">TABLE</option>
+          <option value="uuid">UUID</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Database</span>
+        <select data-sb-db>
+          <option value="postgres" selected>PostgreSQL</option>
+          <option value="mysql">MySQL</option>
+          <option value="h2">H2</option>
+          <option value="oracle">Oracle</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The rest of the mapping vocabulary</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Mapping annotations, what they do, and the default when omitted</caption>
+      <thead><tr><th scope="col">Annotation</th><th scope="col">Says</th><th scope="col">If you leave it out</th></tr></thead>
+      <tbody>
+        <tr><td><code>@Table(name, schema, uniqueConstraints, indexes)</code></td><td>Which table, and constraints/indexes for schema generation</td><td>Table named after the entity, by the naming strategy</td></tr>
+        <tr><td><code>@Column(name, nullable, unique, length, precision, scale, insertable, updatable)</code></td><td>Column name and DDL hints; <code>updatable = false</code> makes a field write-once</td><td>Column named after the field; <code>varchar(255)</code> for strings</td></tr>
+        <tr><td><code>@Basic(optional, fetch)</code></td><td>A plain column; <code>optional = false</code> → not null; <code>fetch = LAZY</code> is only honoured for large columns with bytecode enhancement</td><td>Implied on every non-annotated field</td></tr>
+        <tr><td><code>@Enumerated(STRING)</code></td><td>Store the constant's name</td><td><code>ORDINAL</code> — the position; see the gotcha</td></tr>
+        <tr><td><code>@Lob</code></td><td>Large object: <code>clob</code> for <code>String</code>, <code>blob</code> for <code>byte[]</code></td><td>A bounded <code>varchar</code>/<code>varbinary</code></td></tr>
+        <tr><td><code>@Embedded</code> / <code>@Embeddable</code></td><td>Inline a value object's fields into this table</td><td>Hibernate treats an unannotated class-typed field as an error</td></tr>
+        <tr><td><code>@Convert(converter = …)</code></td><td>Apply an <code>AttributeConverter</code> to this field; <code>autoApply = true</code> on the converter makes it global for the type</td><td>Only JDBC-known types map</td></tr>
+        <tr><td><code>@Transient</code></td><td>Not persistent at all</td><td>Every field is a column</td></tr>
+        <tr><td><code>@Access(FIELD | PROPERTY)</code></td><td>Read/write fields directly, or go through getters/setters</td><td>Decided by where <code>@Id</code> sits — put it on the field</td></tr>
+        <tr><td><code>@NaturalId</code> (Hibernate)</td><td>A unique, immutable business key; gets its own cache region and lookup API</td><td>Just a unique column</td></tr>
+        <tr><td><code>@Formula("…")</code> (Hibernate)</td><td>A read-only attribute computed by a SQL expression in every select</td><td>Compute it in Java, or in a projection</td></tr>
+        <tr><td><code>@Version</code></td><td>The optimistic-locking column (§7)</td><td>Lost updates are silent</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Naming.</strong> With no naming strategy configured, a field <code>priceInCents</code> becomes a column <code>priceInCents</code>, which most databases fold to <code>PRICEINCENTS</code> or quote awkwardly. Set <code>hibernate.physical_naming_strategy</code> to <code>CamelCaseToUnderscoresNamingStrategy</code> and it becomes <code>price_in_cents</code> everywhere, with no <code>@Column(name = …)</code> on every field. Spring Boot does this by default, which is why Spring projects' tables look different from these.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Mapping gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>EnumType.ORDINAL</code> is a time bomb.</strong> It stores <code>0</code>, <code>1</code>, <code>2</code>. Insert a constant in the middle of the enum and every existing row silently means something else. <code>STRING</code> costs a few bytes and survives any reordering; renaming a constant is then a one-line migration you can see.</li>
+        <li><strong>IDENTITY forces an early insert and disables batching.</strong> It is the right choice only when the database offers nothing else, or when writes are rare. On MySQL, where sequences do not exist, know that <code>SEQUENCE</code> silently becomes a table generator — check the DDL.</li>
+        <li><strong>A random UUID key scatters the index.</strong> Each insert lands on a random page of the primary-key B-tree. Fine at thousands of rows, painful at hundreds of millions; time-ordered UUIDs fix it.</li>
+        <li><strong><code>@Column</code> hints are not validation.</strong> <code>length = 16</code> becomes <code>varchar(16)</code> in generated DDL and nothing else: a longer string is rejected by the database, not by Hibernate, and only if the constraint actually exists. Validate in Java (Bean Validation integrates) <em>and</em> constrain in the schema.</li>
+        <li><strong>Default <code>varchar(255)</code>.</strong> Every unannotated <code>String</code>. Set a length deliberately, or use <code>@Lob</code>/<code>columnDefinition = "text"</code> for real text.</li>
+        <li><strong><code>java.util.Date</code> and <code>Calendar</code> need <code>@Temporal</code> and still lose the zone.</strong> Use <code>Instant</code> for a point in time, <code>LocalDate</code> for a calendar date, and store instants in UTC (Intermediate §12). Hibernate 7's <code>hibernate.timezone.default_storage</code> defaults to normalising to UTC.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-mapping-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In the worked example the <code>insert into product</code> ran <em>before</em> <code>ids before commit</code> was printed, even though the product uses SEQUENCE and inserts are normally deferred to commit. What forced it out early?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-mapping-1"><span>The <code>allocationSize = 10</code> block was exhausted, so Hibernate flushed to fetch more ids <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-mapping-1"><span>The next <code>persist</code> was an IDENTITY entity, which must insert immediately; to preserve ordering Hibernate flushed the queued product insert first <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-mapping-1"><span>Calling <code>bolt.id()</code> triggers a flush so the id is guaranteed to be in the database <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-mapping-1"><span>The <code>@NaturalId</code> annotation requires an immediate insert to check uniqueness <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>persist(main)</code> on the IDENTITY-keyed <code>Warehouse</code> cannot complete without the database-generated id, so its insert executes at once — and Hibernate executes earlier queued inserts first rather than reorder them. The <code>AuditEvent</code>, persisted last, waited for commit as usual.</p>
+        <p class="mb-0"><strong>A</strong>: one id was used out of a block of ten. <strong>C</strong>: reading a field is plain Java; Hibernate does not intercept it. <strong>D</strong>: <code>@NaturalId</code> affects lookups and caching, not insert timing — uniqueness is checked by the database constraint whenever the insert runs.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-mapping-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A team stored <code>Category</code> with the default <code>@Enumerated</code>, then added <code>PACKAGING</code> between <code>FASTENER</code> and <code>STRUCTURAL</code> in the enum. What happens to existing rows?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-mapping-2"><span>Nothing; the new constant gets the next free number <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-mapping-2"><span>Hibernate detects the mismatch at bootstrap and refuses to start <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-mapping-2"><span>Every row that was <code>STRUCTURAL</code> (stored as 1) now loads as <code>PACKAGING</code>, silently, and <code>TOOLING</code> rows become <code>STRUCTURAL</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-mapping-2"><span>Loading those rows throws <code>IllegalArgumentException: No enum constant</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The default is <code>ORDINAL</code>: the column holds a position, and positions shifted. No error anywhere — the data just means something different now. This is why <code>EnumType.STRING</code> is the rule.</p>
+        <p class="mb-0"><strong>A</strong> describes what you might wish ordinals did. <strong>B</strong>: Hibernate has no way to know what the numbers meant before. <strong>D</strong> is what <code>STRING</code> mapping does when a stored name no longer exists — loud, and therefore safe.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-mapping-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about <code>@Embeddable</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Its fields become columns of the owning entity's table <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It gets its own table joined by a foreign key <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>It has no identity of its own, so two entities with equal embedded values are still two rows <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>It must declare an <code>@Id</code> so Hibernate can track it <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> An embeddable is a value object: the <code>Dimensions</code> columns live in <code>product</code>, and the object is compared by its fields, never by a key. It is the ORM's answer to the granularity mismatch.</p>
+        <p class="mb-0"><strong>B</strong> describes a <code>@OneToOne</code> entity (§4). <strong>D</strong> is the opposite of the point: an embeddable with an <code>@Id</code> is a mapping error — if it needs identity it is an entity.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="mapping"> Mark this section complete
+  </label>
+</section>

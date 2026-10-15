@@ -1,0 +1,450 @@
+<section class="lm-section" id="entity-design" data-title="Designing entities: identity, equality and callbacks" data-num="11">
+  <p class="lm-eyebrow">Section 11</p>
+  <h2 class="mb-4">Designing entities: identity, equality and callbacks</h2>
+
+  <p>An entity has three notions of "the same" and they do not agree. <strong>Database identity</strong> is the primary key: two rows are the same row if their ids match. <strong>Object identity</strong> is <code>==</code>: inside one persistence context Hibernate guarantees one Java object per row (§3), so <code>==</code> works there and nowhere else &mdash; the same row loaded in two contexts is two objects. <strong>Equality</strong> is <code>equals</code>/<code>hashCode</code>, which you write, and which <code>Set</code>, <code>Map</code> and every <code>contains</code> call will trust completely.</p>
+
+  <p>The difficulty is that a generated id does not exist until the entity is persisted, and <code>hashCode</code> must never change while an object sits in a hash-based collection. Those two facts collide in a bug that is easy to write, invisible in tests that only use lists, and baffling in production.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: three ways to write <code>equals</code>, and the one that breaks</h3>
+
+  <pre data-code data-lang="java" data-file="EntityDesign.java" data-verify="EntityDesign" data-hi="24,36,48,63,69,70,76,77,89">
+import jakarta.persistence.*;
+import org.hibernate.Session;
+import org.hibernate.annotations.Immutable;
+import org.hibernate.annotations.NaturalId;
+import org.hibernate.annotations.SQLDelete;
+import org.hibernate.annotations.SQLRestriction;
+
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
+
+public class EntityDesign {
+
+    /* Option 1 — equals/hashCode on the generated id. Looks obvious, breaks in a Set. */
+    @Entity(name = "IdHashProduct")
+    @Table(name = "id_hash_product")
+    public static class IdHashProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, length = 16) String sku;
+        protected IdHashProduct() {}
+        IdHashProduct(String sku) { this.sku = sku; }
+        @Override public boolean equals(Object o) { return o instanceof IdHashProduct p && Objects.equals(id, p.id); }
+        @Override public int hashCode() { return Objects.hashCode(id); }
+    }
+
+    /* Option 2 — a business key that never changes. */
+    @Entity(name = "SkuProduct")
+    @Table(name = "sku_product")
+    public static class SkuProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        protected SkuProduct() {}
+        SkuProduct(String sku) { this.sku = sku; }
+        @Override public boolean equals(Object o) { return o instanceof SkuProduct p && sku.equals(p.sku); }
+        @Override public int hashCode() { return sku.hashCode(); }
+    }
+
+    /* Option 3 — id equality once assigned, a constant hash so the bucket never moves. */
+    @Entity(name = "SafeProduct")
+    @Table(name = "safe_product")
+    public static class SafeProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, length = 16) String sku;
+        protected SafeProduct() {}
+        SafeProduct(String sku) { this.sku = sku; }
+        @Override public boolean equals(Object o) { return o instanceof SafeProduct p && id != null && id.equals(p.id); }
+        @Override public int hashCode() { return getClass().hashCode(); }
+    }
+
+    /* Auditing: callbacks on the entity plus an external listener. */
+    public static class AuditListener {
+        static int prePersist, preUpdate;
+        @PrePersist void beforeInsert(Object e) { prePersist++; }
+        @PreUpdate  void beforeUpdate(Object e) { preUpdate++; }
+    }
+
+    @Entity(name = "AuditedProduct")
+    @Table(name = "audited_product")
+    @EntityListeners(AuditListener.class)
+    public static class AuditedProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @NaturalId @Column(nullable = false, length = 16) String sku;
+        int priceInCents;
+        @Column(nullable = false, updatable = false) Instant createdAt;
+        @Column(nullable = false) Instant updatedAt;
+        protected AuditedProduct() {}
+        AuditedProduct(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @PrePersist void stamp() { createdAt = updatedAt = Instant.now(); }
+        @PreUpdate  void touch() { updatedAt = Instant.now().plusSeconds(1); }   // +1s so the fact below cannot tie
+    }
+
+    /* Soft delete: DELETE becomes UPDATE, and every query gets a filter for free. */
+    @Entity(name = "SoftProduct")
+    @Table(name = "soft_product")
+    @SQLDelete(sql = "update soft_product set deleted = true where id = ?")
+    @SQLRestriction("deleted = false")
+    public static class SoftProduct {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, length = 16) String sku;
+        boolean deleted;
+        protected SoftProduct() {}
+        SoftProduct(String sku) { this.sku = sku; }
+    }
+
+    /* Reference data that never changes: Hibernate skips dirty checking entirely. */
+    @Entity(name = "Currency")
+    @Table(name = "currency")
+    @Immutable
+    public static class Currency {
+        @Id @Column(length = 3) String code;
+        String name;
+        protected Currency() {}
+        Currency(String code, String name) { this.code = code; this.name = name; }
+    }
+
+    static EntityManagerFactory emf(boolean showSql, Class<?>... entities) {
+        var cfg = new PersistenceConfiguration("warehouse")
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:EntityDesign;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", String.valueOf(showSql));
+        for (Class<?> c : entities) cfg.managedClass(c);
+        return cfg.createEntityManagerFactory();
+    }
+
+    public static void main(String[] args) {
+        System.out.println("-- equality: add to a Set before persist, look it up after --");
+        try (EntityManagerFactory emf = emf(false, IdHashProduct.class, SkuProduct.class, SafeProduct.class)) {
+            IdHashProduct a = new IdHashProduct("BOLT-7");
+            SkuProduct b = new SkuProduct("BOLT-7");
+            SafeProduct c = new SafeProduct("BOLT-7");
+            Set<IdHashProduct> setA = new HashSet<>(Set.of(a));
+            Set<SkuProduct> setB = new HashSet<>(Set.of(b));
+            Set<SafeProduct> setC = new HashSet<>(Set.of(c));
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(a); em.persist(b); em.persist(c);
+                em.getTransaction().commit();
+            }
+            System.out.println("id-based hashCode : id=" + a.id + ", set.contains = " + setA.contains(a));
+            System.out.println("business key      : id=" + b.id + ", set.contains = " + setB.contains(b));
+            System.out.println("id + constant hash: id=" + c.id + ", set.contains = " + setC.contains(c));
+
+            try (EntityManager em = emf.createEntityManager()) {          // a second context: a different Java object
+                SafeProduct reloaded = em.find(SafeProduct.class, c.id);
+                System.out.println("reloaded == c: " + (reloaded == c) + ", reloaded.equals(c): " + reloaded.equals(c)
+                        + ", set.contains(reloaded): " + setC.contains(reloaded));
+            }
+            System.out.println("two transient SafeProducts equal: " + new SafeProduct("X").equals(new SafeProduct("X")));
+        }
+
+        System.out.println("-- callbacks, soft delete, immutable, natural id --");
+        try (EntityManagerFactory emf = emf(true, AuditedProduct.class, SoftProduct.class, Currency.class)) {
+            System.out.println("- @PrePersist / @PreUpdate -");
+            Long auditedId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                AuditedProduct p = new AuditedProduct("BOLT-7", 80);
+                em.persist(p);
+                em.getTransaction().commit();
+                auditedId = p.id;
+                System.out.println("createdAt set: " + (p.createdAt != null) + ", createdAt equals updatedAt: " + p.createdAt.equals(p.updatedAt));
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                AuditedProduct p = em.find(AuditedProduct.class, auditedId);
+                p.priceInCents = 90;
+                em.getTransaction().commit();
+                System.out.println("updatedAt moved after update: " + p.updatedAt.isAfter(p.createdAt));
+            }
+            System.out.println("listener calls: prePersist=" + AuditListener.prePersist + ", preUpdate=" + AuditListener.preUpdate);
+
+            System.out.println("- @NaturalId lookup -");
+            try (EntityManager em = emf.createEntityManager()) {
+                AuditedProduct p = em.unwrap(Session.class).byNaturalId(AuditedProduct.class).using("sku", "BOLT-7").load();
+                System.out.println("by natural id: " + p.sku + " at " + p.priceInCents + "c");
+            }
+
+            System.out.println("- soft delete -");
+            Long softId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                SoftProduct s = new SoftProduct("NUT-3");
+                em.persist(s);
+                em.getTransaction().commit();
+                softId = s.id;
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.remove(em.find(SoftProduct.class, softId));
+                em.getTransaction().commit();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                long jpql = em.createQuery("select count(s) from SoftProduct s", Long.class).getSingleResult();
+                Number sql = (Number) em.createNativeQuery("select count(*) from soft_product").getSingleResult();
+                System.out.println("JPQL count = " + jpql + ", native count = " + sql);
+            }
+
+            System.out.println("- @Immutable: a change is silently ignored -");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(new Currency("GBP", "Pound sterling"));
+                em.getTransaction().commit();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Currency gbp = em.find(Currency.class, "GBP");
+                gbp.name = "changed";
+                em.getTransaction().commit();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("GBP name = " + em.find(Currency.class, "GBP").name);
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="EntityDesign">
+-- equality: add to a Set before persist, look it up after --
+id-based hashCode : id=1, set.contains = false
+business key      : id=1, set.contains = true
+id + constant hash: id=1, set.contains = true
+reloaded == c: false, reloaded.equals(c): true, set.contains(reloaded): true
+two transient SafeProducts equal: false
+-- callbacks, soft delete, immutable, natural id --
+Hibernate: create global temporary table HTE_audited_product(priceInCents integer, rn_ integer not null, createdAt timestamp(6) with time zone, id bigint, updatedAt timestamp(6) with time zone, sku varchar(16), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_soft_product(deleted boolean, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists audited_product cascade
+Hibernate: drop table if exists currency cascade
+Hibernate: drop table if exists soft_product cascade
+Hibernate: drop sequence if exists audited_product_SEQ
+Hibernate: drop sequence if exists soft_product_SEQ
+Hibernate: create sequence audited_product_SEQ start with 1 increment by 50
+Hibernate: create sequence soft_product_SEQ start with 1 increment by 50
+Hibernate: create table audited_product (priceInCents integer not null, createdAt timestamp(6) with time zone not null, id bigint not null, updatedAt timestamp(6) with time zone not null, sku varchar(16) not null, primary key (id), unique (sku))
+Hibernate: create table currency (code varchar(3) not null, name varchar(255), primary key (code))
+Hibernate: create table soft_product (deleted boolean not null, id bigint not null, sku varchar(16) not null, primary key (id))
+- @PrePersist / @PreUpdate -
+Hibernate: select next value for audited_product_SEQ
+Hibernate: insert into audited_product (createdAt,priceInCents,sku,updatedAt,id) values (?,?,?,?,?)
+createdAt set: true, createdAt equals updatedAt: true
+Hibernate: select ap1_0.id,ap1_0.createdAt,ap1_0.priceInCents,ap1_0.sku,ap1_0.updatedAt from audited_product ap1_0 where ap1_0.id=?
+Hibernate: update audited_product set priceInCents=?,updatedAt=? where id=?
+updatedAt moved after update: true
+listener calls: prePersist=1, preUpdate=1
+- @NaturalId lookup -
+Hibernate: select ap1_0.id,ap1_0.createdAt,ap1_0.priceInCents,ap1_0.sku,ap1_0.updatedAt from audited_product ap1_0 where ap1_0.sku=?
+by natural id: BOLT-7 at 90c
+- soft delete -
+Hibernate: select next value for soft_product_SEQ
+Hibernate: insert into soft_product (deleted,sku,id) values (?,?,?)
+Hibernate: select sp1_0.id,sp1_0.deleted,sp1_0.sku from soft_product sp1_0 where sp1_0.id=? and (sp1_0.deleted = false)
+Hibernate: update soft_product set deleted = true where id = ?
+Hibernate: select count(sp1_0.id) from soft_product sp1_0 where (sp1_0.deleted = false)
+Hibernate: select count(*) from soft_product
+JPQL count = 0, native count = 1
+- @Immutable: a change is silently ignored -
+Hibernate: insert into currency (name,code) values (?,?)
+Hibernate: select c1_0.code,c1_0.name from currency c1_0 where c1_0.code=?
+Hibernate: select c1_0.code,c1_0.name from currency c1_0 where c1_0.code=?
+GBP name = Pound sterling
+  </pre>
+
+  <p>The first block is the whole argument. All three products were put in a <code>HashSet</code> while transient, then persisted. Option 1 hashed <code>null</code> before persist (bucket 0) and hashes <code>1</code> after, so the set looks in the wrong bucket: <code>contains</code> is <strong>false</strong> for an object that is in the set. Nothing threw; the entity is simply stranded in a bucket it will never be found in, and <code>remove</code> will fail the same way, so the set can never be cleaned. Option 2 hashes the SKU, which was known from construction and never changes: correct, provided your entity <em>has</em> an immutable business key. Option 3 is the general answer when it does not: <code>hashCode</code> is a constant per class, so the bucket never moves, and <code>equals</code> compares ids once both are assigned &mdash; which the second context proves, where <code>reloaded</code> is a different object (<code>==</code> false) but equal to <code>c</code> and found in the set. The price is that every instance lands in one bucket, so a <code>HashSet</code> of these degrades to a list; for the handful of entities a <code>@OneToMany</code> typically holds, that is irrelevant. The last line is the one subtlety: two transient instances are never equal under option 3, because neither has an id yet &mdash; deliberate, since two unsaved products are two products.</p>
+
+  <p>The second block covers the supporting cast. <code>@PrePersist</code> stamped both timestamps before the <code>INSERT</code> (the output confirms they were set and equal) and <code>@PreUpdate</code> moved <code>updatedAt</code> before the <code>UPDATE</code>; the external listener counted one of each. The <code>@NaturalId</code> lookup went to the database by <code>sku</code> rather than by id, and would have consulted the natural-id cache first had one been configured. The soft delete turned <code>remove</code> into the <code>UPDATE</code> you wrote, and the <code>@SQLRestriction</code> was appended to the <code>find</code>, the <code>count</code> &mdash; every entity query &mdash; while the native query saw the row that is still physically there. And the <code>@Immutable</code> currency was changed and committed with no <code>UPDATE</code> at all: Hibernate takes no snapshot of an immutable entity, so there is nothing to dirty-check.</p>
+
+  <h3 class="mt-8 mb-3">Watch the bucket move</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of the hashCode trap">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">A <code>HashSet</code> and a generated id</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="hashcode-trap"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">State</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Result</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="hashcode-trap">
+    {
+      "lang": "java",
+      "code": "Set<Order> orders = new HashSet<>();   // 16 buckets\nOrder o = new Order(\"ORD-1\");            // id == null\norders.add(o);\nem.persist(o);                           // Hibernate assigns id = 42\norders.contains(o);\norders.remove(o);",
+      "steps": [
+        { "line": 1, "vars": { "orders": "{ } — 16 empty buckets" }, "out": "",
+          "note": "A HashSet is an array of buckets. An element's bucket is chosen from its hashCode() at the moment it is added, and never re-computed." },
+        { "line": 2, "vars": { "orders": "{ }", "o.id": "null", "o.hashCode()": "Objects.hashCode(null) = 0" }, "out": "",
+          "note": "The entity uses the id in hashCode. Before persist the id is null, so the hash is 0." },
+        { "line": 3, "vars": { "orders": "{ o } in bucket 0", "o.id": "null", "o.hashCode()": "0", "bucket": "0 & 15 = 0" }, "out": "",
+          "note": "The set files o under bucket 0 and will look for it there forever." },
+        { "line": 4, "vars": { "orders": "{ o } in bucket 0", "o.id": "42", "o.hashCode()": "Objects.hashCode(42) = 42" }, "out": "INSERT … id = 42",
+          "note": "persist() asks the sequence for an id and writes 42 into the field. The set is not told; the entry stays in bucket 0." },
+        { "line": 5, "vars": { "orders": "{ o } in bucket 0", "o.id": "42", "o.hashCode()": "42", "bucket searched": "42 & 15 = 10" }, "out": "contains(o) -> false",
+          "note": "contains() hashes the current state, gets 42, looks in bucket 10, finds nothing. The object is in the set and the set says it is not." },
+        { "line": 6, "vars": { "orders": "{ o } in bucket 0 — stranded", "o.id": "42", "bucket searched": "10" }, "out": "remove(o) -> false, size() still 1",
+          "note": "remove() misses the same way. The set now contains an element it can neither find nor remove. With a business-key or constant hashCode the bucket would have been the same before and after persist." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">The three options, side by side</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">equals and hashCode strategies for entities</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Correct in a Set across persist?</th><th scope="col">Equal across contexts?</th><th scope="col">Cost</th><th scope="col">Use when</th></tr></thead>
+      <tbody>
+        <tr><td>Generated id in <code>equals</code> <em>and</em> <code>hashCode</code></td><td class="no">no &mdash; hash changes on persist</td><td class="yes">yes</td><td>none</td><td>never, unless entities are only ever added to sets after persist (a rule nobody keeps)</td></tr>
+        <tr><td>Immutable business key (<code>sku</code>, ISBN, natural id)</td><td class="yes">yes</td><td class="yes">yes</td><td>a unique column you need anyway</td><td>the entity has a key that is assigned at construction and never changes</td></tr>
+        <tr><td>Id in <code>equals</code> (when assigned), constant <code>hashCode</code></td><td class="yes">yes</td><td class="yes">yes</td><td>all instances share one bucket; transient instances are never equal</td><td>no natural key; the default for ordinary entities</td></tr>
+        <tr><td>Assigned id (UUID generated in the constructor)</td><td class="yes">yes</td><td class="yes">yes</td><td>16-byte keys, random index inserts unless time-ordered (UUID v7)</td><td>distributed systems, offline creation, merges across databases</td></tr>
+        <tr><td>Not overriding at all (object identity)</td><td class="yes">yes, trivially</td><td class="no">no</td><td>none</td><td>entities never compared outside one persistence context &mdash; rarer than it sounds once DTOs and caches appear</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Value objects, boundaries and the shape of an entity</h3>
+
+  <pre data-code data-lang="java" data-nobar>
+// A value object has no identity: equal by value, immutable, embedded in the owning row.
+// Hibernate 6.2+ maps a record directly as an embeddable.
+@Embeddable
+public record Money(long amountInCents, String currency) {
+    public Money { if (amountInCents < 0) throw new IllegalArgumentException("negative"); }
+}
+
+@Entity
+public class OrderLine {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+    @Embedded private Money unitPrice;              // columns unitPrice_amountInCents, unitPrice_currency
+    @Embedded @AttributeOverride(name = "amountInCents", column = @Column(name = "discount_cents"))
+              @AttributeOverride(name = "currency",      column = @Column(name = "discount_ccy"))
+    private Money discount;
+    ...
+}
+
+// At the boundary, the entity never leaves the service:
+public record OrderSummary(Long id, String customer, long totalInCents) {}
+public OrderSummary summary(long id) {
+    Order o = em.find(Order.class, id);
+    return new OrderSummary(o.getId(), o.getCustomer().getName(), o.total().amountInCents());
+}
+  </pre>
+
+  <p>Three design pressures pull on an entity. First, <strong>push value semantics into value objects</strong>: money, a date range, an address, a quantity with its unit are not rows with identity; they are values, best modelled as records marked <code>@Embeddable</code>, equal by their fields and impossible to put into an inconsistent state. Second, <strong>keep entities inside the persistence boundary</strong>. An entity handed to a JSON serializer or a view template will trigger lazy loads outside the transaction (<code>LazyInitializationException</code>, §5), will serialize a bidirectional association forever (<code>Order</code> → lines → order → lines…), and will send every column to a client that wanted three. Map to a DTO at the service edge; the projection queries from §9 often make the entity unnecessary for reads altogether. Third, the <strong>rich-versus-anaemic</strong> argument: an entity that enforces its own invariants (<code>order.addLine(...)</code> checks stock and keeps both sides of the association in sync, §4) is easier to keep correct than a bag of getters and setters driven by a service, but entities that reach for repositories or external services from inside their methods become untestable. A reasonable line: invariants and state transitions live in the entity; coordination, transactions and I/O live in the service.</p>
+
+  <h3 class="mt-8 mb-3">Callbacks, listeners and auditing</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">JPA lifecycle callbacks</caption>
+      <thead><tr><th scope="col">Callback</th><th scope="col">Fires</th><th scope="col">Typical use</th><th scope="col">Must not</th></tr></thead>
+      <tbody>
+        <tr><td><code>@PrePersist</code></td><td>before the <code>INSERT</code> is queued (on <code>persist</code>, or on flush for cascades)</td><td>stamp <code>createdAt</code>, assign a UUID, default a status</td><td>call <code>EntityManager</code> methods</td></tr>
+        <tr><td><code>@PostPersist</code></td><td>after the <code>INSERT</code> ran (the generated id is available)</td><td>publish a domain event by id</td><td>assume the transaction committed</td></tr>
+        <tr><td><code>@PreUpdate</code></td><td>at flush, only if the entity is dirty</td><td>stamp <code>updatedAt</code>, recompute a derived column</td><td>change other entities</td></tr>
+        <tr><td><code>@PostUpdate</code> / <code>@PreRemove</code> / <code>@PostRemove</code></td><td>around <code>UPDATE</code> / <code>DELETE</code></td><td>audit trail, cleanup of external resources</td><td>throw to "cancel" (it rolls back everything)</td></tr>
+        <tr><td><code>@PostLoad</code></td><td>after the entity is hydrated from a row or refreshed</td><td>compute a transient field from loaded state</td><td>trigger lazy loads (N+1 by stealth)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Callbacks on the entity are fine for stamping; <code>@EntityListeners</code> moves the same logic into a reusable class &mdash; the worked example's <code>AuditListener</code> &mdash; that can be applied to every audited entity, usually through a <code>@MappedSuperclass</code> that carries <code>createdAt</code>/<code>updatedAt</code>/<code>createdBy</code>. Hibernate adds <code>@CreationTimestamp</code> and <code>@UpdateTimestamp</code> for the two commonest cases, and <strong>Envers</strong> (<code>hibernate-envers</code>, <code>@Audited</code>) for full history tables: every change to an audited entity is recorded in a <code>_AUD</code> table with a revision number, and you can query "what did this order look like at revision 17". Not on this page's class path, but the first thing to reach for when the requirement is "who changed what, when" rather than "when was it last changed".</p>
+
+  <h3 class="mt-8 mb-3">Soft delete, honestly</h3>
+
+  <p>Soft delete keeps the row and hides it, which auditors, undo features and foreign keys from other tables all like. It also costs more than the two annotations suggest. A unique constraint on <code>sku</code> now blocks re-creating a deleted product, so the constraint must become <code>(sku, deleted)</code> or a partial index. Every association to a soft-deletable entity needs the restriction too, or an <code>Order</code> will happily join to its deleted lines &mdash; and <code>@SQLRestriction</code> on the collection side is a separate declaration. Reports that must <em>include</em> deleted rows need native SQL or a second entity mapped without the restriction. And <code>remove</code> still fires <code>@PreRemove</code>, still cascades, still orphan-removes, exactly as if the row were gone. Hibernate 6.4 added <code>@SoftDelete</code>, which handles the column, the restriction and the collection cases together; prefer it to hand-rolled <code>@SQLDelete</code> when you are on a version that has it.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Entity design gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Lombok <code>@Data</code> on an entity</strong> generates <code>equals</code>/<code>hashCode</code> over <em>every</em> field, including the generated id and lazy collections. That is option 1's bug plus a lazy-load (or a <code>StackOverflowError</code> through a bidirectional association) every time <code>hashCode</code> runs. Use <code>@Getter</code>/<code>@Setter</code> and write the two methods by hand.</li>
+        <li><strong><code>final</code> classes and <code>final</code> methods</strong> cannot be proxied, so lazy loading of a <code>@ManyToOne</code> to them silently becomes eager. Records cannot be entities for the same reason (and because they are immutable with no no-arg constructor); they are excellent embeddables and projections.</li>
+        <li><strong><code>toString()</code> that touches a collection</strong> loads it. A log statement at the wrong place becomes a query, or a <code>LazyInitializationException</code>.</li>
+        <li><strong>Timestamps set in Java are the application's clock</strong>, not the database's. For ordering across servers prefer a database default or <code>@CurrentTimestamp(source = SourceType.DB)</code>.</li>
+        <li><strong><code>@DynamicInsert</code></strong> omits null columns so database defaults apply &mdash; and then the entity in memory still holds <code>null</code> until you <code>refresh</code> it.</li>
+        <li><strong>A <code>@NaturalId</code> is immutable by default.</strong> Changing it throws unless you declare <code>@NaturalId(mutable = true)</code>, and a mutable natural id is a poor <code>hashCode</code> ingredient for the reason this whole section is about.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-entity-design-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>An <code>Order</code> entity has <code>@OneToMany Set&lt;OrderLine&gt; lines</code>. <code>OrderLine.hashCode()</code> returns <code>Objects.hash(id)</code>. A service creates a new line, adds it to <code>order.getLines()</code>, and calls <code>em.persist(line)</code>. Later in the same transaction, <code>order.getLines().remove(line)</code> returns <code>false</code> and the line is still there. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-entity-design-1"><span>Hibernate replaced the <code>Set</code> with a persistent collection that does not support <code>remove</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-entity-design-1"><span><code>persist</code> made the line managed, and managed entities cannot be removed from collections <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-entity-design-1"><span>The line was hashed with a null id when added; <code>persist</code> assigned an id, so <code>remove</code> now searches a different bucket <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-entity-design-1"><span>The <code>@OneToMany</code> side is not the owning side, so changes to the set are ignored <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Exactly the stepper. The hash changed between <code>add</code> and <code>remove</code>, so the set looks in the wrong bucket. A business-key or constant <code>hashCode</code> would have kept the bucket stable.</p>
+        <p class="mb-0"><strong>A</strong> is false: Hibernate's <code>PersistentSet</code> supports removal. <strong>B</strong> is invented. <strong>D</strong> is a real rule (§4) but affects what is <em>written</em>, not whether a Java <code>Set</code> can find its own element.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-entity-design-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>With <code>@SQLDelete</code> and <code>@SQLRestriction("deleted = false")</code> on <code>Product</code>, which query can still return a soft-deleted product?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-entity-design-2"><span><code>em.find(Product.class, id)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-entity-design-2"><span><code>em.createNativeQuery("select * from product", Product.class)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-entity-design-2"><span><code>em.createQuery("select p from Product p", Product.class)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-entity-design-2"><span>A Criteria API query over <code>Product</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The restriction is appended to SQL that Hibernate <em>generates</em>. Native SQL is yours verbatim, which the worked example showed with its <code>count(*)</code> of 1 against a JPQL count of 0. Native queries that should respect soft delete must say so themselves.</p>
+        <p class="mb-0"><strong>A</strong>, <strong>C</strong> and <strong>D</strong> are all generated by Hibernate from the mapping and all carry the <code>deleted = false</code> predicate &mdash; the <code>find</code> in the output shows it in its <code>where</code> clause.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-entity-design-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about lifecycle callbacks are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>@PreUpdate</code> runs only when Hibernate finds the entity dirty at flush; an unchanged entity never triggers it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A <code>StatelessSession.insert</code> fires <code>@PrePersist</code> just like <code>persist</code> does <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A bulk JPQL <code>update</code> fires <code>@PreUpdate</code> once per affected row <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>An <code>@EntityListeners</code> class can be shared by many entities, which is how a reusable audit stamp is built <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Callbacks hang off the persistence context's own operations: dirty checking decides whether an <code>UPDATE</code> (and so <code>@PreUpdate</code>) happens, and listeners are plain classes attached by annotation to as many entities as you like.</p>
+        <p class="mb-0"><strong>B</strong> is false: the stateless session bypasses the persistence context and its events, which is part of why it is fast. <strong>C</strong> is false: a bulk statement is one SQL statement that never loads the entities, so no per-entity callback can run &mdash; the <code>updatedAt</code> column stays stale unless the statement sets it.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="entity-design"> Mark this section complete
+  </label>
+</section>

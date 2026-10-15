@@ -1,0 +1,344 @@
+<section class="lm-section" id="reflection" data-title="Reflection, annotations and method handles" data-num="11">
+  <p class="lm-eyebrow">Section 11</p>
+  <h2 class="mb-4">Reflection, annotations and method handles</h2>
+
+  <p>Everything so far has been code that knows, at compile time, which class it is talking to. Reflection is the escape hatch: a program that inspects classes it has never heard of, reads their fields, calls their methods, and constructs them, all by <em>name</em> and all at <em>runtime</em>. Every framework you will use is built on it — dependency injection finds constructors, serializers find fields, test runners find methods, validators find annotations. You will rarely write reflective code in application logic, and you will constantly debug code that does.</p>
+
+  <p>The price is real: the compiler cannot check names or types, the JIT cannot inline through a <code>Method.invoke</code>, arguments are boxed, every call re-checks access, and since JDK 16 the JDK's own internals are closed to it. This section covers the API, its costs, the annotation system it usually serves, and the two modern alternatives — method handles and var handles — that recover most of the speed.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: inspecting and invoking at runtime</h3>
+
+  <pre data-code data-lang="java" data-file="Reflection.java" data-verify="Reflection">
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
+import java.lang.reflect.Field;
+import java.lang.reflect.InaccessibleObjectException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.RecordComponent;
+import java.util.Arrays;
+
+public class Reflection {
+
+    interface PriceSource {
+        int priceInCents(String sku);
+        String name();
+    }
+
+    record Product(String sku, int priceInCents) { }
+
+    static class Vault {
+        private final String secret = "rotate-me";
+        private volatile int stock = 10;
+
+        private static final VarHandle STOCK;
+        static {
+            try {
+                STOCK = MethodHandles.lookup().findVarHandle(Vault.class, "stock", int.class);
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+        boolean reserve(int expected, int remaining) { return STOCK.compareAndSet(this, expected, remaining); }
+    }
+
+    public static void main(String[] args) throws Throwable {
+        System.out.println("-- inspecting a record --");
+        Class<Product> c = Product.class;
+        System.out.println("isRecord         = " + c.isRecord() + ", final = " + Modifier.isFinal(c.getModifiers()));
+        System.out.println("components       = " + Arrays.stream(c.getRecordComponents()).map(RecordComponent::getName).sorted().toList());
+        System.out.println("declared methods = " + Arrays.stream(c.getDeclaredMethods()).filter(m -> !m.isSynthetic()).map(Method::getName).sorted().toList());
+
+        System.out.println("-- constructing and invoking by name --");
+        Product p = c.getDeclaredConstructor(String.class, int.class).newInstance("BOLT-7", 80);
+        Method sku = c.getMethod("sku");
+        System.out.println("sku()            = " + sku.invoke(p) + "  (public: " + Modifier.isPublic(sku.getModifiers()) + ")");
+
+        System.out.println("-- private access: your own class yes, java.base no --");
+        Field secret = Vault.class.getDeclaredField("secret");
+        secret.setAccessible(true);
+        System.out.println("Vault.secret     = " + secret.get(new Vault()));
+        try {
+            Field value = String.class.getDeclaredField("value");
+            value.setAccessible(true);
+            System.out.println("opened java.lang.String.value");
+        } catch (InaccessibleObjectException e) {
+            System.out.println("String.value     : blocked by strong encapsulation");
+        }
+
+        System.out.println("-- a dynamic proxy --");
+        PriceSource source = (PriceSource) Proxy.newProxyInstance(
+                Reflection.class.getClassLoader(), new Class<?>[] { PriceSource.class },
+                (self, method, a) -> {
+                    System.out.println("  intercepted " + method.getName() + (a == null ? "()" : Arrays.toString(a)));
+                    return method.getName().equals("name") ? "proxy" : 80;
+                });
+        System.out.println("proxy price      = " + source.priceInCents("BOLT-7"));
+        System.out.println("proxy name       = " + source.name());
+
+        System.out.println("-- method handles and var handles --");
+        MethodHandle price = MethodHandles.lookup()
+                .findVirtual(Product.class, "priceInCents", MethodType.methodType(int.class));
+        int cents = (int) price.invokeExact(p);
+        System.out.println("invokeExact      = " + cents);
+        Vault vault = new Vault();
+        System.out.println("CAS 10 -> 7      = " + vault.reserve(10, 7));
+        System.out.println("CAS 10 -> 3      = " + vault.reserve(10, 3) + "  (stock is now " + vault.stock + ")");
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Reflection">
+-- inspecting a record --
+isRecord         = true, final = true
+components       = [priceInCents, sku]
+declared methods = [equals, hashCode, priceInCents, sku, toString]
+-- constructing and invoking by name --
+sku()            = BOLT-7  (public: true)
+-- private access: your own class yes, java.base no --
+Vault.secret     = rotate-me
+String.value     : blocked by strong encapsulation
+-- a dynamic proxy --
+  intercepted priceInCents[BOLT-7]
+proxy price      = 80
+  intercepted name()
+proxy name       = proxy
+-- method handles and var handles --
+invokeExact      = 80
+CAS 10 -> 7      = true
+CAS 10 -> 3      = false  (stock is now 7)
+  </pre>
+
+  <p>Five things happened, and each is a different tool:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>Class</code> is the entry point.</strong> <code>getRecordComponents</code>, <code>getDeclaredMethods</code>, <code>getDeclaredConstructor</code> and <code>Modifier</code> describe the type. The <em>declared</em> variants return what the class itself declares, private included; the plain variants (<code>getMethod</code>) return public members including inherited ones. Note the program sorts every listing — the JDK documents the order as <em>unspecified</em>, and it really does vary between JVM builds.</li>
+    <li><strong><code>setAccessible(true)</code> is the switch that bypasses access control</strong>, and it works on <code>Vault</code> because <code>Vault</code> is in your own module (the unnamed module, here). It fails on <code>String.value</code> with <code>InaccessibleObjectException</code>: <code>java.base</code> does not <em>open</em> <code>java.lang</code> to you. That is strong encapsulation (§12), the JDK 17 change that broke a generation of libraries which had been poking at JDK internals. The escape is <code>--add-opens java.base/java.lang=ALL-UNNAMED</code> on the command line, and it should feel like what it is: a deliberate hole.</li>
+    <li><strong><code>Proxy</code> fabricates an implementation of an interface at runtime</strong> whose every method lands in one <code>InvocationHandler</code>. It is how a mocking library builds a mock, how a remote call looks like a local one, and how a transaction annotation wraps a method. It works only for interfaces; for classes you need a bytecode library (ByteBuddy, which is what Mockito and Hibernate use).</li>
+    <li><strong>A <code>MethodHandle</code> is a typed, direct reference to a method</strong>, looked up once and then invoked at near-native speed: no boxing with <code>invokeExact</code>, access checked at lookup time rather than per call, and the JIT can inline through a constant handle. The cast <code>(int) price.invokeExact(p)</code> is not a normal cast — it tells the compiler the exact call-site type, which must match the handle's type to the letter.</li>
+    <li><strong>A <code>VarHandle</code> is the same idea for a field</strong>, with atomic operations attached: <code>compareAndSet</code>, <code>getAndAdd</code>, volatile and acquire/release reads and writes. It is the official replacement for <code>sun.misc.Unsafe</code> and for <code>AtomicIntegerFieldUpdater</code>, and it is how the <code>java.util.concurrent</code> classes you met in §4 are implemented. The second CAS fails because the stock is no longer 10 — exactly the lost-update protection §1 wanted.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Annotations: metadata, not behaviour</h3>
+
+  <p>An annotation does nothing by itself. <code>@Audited</code> on a method changes no bytecode in that method. It is a note attached to the class file that <em>something else</em> reads — the compiler (<code>@Override</code>, <code>@FunctionalInterface</code>), an annotation processor at build time (Lombok, MapStruct, records of configuration), or, most commonly, a framework using reflection at runtime. The retention policy decides how far the note travels.</p>
+
+  <pre data-code data-lang="java" data-file="Annotations.java" data-verify="Annotations">
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Repeatable;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class Annotations {
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ ElementType.TYPE, ElementType.METHOD })
+    @interface Audited {
+        String by();
+        int level() default 1;
+    }
+
+    @Retention(RetentionPolicy.SOURCE)             // discarded by javac
+    @Target(ElementType.METHOD)
+    @interface Draft { }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ ElementType.FIELD, ElementType.RECORD_COMPONENT })
+    @interface NotBlank { }
+
+    @Repeatable(Tags.class)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Tag { String value(); }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Tags { Tag[] value(); }
+
+    @Audited(by = "ops", level = 3)
+    @Tag("inventory") @Tag("critical")
+    static class InventoryService {
+        @Audited(by = "finance") void reprice() { }
+        @Draft void experimental() { }
+        void plain() { }
+    }
+
+    record Part(@NotBlank String sku, @NotBlank String name, int qty) { }
+
+    /* A tiny validation framework: the metadata is on the type, the behaviour is here. */
+    static List<String> validate(Object target) throws IllegalAccessException {
+        List<String> problems = new ArrayList<>();
+        Field[] fields = target.getClass().getDeclaredFields();
+        Arrays.sort(fields, (a, b) -> a.getName().compareTo(b.getName()));
+        for (Field f : fields) {
+            if (!f.isAnnotationPresent(NotBlank.class)) continue;
+            f.setAccessible(true);
+            Object v = f.get(target);
+            if (v == null || v.toString().isBlank()) problems.add(f.getName() + " must not be blank");
+        }
+        return problems;
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("-- reading annotation values --");
+        Audited onType = InventoryService.class.getAnnotation(Audited.class);
+        System.out.println("type: by=" + onType.by() + " level=" + onType.level());
+
+        Method[] methods = InventoryService.class.getDeclaredMethods();
+        Arrays.sort(methods, (a, b) -> a.getName().compareTo(b.getName()));
+        for (Method m : methods) {
+            Audited a = m.getAnnotation(Audited.class);
+            System.out.println(m.getName() + "(): audited=" + (a != null ? "by " + a.by() + " level " + a.level() : "no")
+                    + ", @Draft visible=" + m.isAnnotationPresent(Draft.class));
+        }
+
+        System.out.println("-- repeatable --");
+        Tag[] tags = InventoryService.class.getAnnotationsByType(Tag.class);
+        System.out.println("tags = " + Arrays.stream(tags).map(Tag::value).sorted().toList()
+                + " (container present: " + InventoryService.class.isAnnotationPresent(Tags.class) + ")");
+
+        System.out.println("-- annotations drive a validator --");
+        System.out.println("valid   : " + validate(new Part("BOLT-7", "hex bolt", 3)));
+        System.out.println("invalid : " + validate(new Part("BOLT-7", "   ", 3)));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Annotations">
+-- reading annotation values --
+type: by=ops level=3
+experimental(): audited=no, @Draft visible=false
+plain(): audited=no, @Draft visible=false
+reprice(): audited=by finance level 1, @Draft visible=false
+-- repeatable --
+tags = [critical, inventory] (container present: true)
+-- annotations drive a validator --
+valid   : []
+invalid : [name must not be blank]
+  </pre>
+
+  <p><code>@Draft</code> is on <code>experimental()</code> in the source and invisible at runtime: <code>RetentionPolicy.SOURCE</code> means javac drops it after compilation (useful for annotation processors and lint tools). <code>CLASS</code> — the default if you write nothing — keeps it in the class file but does not load it, so it is equally invisible to reflection; <code>RUNTIME</code> is the one you want almost every time. The repeatable <code>@Tag</code> shows the mechanism behind the convenience: the compiler wraps the two tags in an implicit <code>@Tags</code> container, and <code>getAnnotationsByType</code> unwraps it. And <code>@NotBlank</code> on a record component was propagated by javac to the generated private field (its <code>@Target</code> includes <code>FIELD</code>), which is what lets the validator find it with <code>getDeclaredFields</code>.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Annotation meta-annotations and their effect</caption>
+      <thead><tr><th scope="col">Meta-annotation</th><th scope="col">Controls</th><th scope="col">Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>@Retention</code></td><td>How long the annotation survives: <code>SOURCE</code> (javac only), <code>CLASS</code> (in the file, not loaded), <code>RUNTIME</code> (reflectable)</td><td><code>CLASS</code> — almost never what you want</td></tr>
+        <tr><td><code>@Target</code></td><td>Where it may be written: <code>TYPE</code>, <code>METHOD</code>, <code>FIELD</code>, <code>PARAMETER</code>, <code>RECORD_COMPONENT</code>, <code>TYPE_USE</code>…</td><td>Any declaration</td></tr>
+        <tr><td><code>@Inherited</code></td><td>Whether a class annotation is seen on subclasses via <code>getAnnotation</code> (classes only — never methods or interfaces)</td><td>Not inherited</td></tr>
+        <tr><td><code>@Repeatable</code></td><td>Names the container annotation that holds several copies</td><td>One copy per element</td></tr>
+        <tr><td><code>@Documented</code></td><td>Whether Javadoc shows it on annotated elements</td><td>Hidden</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Which tool for which job</h3>
+
+  <div class="lm-card">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a tool onto the need it fits, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Each need has one best answer; the others would work badly or not at all.</p>
+    <div class="lm-match" data-match>
+      <div class="lm-match-pool" role="group" aria-label="Tools to place">
+        <button type="button" class="lm-chip" data-chip="reflect"><code>Field.setAccessible</code> + <code>get</code></button>
+        <button type="button" class="lm-chip" data-chip="mh"><code>MethodHandle</code>, looked up once</button>
+        <button type="button" class="lm-chip" data-chip="vh"><code>VarHandle.compareAndSet</code></button>
+        <button type="button" class="lm-chip" data-chip="rc"><code>Class.getRecordComponents</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Needs">
+        <button type="button" class="lm-slot" data-slot="reflect" data-label="assert a private field once in a unit test"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">assert a private field, once, in a unit test</span></button>
+        <button type="button" class="lm-slot" data-slot="mh" data-label="call a method chosen at start-up millions of times"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">call a method chosen at start-up, millions of times</span></button>
+        <button type="button" class="lm-slot" data-slot="vh" data-label="lock-free compare-and-set on an int field"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">lock-free compare-and-set on an <code>int</code> field</span></button>
+        <button type="button" class="lm-slot" data-slot="rc" data-label="list a record's components in a serializer"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">list a record's components, in order, in a serializer</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. Plain reflection is fine when it runs once and clarity matters more than speed. A hot path wants a <code>MethodHandle</code> held in a <code>static final</code> so the JIT can inline it. Atomic field updates are exactly what <code>VarHandle</code> exists for. And <code>getRecordComponents</code> returns components in <em>declaration</em> order — unlike <code>getDeclaredFields</code>, whose order is unspecified — which is why serializers use it.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">What it costs, and what replaced it</h3>
+
+  <p>A reflective call is slower than a direct one for four reasons, and knowing them tells you which alternative fixes which. <strong>Lookup</strong>: <code>getMethod("sku")</code> scans and copies the method table — cache the <code>Method</code>, never look it up per call. <strong>Access checks</strong>: each <code>invoke</code> re-verifies that the caller may call; <code>setAccessible(true)</code> skips that. <strong>Boxing</strong>: arguments travel as <code>Object[]</code> and primitives are boxed both ways. <strong>Opacity</strong>: the JIT sees a call into <code>Method.invoke</code>, not into your method, so nothing inlines. Method handles address the last two: <code>invokeExact</code> takes primitives as primitives, and a handle in a <code>static final</code> field is a constant the JIT can see through. That is also the machinery under lambdas — a lambda expression compiles to an <code>invokedynamic</code> instruction whose bootstrap method spins a class at first call and links a method handle to it, which is why a lambda is cheaper than the anonymous class it replaced (Intermediate §2).</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Reflection gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>Method.invoke</code> wraps every exception.</strong> Whatever the target throws arrives as <code>InvocationTargetException</code>; the real exception is <code>getCause()</code>. Frameworks that forget to unwrap it produce stack traces that blame the framework.</li>
+        <li><strong>Reflection ignores generics</strong> (erasure, Intermediate §1). <code>Field.getType()</code> of a <code>List&lt;Product&gt;</code> is <code>List</code>; the type argument is only available through <code>getGenericType()</code> and only because javac kept a <code>Signature</code> attribute for it.</li>
+        <li><strong>Strong encapsulation is on by default since JDK 17.</strong> A library that worked on 11 by opening <code>java.base</code> fails on 21 with <code>InaccessibleObjectException</code>. <code>--add-opens</code> is a stop-gap; the right fix is a library version that does not need it.</li>
+        <li><strong>Reflection defeats the tools that make Java safe.</strong> Renaming a field breaks a string-based lookup silently; dead-code analysis cannot see reflective uses; ahead-of-time compilation (GraalVM native image) needs an explicit list of everything reflected on. Keep reflection at the edges — serializers, DI, tests — never in domain code.</li>
+        <li><strong>A <code>Proxy</code> cannot wrap a class</strong>, only interfaces, and <code>final</code> classes cannot be subclassed by bytecode libraries either. Records are final: a framework that proxies entities cannot proxy a record.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-reflection-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>You declare <code>@interface Timed { }</code> with no meta-annotations, put it on a method, and at runtime <code>method.isAnnotationPresent(Timed.class)</code> returns <code>false</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-reflection-1"><span>Annotations need a <code>@Target(ElementType.METHOD)</code> to be attached to methods <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-reflection-1"><span>An annotation with no members is optimised away by javac <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-reflection-1"><span>The default retention is <code>CLASS</code>: the annotation is in the class file but is not loaded into the runtime <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-reflection-1"><span><code>isAnnotationPresent</code> only finds annotations inherited from a superclass <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Without <code>@Retention(RetentionPolicy.RUNTIME)</code> an annotation defaults to <code>CLASS</code> retention — recorded in the <code>.class</code> file for tools, invisible to reflection. It is the single most common annotation mistake.</p>
+        <p class="mb-0"><strong>A</strong> is backwards: no <code>@Target</code> means it is allowed anywhere. <strong>B</strong> is invented — marker annotations are common and fully supported. <strong>D</strong> describes <code>@Inherited</code>, which widens what is found; it never narrows it.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-reflection-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A serialization library worked on JDK 11 and on JDK 21 fails with <code>InaccessibleObjectException: Unable to make field private final byte[] java.lang.String.value accessible</code>. What changed, and what is the correct long-term response?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-reflection-2"><span><code>String</code> no longer has a <code>value</code> field; the library must be rewritten to use <code>toCharArray()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-reflection-2"><span>JDK 17 made strong encapsulation the default, so <code>java.base</code> internals are no longer opened; upgrade the library, and use <code>--add-opens</code> only as a temporary bridge <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-reflection-2"><span>Reflection was removed from <code>java.base</code>; the library must switch to method handles, which are exempt <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-reflection-2"><span>The application must be converted to a named module before any reflection is allowed <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> JEP 403 (JDK 17) stopped the JDK from opening its packages to the class path by default. The library was relying on a hole that has now closed. The honest fix is a version of the library that uses supported APIs; <code>--add-opens java.base/java.lang=ALL-UNNAMED</code> keeps you running meanwhile.</p>
+        <p class="mb-0"><strong>A</strong> is wrong on the facts — the field exists, which is exactly why the message names it. <strong>C</strong> is wrong twice: reflection was not removed, and method handles go through the <em>same</em> access checks. <strong>D</strong> is backwards — code on the class path (the unnamed module) can reflect on itself freely; modules make encapsulation <em>stronger</em>, not weaker.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-reflection-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>A hot loop calls a method selected from configuration at start-up. Profiling shows <code>Method.invoke</code> at the top. Which changes actually help? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Look the method up once and keep the <code>Method</code> in a field instead of calling <code>getMethod</code> every iteration <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Wrap the call in a <code>Proxy</code> so the JIT sees an interface call <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Replace the <code>Method</code> with a <code>MethodHandle</code> in a <code>static final</code> field and call <code>invokeExact</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Add <code>@Retention(RUNTIME)</code> to the method so the JIT can inline it <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Lookup per call is the first thing to remove — it copies the method table every time. Then a constant <code>MethodHandle</code> with <code>invokeExact</code> removes boxing and lets the JIT inline through the call, which a <code>Method.invoke</code> never allows.</p>
+        <p class="mb-0"><strong>B</strong> adds a layer: the proxy's handler still has to call <code>Method.invoke</code> underneath, so it is strictly slower. <strong>D</strong> confuses two unrelated things — retention is about annotations on the method, and nothing about annotations affects inlining.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="reflection"> Mark this section complete
+  </label>
+</section>

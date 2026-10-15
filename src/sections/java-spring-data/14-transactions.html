@@ -1,0 +1,498 @@
+<section class="lm-section" id="transactions" data-title="@Transactional: boundaries, propagation and the proxy" data-num="5">
+  <p class="lm-eyebrow">Section 5</p>
+  <h2 class="mb-4">@Transactional: boundaries, propagation and the proxy</h2>
+
+  <p>In the JPA module you opened and committed transactions by hand. In a Spring application you almost never do: you put <code>@Transactional</code> on a service method and the transaction begins before the method runs and commits (or rolls back) after it returns. That convenience is implemented by a <strong>proxy</strong> — an object Spring puts in front of your bean that intercepts each call, consults the annotation, talks to the <code>PlatformTransactionManager</code>, and only then calls your code. Every surprising behaviour of <code>@Transactional</code> follows from that one fact: the annotation does nothing unless the call goes <em>through</em> the proxy.</p>
+
+  <p>The boundary matters because the persistence context lives exactly as long as the transaction (JPA §3). Inside it, entities are managed, lazy associations load, and dirty checking writes your changes at commit. Outside it, entities are detached. Where you draw the boundary decides what is consistent, what is atomic, and how long a database connection is held.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Ten experiments in one application. <code>show_sql</code> is off here — the evidence is the transaction state itself, read through <code>TransactionSynchronizationManager</code> (the thread-bound registry Spring uses to track the current transaction), Hibernate's transaction counter, and which rows survive.</p>
+
+  <pre data-code data-lang="java" data-file="Transactions.java" data-verify="Transactions" data-package="lm.tx" data-hi="79,80,95,101">
+package lm.tx;
+
+import jakarta.persistence.*;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.transaction.autoconfigure.TransactionManagerCustomizer;
+import org.springframework.orm.jpa.JpaTransactionManager;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.NestedTransactionNotSupportedException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.Map;
+import java.util.Optional;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class Transactions {
+
+    @Entity(name = "StockLevel")
+    @Table(name = "stock_level")
+    public static class StockLevel {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int onHand;
+        protected StockLevel() {}
+        StockLevel(String sku, int onHand) { this.sku = sku; this.onHand = onHand; }
+    }
+
+    public interface StockRepository extends JpaRepository<StockLevel, Long> {
+        Optional<StockLevel> findBySku(String sku);
+    }
+
+    static String txName() {
+        return TransactionSynchronizationManager.isActualTransactionActive()
+            ? TransactionSynchronizationManager.getCurrentTransactionName() : "(no transaction)";
+    }
+
+    /* A second bean: calling it goes through a proxy, so REQUIRES_NEW takes effect. */
+    @Service
+    public static class Auditor {
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public String inner() { return txName(); }
+
+        @Transactional(propagation = Propagation.NESTED)
+        public void stockAndFail(StockRepository repo, String sku) {
+            repo.saveAndFlush(new StockLevel(sku, 1));     // flushed so the savepoint rollback has a row to undo
+            throw new IllegalStateException("boom inside NESTED");
+        }
+    }
+
+    @Service
+    public static class InventoryService {
+        private final StockRepository repo;
+        private final Auditor auditor;
+        InventoryService(StockRepository repo, Auditor auditor) { this.repo = repo; this.auditor = auditor; }
+
+        @Transactional
+        public void twoCallsOneTransaction() {
+            repo.save(new StockLevel("BOLT-7", 100));
+            repo.save(new StockLevel("NUT-3", 40));
+        }
+
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        public String inner() { return txName(); }
+
+        @Transactional
+        public void selfInvocation() {
+            System.out.println("outer runs in     = " + txName());
+            System.out.println("this.inner() in   = " + inner());              // the trap: no proxy, no new transaction
+            System.out.println("auditor.inner() in= " + auditor.inner());      // another bean: proxied, REQUIRES_NEW honoured
+        }
+
+        @Transactional
+        public void addThenFail(String sku) {
+            repo.save(new StockLevel(sku, 5));
+            throw new IllegalStateException("runtime failure after save");
+        }
+
+        @Transactional
+        public void addThenFailChecked(String sku) throws Exception {
+            repo.save(new StockLevel(sku, 5));
+            throw new Exception("checked failure after save");
+        }
+
+        @Transactional(rollbackFor = Exception.class)
+        public void addThenFailCheckedRollback(String sku) throws Exception {
+            repo.save(new StockLevel(sku, 5));
+            throw new Exception("checked failure, rollbackFor set");
+        }
+
+        @Transactional(readOnly = true)
+        public void tryToModify(String sku) {
+            StockLevel s = repo.findBySku(sku).orElseThrow();
+            s.onHand = 999;                                   // dirty, but a read-only transaction never flushes
+            System.out.println("read-only tx      = " + TransactionSynchronizationManager.isCurrentTransactionReadOnly());
+        }
+
+        @Transactional(propagation = Propagation.MANDATORY)
+        public void requiresCaller() { }
+
+        @Transactional
+        public void nestedSavepoint() {
+            repo.save(new StockLevel("CAM-9", 7));
+            try { auditor.stockAndFail(repo, "GIRD-1"); }
+            catch (NestedTransactionNotSupportedException e) {
+                System.out.println("NESTED refused    = " + e.getClass().getSimpleName());   // JPA has no savepoints
+            }
+            repo.save(new StockLevel("ROD-4", 3));            // the outer transaction carries on and commits
+        }
+    }
+
+    @Bean TransactionTemplate tx(PlatformTransactionManager manager) {
+        TransactionTemplate t = new TransactionTemplate(manager);
+        t.setName("lm.tx.Transactions.template");            // a template has no method to be named after
+        return t;
+    }
+
+    /* Boot's JpaTransactionManager refuses NESTED unless told otherwise. */
+    @Bean TransactionManagerCustomizer<JpaTransactionManager> allowNested() {
+        return manager -> manager.setNestedTransactionAllowed(true);
+    }
+
+    @Bean CommandLineRunner demo(StockRepository repo, InventoryService service, TransactionTemplate tx, EntityManagerFactory emf) {
+        Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+        return args -> {
+            System.out.println("-- 1. every repository call outside a service transaction is its own transaction --");
+            long before = stats.getTransactionCount();
+            repo.count(); repo.count();
+            System.out.println("runner runs in    = " + txName());
+            System.out.println("transactions used = " + (stats.getTransactionCount() - before));
+
+            System.out.println("-- 2. a @Transactional service method: two calls, one transaction --");
+            before = stats.getTransactionCount();
+            service.twoCallsOneTransaction();
+            System.out.println("transactions used = " + (stats.getTransactionCount() - before));
+
+            System.out.println("-- 3. self-invocation bypasses the proxy --");
+            service.selfInvocation();
+
+            System.out.println("-- 4/5/6. what rolls back --");
+            try { service.addThenFail("PIN-2"); } catch (IllegalStateException e) { }
+            System.out.println("after runtime ex  = " + repo.findBySku("PIN-2").isPresent());
+            try { service.addThenFailChecked("HUB-8"); } catch (Exception e) { }
+            System.out.println("after checked ex  = " + repo.findBySku("HUB-8").isPresent());
+            try { service.addThenFailCheckedRollback("WIDGET-1"); } catch (Exception e) { }
+            System.out.println("with rollbackFor  = " + repo.findBySku("WIDGET-1").isPresent());
+
+            System.out.println("-- 7. readOnly = true: dirty entities are never flushed --");
+            service.tryToModify("BOLT-7");
+            System.out.println("BOLT-7 on hand    = " + repo.findBySku("BOLT-7").orElseThrow().onHand);
+
+            System.out.println("-- 8. programmatic: TransactionTemplate --");
+            String name = tx.execute(status -> { repo.save(new StockLevel("TMPL-1", 1)); return txName(); });
+            System.out.println("template tx name  = " + name);
+
+            System.out.println("-- 9. MANDATORY outside any transaction --");
+            try { service.requiresCaller(); }
+            catch (IllegalTransactionStateException e) { System.out.println("threw             = " + e.getClass().getSimpleName()); }
+
+            System.out.println("-- 10. NESTED: a savepoint inside the outer transaction --");
+            service.nestedSavepoint();
+            System.out.println("CAM-9 present     = " + repo.findBySku("CAM-9").isPresent());
+            System.out.println("GIRD-1 present    = " + repo.findBySku("GIRD-1").isPresent());
+            System.out.println("ROD-4 present     = " + repo.findBySku("ROD-4").isPresent());
+            System.out.println("rows              = " + repo.count());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Transactions.class);
+        app.setDefaultProperties(Map.ofEntries(                     // Map.of stops at ten pairs
+            Map.entry("spring.main.web-application-type", "none"),
+            Map.entry("spring.main.banner-mode", "off"),
+            Map.entry("spring.main.log-startup-info", "false"),
+            Map.entry("logging.level.root", "WARN"),
+            Map.entry("logging.pattern.console", "%level %logger{0}: %msg%n"),
+            Map.entry("spring.datasource.url", "jdbc:h2:mem:tx;DB_CLOSE_DELAY=-1"),
+            Map.entry("spring.jpa.hibernate.ddl-auto", "create-drop"),
+            Map.entry("spring.jpa.show-sql", "false"),
+            Map.entry("spring.jpa.properties.hibernate.generate_statistics", "true"),
+            Map.entry("spring.jpa.open-in-view", "false")));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Transactions">
+-- 1. every repository call outside a service transaction is its own transaction --
+runner runs in    = (no transaction)
+transactions used = 2
+-- 2. a @Transactional service method: two calls, one transaction --
+transactions used = 1
+-- 3. self-invocation bypasses the proxy --
+outer runs in     = lm.tx.Transactions$InventoryService.selfInvocation
+this.inner() in   = lm.tx.Transactions$InventoryService.selfInvocation
+auditor.inner() in= lm.tx.Transactions$Auditor.inner
+-- 4/5/6. what rolls back --
+after runtime ex  = false
+after checked ex  = true
+with rollbackFor  = false
+-- 7. readOnly = true: dirty entities are never flushed --
+read-only tx      = true
+BOLT-7 on hand    = 100
+-- 8. programmatic: TransactionTemplate --
+template tx name  = lm.tx.Transactions.template
+-- 9. MANDATORY outside any transaction --
+threw             = IllegalTransactionStateException
+-- 10. NESTED: a savepoint inside the outer transaction --
+NESTED refused    = NestedTransactionNotSupportedException
+CAM-9 present     = true
+GIRD-1 present    = false
+ROD-4 present     = true
+rows              = 6
+  </pre>
+
+  <h3 class="mt-8 mb-3">Reading the output, experiment by experiment</h3>
+
+  <ol class="max-w-prose">
+    <li><strong>No service, no shared transaction.</strong> The runner itself is in <code>(no transaction)</code>, and two <code>repo.count()</code> calls used <strong>two</strong> transactions. Every <code>SimpleJpaRepository</code> method carries its own <code>@Transactional</code> (read-only for reads), so a repository called directly from outside a transaction opens and commits one per call. Two calls are not atomic together, and entities returned by the first are detached before the second runs.</li>
+    <li><strong>A service method draws the boundary.</strong> <code>twoCallsOneTransaction</code> made two <code>save</code> calls and Hibernate counted <strong>one</strong> transaction: the repository's own <code>@Transactional</code> uses the default propagation <code>REQUIRED</code>, which <em>joins</em> the transaction the service already opened.</li>
+    <li><strong>Self-invocation.</strong> <code>this.inner()</code> is annotated <code>REQUIRES_NEW</code> and still ran in <code>…InventoryService.selfInvocation</code> — the outer transaction. <code>this</code> is the target object, not the proxy, so nothing intercepted the call and the annotation was never read. The same method on <em>another</em> bean, <code>auditor.inner()</code>, went through that bean's proxy and got its own transaction, named after itself.</li>
+    <li><strong>An unchecked exception rolls back.</strong> <code>PIN-2</code> was saved, then an <code>IllegalStateException</code> left the method: the proxy rolled back and the row is absent.</li>
+    <li><strong>A checked exception commits.</strong> <code>HUB-8</code> survived a thrown <code>Exception</code>. Spring's default rollback rule — inherited from EJB — is "roll back on <code>RuntimeException</code> and <code>Error</code>, commit on checked exceptions", on the theory that a checked exception is an expected business outcome. Very few teams want that; most set a rule.</li>
+    <li><strong><code>rollbackFor = Exception.class</code></strong> changes the rule for that method: <code>WIDGET-1</code> was rolled back.</li>
+    <li><strong><code>readOnly = true</code> suppresses the flush.</strong> The method changed a managed entity's <code>onHand</code> to 999, and the database still says 100. Spring tells Hibernate the session is read-only, which sets the flush mode to manual and skips dirty-check snapshots; the change is simply never written. It also passes the read-only flag to the JDBC driver, which some databases and routing data sources use to send the work to a replica.</li>
+    <li><strong><code>TransactionTemplate</code></strong> is the programmatic form: the same begin/commit/rollback logic around a lambda, with no proxy involved. Use it where an annotation cannot reach — a runner, a loop that wants one transaction per item, or code that must not be a separate bean.</li>
+    <li><strong><code>MANDATORY</code></strong> refuses to run without a caller's transaction: <code>IllegalTransactionStateException</code>. It documents and enforces "this method is only ever a step inside something bigger".</li>
+    <li><strong><code>NESTED</code> is not available here.</strong> <code>NESTED</code> means "a savepoint inside the current transaction": roll back to it on failure, keep the outer work. Even with <code>nestedTransactionAllowed</code> switched on, Spring's <code>JpaTransactionManager</code> refused it in this stack with <code>NestedTransactionNotSupportedException</code>, so <code>GIRD-1</code> was never written; the outer transaction carried on and committed <code>CAM-9</code> and <code>ROD-4</code>. Savepoints are a JDBC feature (<code>DataSourceTransactionManager</code> supports them for plain JDBC work). With JPA, model "try this step, keep the rest" as a <code>REQUIRES_NEW</code> call on another bean, accepting that it commits independently.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Watch the proxy decide</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a call through the transactional proxy">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Through the proxy, and around it</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="tx-proxy"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Transaction state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Effect</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="tx-proxy">
+    {
+      "lang": "java",
+      "code": "@Service\nclass InventoryService {\n    @Transactional\n    public void reserve(String sku) {\n        repo.save(new StockLevel(sku, 5));\n        audit();                        // this.audit()\n    }\n    @Transactional(propagation = REQUIRES_NEW)\n    public void audit() { /* ... */ }\n}\n\nservice.reserve(\"PIN-2\");            // service is the PROXY",
+      "steps": [
+        { "line": 12, "vars": { "caller holds": "the proxy (a CGLIB subclass)", "transaction": "none" }, "out": "",
+          "note": "The injected 'service' is not your InventoryService: it is a generated subclass that wraps it. The call lands in the proxy first." },
+        { "line": 3, "vars": { "attribute": "REQUIRED, rollback on RuntimeException", "transaction": "none" }, "out": "",
+          "note": "The proxy looks up the @Transactional attributes for reserve(): default propagation REQUIRED, default rollback rule." },
+        { "line": 3, "vars": { "attribute": "REQUIRED", "transaction": "T1 (new)", "persistence context": "opened, bound to the thread" }, "out": "begin T1",
+          "note": "REQUIRED with no current transaction: the transaction manager begins T1, opens an EntityManager and binds both to the current thread." },
+        { "line": 5, "vars": { "transaction": "T1", "repo.save": "joins T1 (REQUIRED)", "persistence context": "StockLevel PIN-2 managed" }, "out": "begin T1",
+          "note": "The repository's own @Transactional also says REQUIRED, so it joins T1 instead of starting another. The insert is queued, not yet executed." },
+        { "line": 6, "vars": { "transaction": "T1", "call target": "this — the real object, not the proxy" }, "out": "begin T1",
+          "note": "audit() is called on 'this'. 'this' is the target inside the proxy, so no interceptor runs and REQUIRES_NEW is never read." },
+        { "line": 9, "vars": { "transaction": "T1 (still)", "REQUIRES_NEW": "ignored" }, "out": "begin T1",
+          "note": "audit() runs inside T1. Had it been called on another bean, its proxy would have suspended T1 and begun T2. This is the self-invocation trap from experiment 3." },
+        { "line": 7, "vars": { "transaction": "T1", "outcome": "returned normally" }, "out": "begin T1",
+          "note": "reserve() returns. Control goes back to the proxy, which decides what to do with T1." },
+        { "line": 12, "vars": { "transaction": "T1 → committed", "flush": "insert into stock_level …", "persistence context": "closed; PIN-2 now detached" }, "out": "begin T1\nflush + commit T1",
+          "note": "No exception: the proxy flushes the persistence context (the insert runs now) and commits. Then it unbinds and closes the EntityManager." },
+        { "line": 5, "vars": { "rerun": "reserve() throws IllegalStateException after save", "transaction": "T1" }, "out": "begin T1",
+          "note": "Second run: same path, but reserve() throws an unchecked exception after the save." },
+        { "line": 12, "vars": { "transaction": "T1 → rolled back", "flush": "never happened", "exception": "rethrown to the caller" }, "out": "begin T1\nrollback T1",
+          "note": "RuntimeException matches the default rollback rule, so the proxy rolls back. The queued insert is discarded. A checked exception would have been committed instead, unless rollbackFor says otherwise." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Propagation, interactively</h3>
+
+  <p>Propagation answers one question: when a transactional method is called and a transaction may already exist, what happens? Pick an outer context, an inner propagation and what the inner method does. The case to try first is <em>outer REQUIRED, inner REQUIRED, inner throws a <code>RuntimeException</code>, and the outer catches it</em>.</p>
+
+  <div class="lm-card" data-sandbox="propagation">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M8 12h12M12 18h8"/></svg>
+      outer() calls other.inner() through its proxy
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Outer transaction</span>
+        <select data-sb-outer>
+          <option value="REQUIRED" selected>outer() is @Transactional (REQUIRED)</option>
+          <option value="none">outer() has no transaction</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>inner() propagation</span>
+        <select data-sb-prop>
+          <option value="REQUIRED" selected>REQUIRED (default)</option>
+          <option value="REQUIRES_NEW">REQUIRES_NEW</option>
+          <option value="SUPPORTS">SUPPORTS</option>
+          <option value="MANDATORY">MANDATORY</option>
+          <option value="NOT_SUPPORTED">NOT_SUPPORTED</option>
+          <option value="NEVER">NEVER</option>
+          <option value="NESTED">NESTED</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>inner() then</span>
+        <select data-sb-throws>
+          <option value="none" selected>returns normally</option>
+          <option value="runtime">throws RuntimeException</option>
+          <option value="checked">throws a checked Exception</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>outer() catches it?</span>
+        <select data-sb-catch>
+          <option value="yes" selected>yes, catches and carries on</option>
+          <option value="no">no, lets it propagate</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <div class="lm-table-wrap mt-6">
+    <table>
+      <caption class="lm-visually-hidden">Propagation levels</caption>
+      <thead><tr><th scope="col">Propagation</th><th scope="col">Transaction exists</th><th scope="col">No transaction</th></tr></thead>
+      <tbody>
+        <tr><td><code>REQUIRED</code> (default)</td><td>join it</td><td>begin a new one</td></tr>
+        <tr><td><code>REQUIRES_NEW</code></td><td>suspend it, begin a new one, resume after</td><td>begin a new one</td></tr>
+        <tr><td><code>SUPPORTS</code></td><td>join it</td><td>run without one</td></tr>
+        <tr><td><code>MANDATORY</code></td><td>join it</td><td><code>IllegalTransactionStateException</code></td></tr>
+        <tr><td><code>NOT_SUPPORTED</code></td><td>suspend it, run without one</td><td>run without one</td></tr>
+        <tr><td><code>NEVER</code></td><td><code>IllegalTransactionStateException</code></td><td>run without one</td></tr>
+        <tr><td><code>NESTED</code></td><td>savepoint inside it — where the transaction manager supports savepoints (JDBC, not JPA here)</td><td>begin a new one</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Where the annotation goes, and what it cannot do</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Transactional placement and limits">
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-proxy" aria-controls="panel-transactions-proxy" aria-selected="true" tabindex="0">Proxy rules</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-place" aria-controls="panel-transactions-place" aria-selected="false" tabindex="-1">Placement</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-unexpected" aria-controls="panel-transactions-unexpected" aria-selected="false" tabindex="-1">UnexpectedRollbackException</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-attrs" aria-controls="panel-transactions-attrs" aria-selected="false" tabindex="-1">Other attributes</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-proxy" aria-labelledby="tab-transactions-proxy" tabindex="0">
+      <p>Spring Boot proxies classes with CGLIB by default: it generates a subclass that overrides each public method to add the transaction logic, then delegates to your instance. That design has hard limits:</p>
+      <ul class="mb-0">
+        <li><strong>Self-invocation is invisible</strong> — experiment 3. Move the method to another bean, inject the bean into itself lazily, or use a <code>TransactionTemplate</code>.</li>
+        <li><strong><code>private</code> methods cannot be intercepted</strong>; a subclass cannot override them. The annotation is silently ignored.</li>
+        <li><strong><code>final</code> methods and <code>final</code> classes</strong> cannot be overridden either. Kotlin classes are final by default, which is why Spring's Kotlin plugin opens them.</li>
+        <li><strong>Calls made before the proxy exists</strong> — from a constructor or <code>@PostConstruct</code> on the same bean — run without a transaction.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-place" aria-labelledby="tab-transactions-place" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong>On the service layer</strong>, around one use case: "reserve stock and record the reservation" is one transaction. Repositories already have their own; controllers should not hold one.</li>
+        <li><strong>On the class</strong> for a default, overridden <strong>on methods</strong>: a common shape is <code>@Transactional(readOnly = true)</code> on the class and plain <code>@Transactional</code> on the few writing methods.</li>
+        <li><strong>On concrete classes, not interfaces.</strong> Interface annotations work for interface-based proxies but are easy to lose with class-based ones.</li>
+        <li><strong>Keep it short.</strong> A transaction holds a connection and, for writes, row locks. No remote calls, file uploads or user think-time inside one.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-unexpected" aria-labelledby="tab-transactions-unexpected" tabindex="0" hidden>
+      <p>The most confusing exception in Spring transactions comes from catching an inner failure:</p>
+      <pre data-code data-lang="java" data-nobar>
+@Transactional
+public void placeOrder(Order o) {
+    orders.save(o);
+    try {
+        loyalty.addPoints(o.customer(), 10);   // @Transactional (REQUIRED) on another bean; throws
+    } catch (RuntimeException e) {
+        log.warn("points failed, carrying on");  // looks handled …
+    }
+}                                              // … UnexpectedRollbackException here
+      </pre>
+      <p class="mb-0"><code>addPoints</code> joined the outer transaction. When it threw, <em>its</em> proxy could not roll back a transaction it does not own, so it marked the shared transaction <strong>rollback-only</strong>. The catch hid the exception, <code>placeOrder</code> returned normally, its proxy tried to commit, found the mark, rolled back, and threw <code>UnexpectedRollbackException</code> to tell you the order you thought was saved was not. Fixes: let it propagate, make <code>addPoints</code> <code>REQUIRES_NEW</code> so its failure is its own, or decide the call is optional and set <code>noRollbackFor</code> on it.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-attrs" aria-labelledby="tab-transactions-attrs" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong><code>isolation</code></strong> — <code>READ_COMMITTED</code>, <code>REPEATABLE_READ</code>… (JPA §7's table). Only applies when the method <em>begins</em> the transaction; a joining method cannot change it.</li>
+        <li><strong><code>timeout</code></strong> — seconds; passed to JPA as a query timeout for statements in the transaction.</li>
+        <li><strong><code>rollbackFor</code> / <code>noRollbackFor</code></strong> — adjust the rule from experiments 4–6.</li>
+        <li><strong><code>transactionManager</code></strong> — pick one by bean name when the application has several data sources.</li>
+        <li><strong>JTA</strong> — for transactions spanning several resources (two databases, a database and a message broker) Spring delegates to a JTA transaction manager instead of <code>JpaTransactionManager</code>. Most applications avoid distributed transactions and use the outbox pattern (§8) instead.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Transaction gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Checked exceptions commit by default.</strong> Experiment 5. Set <code>rollbackFor = Exception.class</code>, or throw unchecked domain exceptions.</li>
+        <li><strong>Self-invoked and <code>private</code> transactional methods do nothing.</strong> No warning, no error; the method just runs in whatever transaction (or none) the caller had.</li>
+        <li><strong>Catching an exception from a joined transaction</strong> leaves it rollback-only and ends in <code>UnexpectedRollbackException</code> at commit.</li>
+        <li><strong>Repository calls from a controller or runner are separate transactions.</strong> Experiment 1. Two saves there are not atomic, and lazy loads between them fail.</li>
+        <li><strong><code>readOnly = true</code> silently discards changes</strong> to managed entities. That is the feature; it is also a bug if a "read" method is later taught to write.</li>
+        <li><strong>Long transactions are the real performance problem</strong>, not their number: a transaction held across a slow HTTP call holds a pooled connection the whole time.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-transactions-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In <code>InventoryService</code>, a <code>@Transactional</code> method <code>reserveAll()</code> calls <code>this.reserveOne(sku)</code> in a loop, where <code>reserveOne</code> is annotated <code>@Transactional(propagation = REQUIRES_NEW)</code> so each item commits on its own. One item fails with a <code>RuntimeException</code> that <code>reserveAll</code> lets propagate. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-transactions-1"><span>The items before the failure stay committed; only the failing item rolls back <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-transactions-1"><span>Spring fails at startup because <code>REQUIRES_NEW</code> is used inside a <code>REQUIRED</code> method <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-transactions-1"><span>Every item rolls back: <code>this.reserveOne</code> bypassed the proxy, so everything ran in <code>reserveAll</code>'s single transaction <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-transactions-1"><span>Nothing rolls back, because <code>REQUIRES_NEW</code> suspended the outer transaction <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Experiment 3 shows <code>this.inner()</code> running in the outer method's transaction despite <code>REQUIRES_NEW</code>. The per-item transactions never existed, so the exception rolls back the whole loop.</p>
+        <p class="mb-0"><strong>A</strong> is what the author intended, and what happens if <code>reserveOne</code> moves to another bean. <strong>B</strong>: mixing propagations is normal and nothing is checked at startup. <strong>D</strong> assumes the annotation took effect, which is precisely what self-invocation prevents.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-transactions-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A <code>@Transactional</code> method saves an order and then throws <code>OutOfStockException extends Exception</code>. No <code>rollbackFor</code> is set. Is the order in the database afterwards?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-transactions-2"><span>No — any exception leaving the method rolls back <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-transactions-2"><span>Yes — checked exceptions commit under Spring's default rule <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-transactions-2"><span>No — but only because <code>save</code> had not flushed yet <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-transactions-2"><span>It depends on whether the caller catches the exception <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Experiment 5: <code>after checked ex = true</code>. The default rule rolls back only on <code>RuntimeException</code> and <code>Error</code>.</p>
+        <p class="mb-0"><strong>A</strong> is the rule most people assume and the reason for <code>rollbackFor</code>. <strong>C</strong>: whether the insert was flushed is irrelevant — the proxy commits, which flushes. <strong>D</strong>: the decision is made by the proxy when the exception passes through it, before the caller sees it.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-transactions-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these run <em>without</em> the transaction behaviour their annotation asks for? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A <code>@Transactional private void recalc()</code> called from a public method of the same bean <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A <code>@Transactional(readOnly = true)</code> public method called from a controller <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A <code>@Transactional</code> method called from the same bean's <code>@PostConstruct</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A <code>@Transactional(propagation = MANDATORY)</code> method called from a runner with no transaction <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Both are calls that never pass through the proxy: a <code>private</code> method cannot be overridden by the CGLIB subclass and is called on <code>this</code>; <code>@PostConstruct</code> runs on the target during initialisation, also via <code>this</code>.</p>
+        <p class="mb-0"><strong>B</strong> works as asked: an external call through the proxy, read-only transaction begun. <strong>D</strong> also behaves exactly as its annotation says — experiment 9 shows <code>MANDATORY</code> throwing <code>IllegalTransactionStateException</code>, which is the requested behaviour, not a bypass.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="transactions"> Mark this section complete
+  </label>
+</section>

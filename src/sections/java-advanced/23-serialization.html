@@ -1,0 +1,360 @@
+<section class="lm-section" id="serialization" data-title="Serialization, records and the HTTP client" data-num="14">
+  <p class="lm-eyebrow">Section 14</p>
+  <h2 class="mb-4">Serialization, records and the HTTP client</h2>
+
+  <p>Objects leave the JVM two ways: as bytes handed to something you control (a file, a cache, another JVM) or as a request to a service. Java has a built-in answer for the first, <strong>Java serialization</strong>, which is thirty years old, still everywhere (RMI, HTTP sessions, caches, message queues), and the source of more critical security advisories than any other feature of the platform. You need to know how it works in order to know why you should rarely use it and how to make it safe where you must. For the second, the JDK's <code>java.net.http.HttpClient</code> replaced the 1997-era <code>HttpURLConnection</code>, and you should know its shape well enough to never reach for the old one.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: what a round trip does and does not preserve</h3>
+
+  <pre data-code data-lang="java" data-file="SerializeRecord.java" data-verify="SerializeRecord" data-hi="6,7,8,9,17,29,61,62">
+import java.io.*;
+
+public class SerializeRecord {
+
+    record Product(String sku, long priceInCents) implements Serializable {
+        Product {
+            if (sku == null || sku.isBlank()) throw new IllegalArgumentException("sku required");
+            if (priceInCents < 0) throw new IllegalArgumentException("negative price");
+            VALIDATIONS++;
+        }
+        static int VALIDATIONS = 0;
+    }
+
+    static final class Session implements Serializable {
+        private static final long serialVersionUID = 1L;
+        private final String user;
+        private transient String cachedToken;          // never written to the stream
+
+        Session(String user, String token) { this.user = user; this.cachedToken = token; }
+        String user() { return user; }
+        String cachedToken() { return cachedToken; }
+    }
+
+    static final class Registry implements Serializable {
+        private static final long serialVersionUID = 1L;
+        static final Registry INSTANCE = new Registry();
+        private Registry() {}
+        // the stream carries a copy; readResolve swaps it for the real singleton
+        private Object readResolve() throws ObjectStreamException { return INSTANCE; }
+    }
+
+    static byte[] write(Object o) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ObjectOutputStream out = new ObjectOutputStream(bytes)) { out.writeObject(o); }
+        return bytes.toByteArray();
+    }
+
+    static Object read(byte[] data, ObjectInputFilter filter) throws IOException, ClassNotFoundException {
+        try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(data))) {
+            if (filter != null) in.setObjectInputFilter(filter);
+            return in.readObject();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Product bolt = new Product("BOLT-7", 80);
+        int before = Product.VALIDATIONS;
+        Product copy = (Product) read(write(bolt), null);
+        System.out.println("record equal after round trip   = " + bolt.equals(copy));
+        System.out.println("record is a different instance  = " + (bolt != copy));
+        System.out.println("canonical constructor ran again = " + (Product.VALIDATIONS == before + 1));
+
+        Session s = (Session) read(write(new Session("vasim", "tok-123")), null);
+        System.out.println("session user survived           = " + s.user());
+        System.out.println("transient token after read      = " + s.cachedToken());
+
+        Registry r = (Registry) read(write(Registry.INSTANCE), null);
+        System.out.println("readResolve kept the singleton  = " + (r == Registry.INSTANCE));
+
+        // an allow-list filter: only our own classes and the JDK types they need
+        ObjectInputFilter allow = ObjectInputFilter.Config.createFilter(
+                "SerializeRecord$Product;java.lang.*;java.util.*;!*");
+        System.out.println("filtered read of Product        = " + ((Product) read(write(bolt), allow)).sku());
+        try {
+            read(write(new Session("x", "y")), allow);
+            System.out.println("filtered read of Session        = allowed");
+        } catch (InvalidClassException e) {
+            System.out.println("filtered read of Session        = rejected (" + e.getMessage().replaceAll("\\s+", " ").trim() + ")");
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="SerializeRecord">
+record equal after round trip   = true
+record is a different instance  = true
+canonical constructor ran again = true
+session user survived           = vasim
+transient token after read      = null
+readResolve kept the singleton  = true
+filtered read of Product        = BOLT-7
+filtered read of Session        = rejected (filter status: REJECTED)
+  </pre>
+
+  <ul class="max-w-prose">
+    <li><strong>Ordinary classes are deserialized without running any constructor.</strong> <code>Session</code>'s fields are set directly from the stream by the JVM; the <code>final</code> keyword and every invariant you check in the constructor are bypassed. <code>transient</code> fields are simply left at their default, which is why the token comes back <code>null</code>.</li>
+    <li><strong>Records are different, and better.</strong> A record is deserialized by calling its <em>canonical constructor</em> with the stream's component values, so the compact constructor's validation runs again. A stream with a negative price throws <code>IllegalArgumentException</code> at read time instead of producing an impossible object. This is the single strongest reason to make serializable value types records.</li>
+    <li><strong><code>readResolve</code> lets you substitute the object that comes out</strong> — here, to preserve a singleton — and <code>writeReplace</code> does the same on the way in. Together they are how you serialize an object as something simpler (an enum, an id) and rebuild it on read.</li>
+    <li><strong>The filter is the security control.</strong> Without one, <code>readObject</code> will instantiate <em>any</em> class on the class path that the bytes name. The allow-list refuses <code>Session</code> before a single byte of it is used.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Why "deserialization of untrusted data" has its own CVE category</h3>
+
+  <p>The bytes of a serialized stream are not data; they are <em>instructions</em> to the JVM: "create an instance of this class, set these fields, then call its <code>readObject</code>." Thousands of classes on a typical class path have <code>readObject</code> methods or <code>readResolve</code> hooks that do something — call a method on a field, look up a JNDI name, invoke a <code>Comparator</code> — and an attacker who controls the bytes chooses which classes, with which field values. Chaining a handful of such classes from common libraries into a sequence that ends in <code>Runtime.exec</code> is called a <strong>gadget chain</strong>, and public tools generate them. The 2015 Apache Commons Collections chain compromised application servers worldwide; the 2021 Log4Shell exploit used JNDI deserialization as its payload stage. None of that requires a bug in <em>your</em> code, only that you call <code>readObject</code> on bytes someone else produced.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Controls on Java serialization</caption>
+      <thead><tr><th scope="col">Control</th><th scope="col">What it does</th><th scope="col">Use it</th></tr></thead>
+      <tbody>
+        <tr><td><code>ObjectInputFilter</code> (JEP 290, Java 9)</td><td>A predicate run on every class, array length, depth and reference count before it is instantiated. Pattern syntax: <code>com.acme.**;java.base/*;!*</code>; <code>!</code> rejects, last match wins, the trailing <code>!*</code> makes it an allow-list.</td><td>Always, on every <code>ObjectInputStream</code> that reads anything you did not just write yourself in the same process.</td></tr>
+        <tr><td><code>-Djdk.serialFilter=…</code> / <code>ObjectInputFilter.Config.setSerialFilter</code></td><td>A process-wide filter applied to every stream that does not set its own.</td><td>Defence in depth; set it in production to an allow-list even if every stream also sets one.</td></tr>
+        <tr><td>Filter factory (JEP 415, Java 17)</td><td><code>Config.setSerialFilterFactory</code> composes a per-stream filter with the global one, so library code cannot <em>weaken</em> the global policy.</td><td>When third-party code creates streams you cannot touch.</td></tr>
+        <tr><td><code>serialVersionUID</code></td><td>A declared version stamp. If the stream's value differs from the class's, <code>readObject</code> throws <code>InvalidClassException</code>. Left undeclared, it is computed from the class shape and changes whenever you add a method.</td><td>Declare it on every <code>Serializable</code> class, and bump it only when the serialized form really changes.</td></tr>
+        <tr><td>Not implementing <code>Serializable</code></td><td>The JVM refuses to instantiate the class from a stream, gadget or not.</td><td>The default. Mark a class serializable only because something actually needs to serialize it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Serialization mechanics">
+      <button type="button" class="lm-tab" role="tab" id="tab-serialization-custom" aria-controls="panel-serialization-custom" aria-selected="true" tabindex="0">Custom form</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-serialization-proxy" aria-controls="panel-serialization-proxy" aria-selected="false" tabindex="-1">Serialization proxy</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-serialization-alt" aria-controls="panel-serialization-alt" aria-selected="false" tabindex="-1">Alternatives</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-serialization-custom" aria-labelledby="tab-serialization-custom" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+private void writeObject(ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();                // the non-transient fields
+    out.writeInt(cache.size());              // then a hand-written form of the transient part
+    for (var e : cache.entrySet()) { out.writeUTF(e.getKey()); out.writeInt(e.getValue()); }
+}
+
+private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    int n = in.readInt();
+    if (n &lt; 0 || n &gt; 10_000) throw new InvalidObjectException("absurd cache size " + n);   // validate!
+    cache = new HashMap&lt;&gt;();
+    for (int i = 0; i &lt; n; i++) cache.put(in.readUTF(), in.readInt());
+}
+      </pre>
+      <p class="mb-0">The private, oddly-signed <code>writeObject</code>/<code>readObject</code> pair is found by reflection. <code>readObject</code> is effectively a public constructor that takes a byte array, so it must validate as strictly as one. <code>Externalizable</code> is the all-manual variant: you write every field yourself and the class must have a public no-arg constructor.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-serialization-proxy" aria-labelledby="tab-serialization-proxy" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+public final class StockLevel implements Serializable {
+    private final String sku; private final int onHand;
+    // ... constructor validates ...
+
+    private Object writeReplace() { return new Proxy(sku, onHand); }     // what actually gets written
+    private void readObject(ObjectInputStream in) throws InvalidObjectException {
+        throw new InvalidObjectException("use the proxy");               // nobody can bypass the proxy
+    }
+    private record Proxy(String sku, int onHand) implements Serializable {
+        private Object readResolve() { return new StockLevel(sku, onHand); }   // the real constructor runs
+    }
+}
+      </pre>
+      <p class="mb-0">Effective Java item 90. The stream contains only a dumb record; reading it goes through the real constructor, so invariants hold and the class's private representation can change freely. Records made this pattern mostly unnecessary for value types, because a record <em>is</em> its own proxy.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-serialization-alt" aria-labelledby="tab-serialization-alt" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Serialization alternatives</caption>
+          <thead><tr><th scope="col">Format</th><th scope="col">Strengths</th><th scope="col">Costs</th></tr></thead>
+          <tbody>
+            <tr><td>JSON (Jackson, Gson, JSON-B)</td><td>Human-readable, language-neutral, schema optional, the web's lingua franca; the deserializer calls your constructors</td><td>Verbose on the wire, numbers are doubles unless configured, polymorphism needs explicit type hints — and <em>default typing</em> in Jackson reintroduces gadget chains, so never enable it</td></tr>
+            <tr><td>Protocol Buffers / Avro</td><td>Compact binary, versioned schema, generated code, cross-language</td><td>A build step and a schema to maintain; fields are optional by design, so absence is a state you must handle</td></tr>
+            <tr><td>Java serialization</td><td>Zero setup, handles arbitrary object graphs with cycles</td><td>Java-only, brittle across versions, slow, and the security liability described above</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0">The rule: Java serialization is acceptable between two JVMs you both control, running the same code, with an allow-list filter. For anything that crosses a trust boundary or a version boundary, use a format with a schema.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The HTTP client</h3>
+
+  <p><code>java.net.http.HttpClient</code> (Java 11) speaks HTTP/1.1 and HTTP/2, follows redirects if told to, has a synchronous and an asynchronous API over the same request object, and pairs naturally with virtual threads because a blocked <code>send</code> parks the virtual thread rather than a carrier. The shape to memorise is: one long-lived client, one immutable request per call, a body handler that says what to turn the response into.</p>
+
+  <pre data-code data-lang="java" data-nobar data-hi="2,3,4,9,10,16,17">
+// ONE client for the application: it owns the connection pool and the executor
+HttpClient client = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(3))               // establishing the connection
+        .followRedirects(HttpClient.Redirect.NORMAL)        // not from https to http
+        .version(HttpClient.Version.HTTP_2)                 // falls back to 1.1 per server
+        .build();
+
+HttpRequest req = HttpRequest.newBuilder(URI.create("https://stock.acme.example/stock/BOLT-7"))
+        .timeout(Duration.ofSeconds(5))                     // the whole exchange — always set one
+        .header("Accept", "application/json")
+        .GET()                                              // or .POST(BodyPublishers.ofString(json))
+        .build();
+
+// synchronous: blocks this thread (fine on a virtual thread)
+HttpResponse&lt;String&gt; res = client.send(req, HttpResponse.BodyHandlers.ofString());
+if (res.statusCode() != 200) throw new IOException("stock service returned " + res.statusCode());
+StockLevel level = parse(res.body());
+
+// asynchronous: composes with everything in §6
+CompletableFuture&lt;StockLevel&gt; future = client
+        .sendAsync(req, HttpResponse.BodyHandlers.ofString())
+        .thenApply(HttpResponse::body)
+        .thenApply(SerializationDemo::parse)
+        .orTimeout(5, TimeUnit.SECONDS);
+  </pre>
+
+  <p>The following program is the same API against a server it starts itself, so it runs and verifies during the build of this page with no network access. The port is chosen by the OS and never printed.</p>
+
+  <pre data-code data-lang="java" data-file="HttpLocal.java" data-verify="HttpLocal" data-hi="15,26,27,30,31,36,41,42">
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+public class HttpLocal {
+    public static void main(String[] args) throws Exception {
+        // port 0 = any free port; the real port is never printed, so the output is stable
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/stock/BOLT-7", exchange -> {
+            byte[] body = "{\"sku\":\"BOLT-7\",\"onHand\":42}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var out = exchange.getResponseBody()) { out.write(body); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .build();
+
+            HttpRequest ok = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/stock/BOLT-7"))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Accept", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> sync = client.send(ok, HttpResponse.BodyHandlers.ofString());
+            System.out.println("sync  status = " + sync.statusCode());
+            System.out.println("sync  body   = " + sync.body());
+            System.out.println("sync  type   = " + sync.headers().firstValue("Content-Type").orElse("?"));
+
+            CompletableFuture<String> async = client.sendAsync(ok, HttpResponse.BodyHandlers.ofString())
+                    .thenApply(HttpResponse::body)
+                    .thenApply(body -> body.contains("\"onHand\":42") ? "42 on hand" : "unexpected");
+            System.out.println("async result = " + async.get(5, TimeUnit.SECONDS));
+
+            HttpRequest missing = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/stock/NOPE"))
+                    .timeout(Duration.ofSeconds(5)).build();
+            System.out.println("miss  status = " + client.send(missing, HttpResponse.BodyHandlers.discarding()).statusCode());
+        } finally {
+            server.stop(0);
+        }
+        System.out.println("server stopped");
+    }
+}
+  </pre>
+
+  <pre data-output data-for="HttpLocal">
+sync  status = 200
+sync  body   = {"sku":"BOLT-7","onHand":42}
+sync  type   = application/json
+async result = 42 on hand
+miss  status = 404
+server stopped
+  </pre>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Body handlers and publishers</caption>
+      <thead><tr><th scope="col">You want</th><th scope="col">Use</th></tr></thead>
+      <tbody>
+        <tr><td>The body as text</td><td><code>BodyHandlers.ofString()</code> (charset from the response, UTF-8 if absent)</td></tr>
+        <tr><td>To ignore the body (health checks, HEAD-like GETs)</td><td><code>BodyHandlers.discarding()</code></td></tr>
+        <tr><td>A large download without holding it in memory</td><td><code>BodyHandlers.ofFile(path)</code> or <code>ofInputStream()</code></td></tr>
+        <tr><td>Streaming lines (server-sent events, NDJSON)</td><td><code>BodyHandlers.ofLines()</code> → a <code>Stream&lt;String&gt;</code> you must close</td></tr>
+        <tr><td>To send JSON</td><td><code>BodyPublishers.ofString(json)</code> plus a <code>Content-Type</code> header</td></tr>
+        <tr><td>To upload a file</td><td><code>BodyPublishers.ofFile(path)</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A 404 is not an exception.</strong> <code>send</code> throws only for transport failures (connect refused, timeout). Every HTTP status is a normal return; check <code>statusCode()</code> yourself.</li>
+        <li><strong>No timeout means forever.</strong> The request builder's <code>timeout</code> defaults to none. A hung server then pins a platform thread for as long as the socket survives. Set it on every request, and <code>connectTimeout</code> on the client.</li>
+        <li><strong>One client, not one per request.</strong> Each <code>HttpClient</code> owns a connection pool and threads. Creating one per call leaks both; it is the <code>HttpClient</code> equivalent of opening a new database connection per query.</li>
+        <li><strong><code>serialVersionUID</code> defaults are a time bomb.</strong> Add a method to a serializable class without a declared UID and every cached or persisted instance becomes unreadable with <code>InvalidClassException: local class incompatible</code>.</li>
+        <li><strong><code>Serializable</code> is inherited and permanent.</strong> If a superclass implements it, every subclass is serializable whether it wants to be or not, and once instances exist in storage, the serialized form is part of your API forever.</li>
+        <li><strong>Jackson's default typing is Java serialization with a JSON syntax.</strong> <code>@JsonTypeInfo(use = Id.CLASS)</code> or <code>enableDefaultTyping</code> lets the document name the class to instantiate: the same gadget-chain attack, and the same mitigation (an allow-list of subtypes).</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-serialization-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A <code>record Price(long cents)</code> with a compact constructor rejecting negatives is deserialized from a stream an attacker edited to contain <code>-1</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-serialization-1"><span>A <code>Price</code> with <code>cents == -1</code> is created; constructors never run during deserialization <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-serialization-1"><span><code>InvalidClassException</code>, because records cannot be deserialized from edited streams <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-serialization-1"><span>The canonical constructor runs and throws <code>IllegalArgumentException</code>; no object is created <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-serialization-1"><span>The value is silently clamped to <code>0</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Records are reconstructed through their canonical constructor, so validation in a compact constructor protects deserialization exactly as it protects <code>new</code>. This is one of the design goals of records.</p>
+        <p class="mb-0"><strong>A</strong> is true of ordinary classes, not records; that difference is the point. <strong>B</strong> invents a rule; the stream is structurally valid. <strong>D</strong> is not something any part of serialization does.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-serialization-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Your service reads a serialized <code>Order</code> from a message queue that other teams also publish to. Which single change most reduces the risk of remote code execution?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-serialization-2"><span>Declare <code>serialVersionUID</code> on <code>Order</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-serialization-2"><span>Set an allow-list <code>ObjectInputFilter</code> on the stream (and a global <code>jdk.serialFilter</code>) <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-serialization-2"><span>Make <code>Order</code>'s fields <code>final</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-serialization-2"><span>Wrap <code>readObject</code> in a <code>try</code>/<code>catch</code> for <code>ClassNotFoundException</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The attack works by naming gadget classes in the stream; a filter that admits only <code>Order</code> and the JDK types it contains refuses every gadget before it is instantiated. The better fix is to stop using Java serialization on that queue, but among these options the filter is the one that closes the hole.</p>
+        <p class="mb-0"><strong>A</strong> helps versioning, not security; a UID mismatch only matters for classes the attacker is not choosing. <strong>C</strong> does nothing: the JVM sets fields directly, final or not. <strong>D</strong> catches the wrong thing; gadget classes are, by construction, <em>present</em> on the class path.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-serialization-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about <code>java.net.http.HttpClient</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A <code>500</code> response is returned normally; <code>send</code> does not throw for it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Requests have a sensible default timeout of 30 seconds <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A new client should be built for each request to avoid stale connections <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>sendAsync</code> returns a <code>CompletableFuture</code> you can compose with <code>thenApply</code> and <code>orTimeout</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Status codes are data; only transport problems throw. The async API hands you an ordinary <code>CompletableFuture</code>.</p>
+        <p class="mb-0"><strong>B</strong> is the trap: there is no default request timeout at all. <strong>C</strong> is backwards: the client is the pool, and one per request leaks threads and sockets; it is designed to be shared across the whole application.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="serialization"> Mark this section complete
+  </label>
+</section>

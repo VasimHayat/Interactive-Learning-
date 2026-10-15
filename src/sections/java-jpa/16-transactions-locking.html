@@ -1,0 +1,478 @@
+<section class="lm-section" id="transactions-locking" data-title="Transactions, flushing and locking" data-num="7">
+  <p class="lm-eyebrow">Section 7</p>
+  <h2 class="mb-4">Transactions, flushing and locking</h2>
+
+  <p>§3 said that a managed entity's changes reach the database "at flush". This section is about <em>when</em> that is, what a transaction has to do with it, and what happens when two users change the same row. The short version: a transaction is a <strong>unit of work</strong> — a set of changes that either all become visible to other users or none do — and the persistence context queues your writes until the latest safe moment inside it. Locking is how you decide what "safe" means when a second transaction is editing the same stock level at the same time.</p>
+
+  <h3 class="mt-8 mb-3">Worked example 1: when SQL is actually sent</h3>
+
+  <p>Four small transactions. Read the SQL interleaved with the printed lines: the position of each <code>insert</code> and <code>update</code> relative to the <code>println</code> around it is the point.</p>
+
+  <pre data-code data-lang="java" data-file="Flushing.java" data-verify="Flushing" data-hi="49,58,73,87">
+import jakarta.persistence.*;
+
+public class Flushing {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        private int priceInCents;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        Long id() { return id; }
+        void setPriceInCents(int c) { priceInCents = c; }
+        @Override public String toString() { return "Product[" + id + ", " + sku + ", " + priceInCents + "c]"; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Flushing;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    static long rowsInDatabase(EntityManagerFactory emf) {
+        try (EntityManager em = emf.createEntityManager()) {          // a fresh context: sees only committed rows
+            return ((Number) em.createNativeQuery("select count(*) from product").getSingleResult()).longValue();
+        }
+    }
+
+    static void section(String title) { System.out.println("-- " + title + " --"); }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+
+            section("1. a query flushes pending writes first, then rollback undoes them");
+            try (EntityManager em = emf.createEntityManager()) {
+                EntityTransaction tx = em.getTransaction();
+                tx.begin();
+                Product bolt = new Product("BOLT-7", 80);
+                em.persist(bolt);                                            // no SQL yet: only scheduled
+                System.out.println("persisted, id already assigned = " + bolt.id());
+                long seen = em.createQuery("select count(p) from Product p", Long.class).getSingleResult();
+                System.out.println("count inside the transaction = " + seen);
+                tx.rollback();
+                System.out.println("after rollback, em.contains(bolt) = " + em.contains(bolt));
+            }
+            System.out.println("rows committed = " + rowsInDatabase(emf));
+
+            section("2. FlushModeType.COMMIT: the query does NOT see the pending insert");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.setFlushMode(FlushModeType.COMMIT);
+                EntityTransaction tx = em.getTransaction();
+                tx.begin();
+                em.persist(new Product("NUT-3", 25));
+                long seen = em.createQuery("select count(p) from Product p", Long.class).getSingleResult();
+                System.out.println("count inside the transaction = " + seen);
+                tx.commit();                                                 // the insert happens here
+            }
+            System.out.println("rows committed = " + rowsInDatabase(emf));
+
+            section("3. dirty checking: a changed field becomes an UPDATE at flush");
+            try (EntityManager em = emf.createEntityManager()) {
+                EntityTransaction tx = em.getTransaction();
+                tx.begin();
+                Product nut = em.createQuery("select p from Product p where p.sku = 'NUT-3'", Product.class).getSingleResult();
+                nut.setPriceInCents(30);                                     // no em call at all
+                System.out.println("field changed, nothing written yet");
+                tx.commit();                                                 // flush compares snapshot → UPDATE
+                System.out.println("committed " + nut);
+            }
+
+            section("4. a failure marks the transaction rollback-only");
+            try (EntityManager em = emf.createEntityManager()) {
+                EntityTransaction tx = em.getTransaction();
+                tx.begin();
+                em.persist(new Product("CAM-9", 2_300));
+                try {
+                    if (true) throw new IllegalStateException("price feed unavailable");
+                } catch (IllegalStateException e) {
+                    tx.setRollbackOnly();
+                    System.out.println("caught '" + e.getMessage() + "', rollbackOnly = " + tx.getRollbackOnly());
+                }
+                try {
+                    tx.commit();
+                    System.out.println("commit() returned normally: Hibernate rolled back instead of committing");
+                } catch (RollbackException e) {
+                    System.out.println("commit refused: " + e.getClass().getSimpleName());
+                }
+                System.out.println("tx.isActive() = " + tx.isActive());
+            }
+            System.out.println("rows committed = " + rowsInDatabase(emf));
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Flushing">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade 
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create table product (priceInCents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+-- 1. a query flushes pending writes first, then rollback undoes them --
+Hibernate: select next value for product_SEQ
+persisted, id already assigned = 1
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: select count(p1_0.id) from product p1_0
+count inside the transaction = 1
+after rollback, em.contains(bolt) = false
+Hibernate: select count(*) from product
+rows committed = 0
+-- 2. FlushModeType.COMMIT: the query does NOT see the pending insert --
+Hibernate: select next value for product_SEQ
+Hibernate: select count(p1_0.id) from product p1_0
+count inside the transaction = 0
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: select count(*) from product
+rows committed = 1
+-- 3. dirty checking: a changed field becomes an UPDATE at flush --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.sku='NUT-3'
+field changed, nothing written yet
+Hibernate: update product set priceInCents=?,sku=? where id=?
+committed Product[2, NUT-3, 30c]
+-- 4. a failure marks the transaction rollback-only --
+caught 'price feed unavailable', rollbackOnly = true
+commit() returned normally: Hibernate rolled back instead of committing
+tx.isActive() = false
+Hibernate: select count(*) from product
+rows committed = 1
+  </pre>
+
+  <ol>
+    <li><strong>A query flushes first.</strong> <code>persist()</code> obtained an id from the sequence immediately (ids are assigned at persist, not at flush) but sent no <code>insert</code>. The <code>count</code> query did: Hibernate's default <code>FlushModeType.AUTO</code> flushes pending changes before any query that might see them, so your own transaction never reads a stale answer. Then <code>rollback()</code> undid the insert at the database and <strong>evicted</strong> <code>bolt</code> from the context — a rolled-back entity is detached, and reusing it is a bug.</li>
+    <li><strong><code>FlushModeType.COMMIT</code> defers everything.</strong> The same query now counts <code>0</code>: the insert waited for <code>commit()</code>. Use this mode for a transaction that does many reads and one write at the end, when you can prove the reads do not depend on the write; it saves flush-time dirty checks on every query.</li>
+    <li><strong>Dirty checking.</strong> No <code>em</code> call touched <code>nut</code>, yet an <code>update</code> went out at commit. Hibernate kept a snapshot of the row when it loaded it and compared field by field at flush. Notice the SQL: <code>set priceInCents=?,sku=?</code> — <em>every</em> column, not just the changed one, because Hibernate caches one <code>UPDATE</code> statement per entity. <code>@DynamicUpdate</code> changes that at the cost of a statement per distinct change set.</li>
+    <li><strong>Rollback-only.</strong> After <code>setRollbackOnly()</code>, <code>commit()</code> did not commit — <code>CAM-9</code> never reached the database — but it also did not throw. That is Hibernate's historical behaviour; the JPA specification says <code>commit()</code> on a rollback-only transaction throws <code>RollbackException</code>, and you get that by setting <code>hibernate.jpa.compliance.transaction=true</code>. In a container (Spring, Jakarta EE) the container does the equivalent and throws. Either way, never assume a returned <code>commit()</code> means "written" without checking the flag.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Flush order and the transaction boundary</h3>
+
+  <p>At flush, Hibernate does not replay your calls in order. It sorts: all inserts (in persist order, respecting foreign-key dependencies), then all updates, then collection changes, then all deletes. This is why a <code>remove()</code> followed by a <code>persist()</code> of a row with the same unique key can fail with a constraint violation — the insert runs first. <code>hibernate.order_inserts</code> and <code>hibernate.order_updates</code> go further and group statements by entity type, which §9 needs for JDBC batching.</p>
+
+  <p>The boundary matters as much as the order. Code that runs after <code>commit()</code> but still uses the entities — sending an email with <code>order.getLines()</code>, say — works until the first lazy association, which throws <code>LazyInitializationException</code> because the context is closed (§5). And code that does <em>side effects</em> inside the transaction — calling a payment gateway before commit — can charge the card and then roll back the order. Do external calls after a successful commit, driven by what was committed.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Isolation levels and the anomalies they prevent</caption>
+      <thead><tr><th scope="col">Isolation level</th><th scope="col">Dirty read</th><th scope="col">Non-repeatable read</th><th scope="col">Phantom read</th><th scope="col">Typical default</th></tr></thead>
+      <tbody>
+        <tr><td><code>READ_UNCOMMITTED</code></td><td>possible</td><td>possible</td><td>possible</td><td>—</td></tr>
+        <tr><td><code>READ_COMMITTED</code></td><td>prevented</td><td>possible</td><td>possible</td><td>PostgreSQL, Oracle, SQL Server, H2</td></tr>
+        <tr><td><code>REPEATABLE_READ</code></td><td>prevented</td><td>prevented</td><td>possible*</td><td>MySQL/InnoDB</td></tr>
+        <tr><td><code>SERIALIZABLE</code></td><td>prevented</td><td>prevented</td><td>prevented</td><td>— (opt in, expect retries)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">JPA sets no isolation level; you get the connection's default (<code>hibernate.connection.isolation</code> overrides it). Within one persistence context you have repeatable reads anyway, because a second <code>find()</code> of the same id is served from the first-level cache without touching the database. *InnoDB's gap locks prevent most phantoms.</p>
+
+  <h3 class="mt-8 mb-3">Worked example 2: two pickers, one row</h3>
+
+  <p>The classic lost update: two users read stock of 10, one picks 1 and writes 9, the other picks 2 and writes 8. The first pick has vanished. <code>@Version</code> is the JPA cure, and the SQL shows exactly how it works.</p>
+
+  <pre data-code data-lang="java" data-file="OptimisticLock.java" data-verify="OptimisticLock" data-hi="13,62,68,85,93">
+import jakarta.persistence.*;
+
+public class OptimisticLock {
+
+    @Entity(name = "StockLevel")
+    @Table(name = "stock_level")
+    public static class StockLevel {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        private int onHand;
+        @Version
+        private long version;                    // Hibernate owns this field: never set it yourself
+
+        protected StockLevel() {}
+        StockLevel(String sku, int onHand) { this.sku = sku; this.onHand = onHand; }
+        Long id() { return id; }
+        int onHand() { return onHand; }
+        long version() { return version; }
+        void pick(int qty) { onHand -= qty; }
+        @Override public String toString() { return sku + " onHand=" + onHand + " v" + version; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(StockLevel.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:OptimisticLock;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    static void section(String title) { System.out.println("-- " + title + " --"); }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+            Long id;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                StockLevel s = new StockLevel("BOLT-7", 10);
+                em.persist(s);
+                em.getTransaction().commit();
+                id = s.id();
+                System.out.println("seeded " + s);
+            }
+
+            section("two pickers load the same row");
+            EntityManager picker1 = emf.createEntityManager();
+            EntityManager picker2 = emf.createEntityManager();
+            picker1.getTransaction().begin();
+            picker2.getTransaction().begin();
+            StockLevel copy1 = picker1.find(StockLevel.class, id);
+            StockLevel copy2 = picker2.find(StockLevel.class, id);
+            System.out.println("picker1 sees " + copy1);
+            System.out.println("picker2 sees " + copy2);
+
+            section("picker1 commits first: UPDATE ... where id=? and version=?");
+            copy1.pick(1);
+            picker1.getTransaction().commit();
+            System.out.println("picker1 committed " + copy1);
+
+            section("picker2 commits on a stale version");
+            copy2.pick(2);
+            try {
+                picker2.getTransaction().commit();
+                System.out.println("(unreachable)");
+            } catch (RollbackException e) {
+                System.out.println("commit failed: " + e.getClass().getSimpleName()
+                    + " caused by " + e.getCause().getClass().getSimpleName());
+            }
+            picker1.close();
+            picker2.close();
+
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("database row is " + em.find(StockLevel.class, id)
+                    + " (picker1's write survived, picker2's was refused, nothing was lost)");
+            }
+
+            section("OPTIMISTIC_FORCE_INCREMENT: bump the version on a read");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                StockLevel s = em.find(StockLevel.class, id, LockModeType.OPTIMISTIC_FORCE_INCREMENT);
+                em.getTransaction().commit();
+                System.out.println("after commit " + s);
+            }
+
+            section("PESSIMISTIC_WRITE: the database locks the row until commit");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                StockLevel s = em.find(StockLevel.class, id, LockModeType.PESSIMISTIC_WRITE);
+                s.pick(3);
+                em.getTransaction().commit();
+                System.out.println("after commit " + s);
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="OptimisticLock">
+Hibernate: create global temporary table HTE_stock_level(onHand integer, rn_ integer not null, id bigint, version bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists stock_level cascade 
+Hibernate: drop sequence if exists stock_level_SEQ
+Hibernate: create sequence stock_level_SEQ start with 1 increment by 50
+Hibernate: create table stock_level (onHand integer not null, id bigint not null, version bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: select next value for stock_level_SEQ
+Hibernate: insert into stock_level (onHand,sku,version,id) values (?,?,?,?)
+seeded BOLT-7 onHand=10 v0
+-- two pickers load the same row --
+Hibernate: select sl1_0.id,sl1_0.onHand,sl1_0.sku,sl1_0.version from stock_level sl1_0 where sl1_0.id=?
+Hibernate: select sl1_0.id,sl1_0.onHand,sl1_0.sku,sl1_0.version from stock_level sl1_0 where sl1_0.id=?
+picker1 sees BOLT-7 onHand=10 v0
+picker2 sees BOLT-7 onHand=10 v0
+-- picker1 commits first: UPDATE ... where id=? and version=? --
+Hibernate: update stock_level set onHand=?,sku=?,version=? where id=? and version=?
+picker1 committed BOLT-7 onHand=9 v1
+-- picker2 commits on a stale version --
+Hibernate: update stock_level set onHand=?,sku=?,version=? where id=? and version=?
+commit failed: RollbackException caused by OptimisticLockException
+Hibernate: select sl1_0.id,sl1_0.onHand,sl1_0.sku,sl1_0.version from stock_level sl1_0 where sl1_0.id=?
+database row is BOLT-7 onHand=9 v1 (picker1's write survived, picker2's was refused, nothing was lost)
+-- OPTIMISTIC_FORCE_INCREMENT: bump the version on a read --
+Hibernate: select sl1_0.id,sl1_0.onHand,sl1_0.sku,sl1_0.version from stock_level sl1_0 where sl1_0.id=?
+Hibernate: update stock_level set version=? where id=? and version=?
+after commit BOLT-7 onHand=9 v2
+-- PESSIMISTIC_WRITE: the database locks the row until commit --
+Hibernate: select sl1_0.id,sl1_0.onHand,sl1_0.sku,sl1_0.version from stock_level sl1_0 where sl1_0.id=? for update
+Hibernate: update stock_level set onHand=?,sku=?,version=? where id=? and version=?
+after commit BOLT-7 onHand=6 v3
+  </pre>
+
+  <ul>
+    <li><strong>The version column is just a column</strong> (<code>version bigint not null</code>) that Hibernate includes in every <code>UPDATE</code>'s <code>where</code>: <code>where id=? and version=?</code>, with <code>set version=?</code> incrementing it. Picker 1's update matched 1 row (version 0 → 1). Picker 2's update, sent with the stale <code>version=0</code>, matched <strong>0 rows</strong>, and Hibernate turned "0 rows updated" into <code>OptimisticLockException</code>, wrapped in <code>RollbackException</code> because it happened during commit. The database row shows picker 1's write; no update was silently overwritten.</li>
+    <li><strong>What to do with the exception</strong> is a business decision, not a technical one. Re-read the row and retry the pick (stock is now 9, so picking 2 still works), or tell the user "someone else just changed this". What you cannot do is catch it and carry on with the same <code>EntityManager</code>: after the exception the context is in an undefined state and must be closed.</li>
+    <li><strong><code>OPTIMISTIC_FORCE_INCREMENT</code></strong> bumped the version with an <code>update … set version=?</code> even though nothing else changed. Use it when reading a parent while editing its children, so that two users editing different lines of the same order still conflict — the version on the parent becomes the version of the aggregate.</li>
+    <li><strong><code>PESSIMISTIC_WRITE</code></strong> appended <code>for update</code> to the <code>select</code>: the database locked the row until commit, so a second transaction's <code>find</code> with the same lock would <em>wait</em> instead of fail. This program could not show the waiting (a blocked second transaction would stall the build); the behaviour is that <code>jakarta.persistence.lock.timeout</code> milliseconds later the waiter gets <code>PessimisticLockException</code> (or <code>LockTimeoutException</code>, which does not roll back the transaction).</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch the version check</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of optimistic locking">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Two sessions race on one row</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="optimistic-lock"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Copies and the database row</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="optimistic-lock">
+    {
+      "lang": "java",
+      "code": "StockLevel a = picker1.find(StockLevel.class, id);   // session 1\nStockLevel b = picker2.find(StockLevel.class, id);   // session 2\n\na.pick(1);\npicker1.getTransaction().commit();\n\nb.pick(2);\npicker2.getTransaction().commit();                   // throws",
+      "steps": [
+        { "line": 1, "vars": { "db row": "onHand=10, version=0", "session 1 copy": "onHand=10, version=0" }, "out": "select … from stock_level where id=?",
+          "note": "Session 1 loads the row. Its copy records the version it saw: 0." },
+        { "line": 2, "vars": { "db row": "onHand=10, version=0", "session 1 copy": "onHand=10, version=0", "session 2 copy": "onHand=10, version=0" }, "out": "select … from stock_level where id=?",
+          "note": "Session 2 loads the same row and also sees version 0. Neither session knows about the other; nothing is locked." },
+        { "line": 4, "vars": { "db row": "onHand=10, version=0", "session 1 copy": "onHand=9, version=0 (dirty)", "session 2 copy": "onHand=10, version=0" }, "out": "",
+          "note": "Session 1 changes its copy in memory. Dirty checking will notice at flush." },
+        { "line": 5, "vars": { "db row": "onHand=9, version=1", "session 1 copy": "onHand=9, version=1", "session 2 copy": "onHand=10, version=0" }, "out": "update stock_level set onHand=9, version=1 where id=? and version=0\n→ 1 row updated",
+          "note": "Flush: the UPDATE carries the version the session saw in its where clause and sets the next one. The row still has version 0, so exactly one row matches. Commit succeeds." },
+        { "line": 7, "vars": { "db row": "onHand=9, version=1", "session 2 copy": "onHand=8, version=0 (dirty)" }, "out": "",
+          "note": "Session 2 computes 10 − 2 = 8 from its stale copy. If this write went through, session 1's pick would be lost." },
+        { "line": 8, "vars": { "db row": "onHand=9, version=1", "session 2 copy": "onHand=8, version=0 (dirty)" }, "out": "update stock_level set onHand=8, version=1 where id=? and version=0\n→ 0 rows updated",
+          "note": "Session 2's where clause says version=0, but the row is at version 1. Zero rows match. Hibernate compares the count with the 1 it expected." },
+        { "line": 8, "vars": { "db row": "onHand=9, version=1", "session 2": "OptimisticLockException → rolled back" }, "out": "(no write; RollbackException caused by OptimisticLockException)",
+          "note": "A zero-row update is the signal. Session 2 is rolled back and must re-read and retry, or report the conflict. The database never saw the lost update." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Choosing a locking strategy</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Locking strategies">
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-locking-opt" aria-controls="panel-transactions-locking-opt" aria-selected="true" tabindex="0">Optimistic (<code>@Version</code>)</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-locking-pess" aria-controls="panel-transactions-locking-pess" aria-selected="false" tabindex="-1">Pessimistic</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-transactions-locking-conv" aria-controls="panel-transactions-locking-conv" aria-selected="false" tabindex="-1">Long conversations</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-locking-opt" aria-labelledby="tab-transactions-locking-opt" tabindex="0">
+      <ul>
+        <li>The field may be <code>int</code>, <code>long</code>, their wrappers, or a timestamp (<code>Instant</code>, <code>LocalDateTime</code>). Prefer an integer: timestamps have clock resolution and clock-skew problems.</li>
+        <li>Never set, increment or expose a setter for it. Hibernate manages it; a mapped <code>version</code> that your code changes defeats the check.</li>
+        <li>Cost: one extra column and an extra predicate on each update. No locks, no waiting, no deadlocks — conflicts are detected, not prevented. Right for web applications where conflicts are rare and users can retry.</li>
+        <li>Hibernate-only alternative for legacy tables without a version column: <code>@OptimisticLocking(type = OptimisticLockType.DIRTY)</code> with <code>@DynamicUpdate</code> puts every <em>changed</em> column's old value in the <code>where</code> clause.</li>
+        <li><code>OPTIMISTIC</code> lock mode (without <code>FORCE_INCREMENT</code>) re-checks the version at commit even if you did not modify the entity — for reads that must not have been overtaken.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-locking-pess" aria-labelledby="tab-transactions-locking-pess" tabindex="0" hidden>
+      <ul>
+        <li><code>PESSIMISTIC_WRITE</code> → <code>select … for update</code>: exclusive row lock until commit. Readers using plain selects are not blocked on MVCC databases (PostgreSQL, Oracle, MySQL/InnoDB), only other lockers.</li>
+        <li><code>PESSIMISTIC_READ</code> → <code>for share</code> where the dialect has it: others may read and share-lock, none may write.</li>
+        <li><code>PESSIMISTIC_FORCE_INCREMENT</code> → locks and bumps <code>@Version</code>, for combining both schemes.</li>
+        <li>Set <code>jakarta.persistence.lock.timeout</code> (ms) as a hint or property; <code>0</code> means <code>nowait</code> on databases that support it. Without a timeout, a forgotten lock holder stalls everyone.</li>
+        <li>Lock rows in a consistent order (by id, by SKU — Advanced §3's rule in SQL clothing) or the database will detect a deadlock and kill one transaction with an exception you must handle.</li>
+        <li>Right for short, high-contention operations where a retry would be worse than a short wait: decrementing stock at checkout, allocating the next invoice number.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-transactions-locking-conv" aria-labelledby="tab-transactions-locking-conv" tabindex="0" hidden>
+      <p>A user opens an edit form, goes to lunch, and saves at 2 p.m. No database transaction can span that — a connection held open for an hour is a connection the pool has lost. The pattern is <strong>detached entities with versions</strong>: load the entity in one short transaction, close the context, let the user edit the detached object (or a DTO carrying the version), and in a second short transaction <code>merge()</code> it back. Because the detached object still carries <code>version=0</code>, the merge's <code>UPDATE … where version=0</code> fails if anyone else saved in between — the lost update is caught across an hour and two transactions. Hidden form fields carrying the version are not a hack; they are the mechanism.</p>
+      <p class="mb-0">What does not work: an <code>EntityManager</code> kept open across requests ("extended persistence context") outside a very controlled container-managed setup, and copying the version into a fresh entity by hand.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Transaction mistakes that cost real money</div>
+      <ul class="mb-0">
+        <li><strong>Side effects before commit.</strong> Charging a card, sending an email, calling another service inside the transaction: if the commit then fails, the side effect is already done. Do them after commit, from a record of what committed.</li>
+        <li><strong>Catching an exception and continuing with the same context.</strong> Any exception from flush, commit or a query leaves the persistence context undefined. Roll back, close it, start again.</li>
+        <li><strong>Reading the entity after <code>rollback()</code>.</strong> It is detached; its ids may refer to rows that were never committed.</li>
+        <li><strong>Assuming <code>commit()</code> throws.</strong> Shown above: with Hibernate's defaults a rollback-only transaction rolls back quietly. Check <code>getRollbackOnly()</code> or turn on <code>hibernate.jpa.compliance.transaction</code>.</li>
+        <li><strong>Pessimistic locks without timeouts, or in inconsistent order.</strong> A hung request becomes a hung system.</li>
+        <li><strong>A <code>@Version</code> field with a setter.</strong> The first "helpful" refactoring that copies all fields from a DTO will write it and silently disable the check.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-transactions-locking-1" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In worked example 1, why does an <code>insert</code> appear <em>before</em> the <code>select count</code> SQL in the first transaction, when the code called <code>persist</code> and then ran the query?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-transactions-locking-1"><span>Auto-flush: Hibernate flushes pending changes before a query so the query sees your own transaction's writes <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-transactions-locking-1"><span><code>persist()</code> always sends the <code>insert</code> immediately <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-transactions-locking-1"><span>H2 requires rows to exist before they can be counted <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-transactions-locking-1"><span>A <code>count</code> query implicitly commits the transaction <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> <code>FlushModeType.AUTO</code> (the default) flushes before executing a query whose result could be affected by pending changes. Section 2 of the same program proves the other half: with <code>FlushModeType.COMMIT</code> the same query counted <code>0</code> and the insert moved to <code>commit()</code>.</p>
+        <p class="mb-0"><strong>B</strong> is false for <code>SEQUENCE</code> ids — the program printed the assigned id with no insert yet; only <code>IDENTITY</code> ids force an immediate insert (§2). <strong>C</strong> confuses the database with the ORM; H2 counts whatever is there. <strong>D</strong> is wrong: the transaction stayed open and was rolled back afterwards, undoing the insert.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-transactions-locking-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Two transactions load the same <code>StockLevel</code> (version 3). The first changes it and commits. The second changes it and commits. With <code>@Version</code> mapped, what happens to the second commit?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-transactions-locking-2"><span>It overwrites the first write — the lost update — unless the transactions are <code>SERIALIZABLE</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-transactions-locking-2"><span>Its <code>UPDATE … where version=3</code> matches zero rows, and the commit fails with <code>OptimisticLockException</code> after a rollback <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-transactions-locking-2"><span>It blocks until the first transaction's lock is released, then succeeds <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-transactions-locking-2"><span>Hibernate merges the two change sets field by field <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> That is the mechanism in worked example 2: the second session's <code>where id=? and version=?</code> carries the stale version, matches nothing, and Hibernate converts the unexpected row count into an exception. Nothing is overwritten.</p>
+        <p class="mb-0"><strong>A</strong> is what happens <em>without</em> <code>@Version</code> at the common isolation levels. <strong>C</strong> describes pessimistic locking (<code>for update</code>), which was not requested. <strong>D</strong> does not exist: Hibernate has no idea which of two conflicting values is right, and does not guess.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-transactions-locking-3" data-answer="a,b">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these prevent the lost-update problem on a stock row? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A <code>@Version</code> column on the entity <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Loading the row with <code>LockModeType.PESSIMISTIC_WRITE</code> in each transaction <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Setting <code>FlushModeType.COMMIT</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A larger sequence <code>allocationSize</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and B.</strong> Optimistic locking detects the conflict at commit; pessimistic locking prevents it by making the second reader wait for the first writer. They solve the same problem with opposite trade-offs — retries versus waiting.</p>
+        <p class="mb-0"><strong>C</strong> only changes <em>when</em> within the transaction the write is sent; both transactions still write unconditionally. <strong>D</strong> concerns id generation and has nothing to do with concurrent updates of an existing row.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="transactions-locking"> Mark this section complete
+  </label>
+</section>

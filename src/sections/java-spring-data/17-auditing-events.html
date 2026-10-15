@@ -1,0 +1,384 @@
+<section class="lm-section" id="auditing-events" data-title="Auditing, lifecycle and domain events" data-num="8">
+  <p class="lm-eyebrow">Section 8</p>
+  <h2 class="mb-4">Auditing, lifecycle and domain events</h2>
+
+  <p>Two questions every warehouse eventually asks of its database: <em>who changed this row and when</em>, and <em>what else should happen when it changes</em>. Both are cross-cutting — they apply to dozens of entities and belong to none of them — and both have a tempting wrong answer: setting <code>updatedAt = Instant.now()</code> by hand in every service method, and calling the e-mail sender from inside the one that saves the order. Spring Data gives each question a declarative answer that sits next to the entity and runs at exactly the right moment in the transaction.</p>
+
+  <p>For the first, <strong>auditing</strong>: four annotations on four fields, an <code>AuditorAware</code> that says who the current user is, and a JPA entity listener that fills them in before every insert and update. For the second, <strong>domain events</strong>: an aggregate root records that something happened, the repository publishes it when the aggregate is saved, and listeners choose whether to run inside the transaction or only after it has committed — which is the difference between an e-mail about an order that exists and one about an order that was rolled back.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: stamps and events</h3>
+
+  <p>The <code>DateTimeProvider</code> bean is the one unusual thing here. Auditing normally calls <code>Instant.now()</code>; this program replaces it with a clock that ticks one second per call so the printed stamps are reproducible. That is not a trick for the page — it is exactly what you do in tests, and it is why the stamps below can be read rather than merely asserted non-null.</p>
+
+  <pre data-code data-lang="java" data-file="Auditing.java" data-verify="Auditing" data-package="lm.auditing" data-hi="33,34,37,40,46,47,48,49,50,51,52,80,81,82,98,100,109,110,111,112">
+package lm.auditing;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.event.EventListener;
+import org.springframework.data.annotation.CreatedBy;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.LastModifiedBy;
+import org.springframework.data.annotation.LastModifiedDate;
+import org.springframework.data.auditing.DateTimeProvider;
+import org.springframework.data.domain.AbstractAggregateRoot;
+import org.springframework.data.domain.AuditorAware;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+import java.time.Instant;
+import java.time.temporal.TemporalAccessor;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+@EnableJpaAuditing(auditorAwareRef = "auditor", dateTimeProviderRef = "clock")
+public class Auditing {
+
+    // who: in a real application this reads the security context
+    @Bean AuditorAware<String> auditor() { return () -> Optional.of("picker-42"); }
+
+    // when: a fixed, ticking clock so the stamps are reproducible (tests do the same)
+    @Bean DateTimeProvider clock() {
+        AtomicInteger tick = new AtomicInteger();
+        return () -> Optional.of(Instant.parse("2026-10-15T09:00:00Z").plusSeconds(tick.getAndIncrement()));
+    }
+
+    @MappedSuperclass
+    @EntityListeners(AuditingEntityListener.class)
+    public static abstract class Auditable {
+        @CreatedDate Instant createdAt;
+        @LastModifiedDate Instant updatedAt;
+        @CreatedBy String createdBy;
+        @LastModifiedBy String updatedBy;
+    }
+
+    static final AtomicInteger prePersist = new AtomicInteger(), postLoad = new AtomicInteger();
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product extends Auditable {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int priceInCents;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @PrePersist void beforeInsert() { prePersist.incrementAndGet(); }      // JPA callback, independent of Spring
+        @PostLoad void afterLoad() { postLoad.incrementAndGet(); }
+        void setPriceInCents(int p) { priceInCents = p; }
+    }
+
+    public record OrderPlaced(String reference) {}
+
+    @Entity(name = "Order")
+    @Table(name = "orders")
+    public static class Order extends AbstractAggregateRoot<Order> {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true) String reference;
+        protected Order() {}
+        Order(String reference) { this.reference = reference; }
+        Order place() { registerEvent(new OrderPlaced(reference)); return this; }   // collected, published by save()
+    }
+
+    public interface ProductRepository extends JpaRepository<Product, Long> {}
+    public interface OrderRepository extends JpaRepository<Order, Long> {}
+
+    @Component
+    public static class Listeners {
+        final List<String> log = Collections.synchronizedList(new ArrayList<>());
+        @EventListener
+        void inTransaction(OrderPlaced e) { log.add("inside tx: " + e.reference()); }
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        void afterCommit(OrderPlaced e) { log.add("after commit: " + e.reference()); }
+        List<String> drain() { List<String> out = new ArrayList<>(log); Collections.sort(out); log.clear(); return out; }
+    }
+
+    @Service
+    public static class OrderService {
+        private final OrderRepository orders;
+        OrderService(OrderRepository orders) { this.orders = orders; }
+        @Transactional public void place(String ref) { orders.save(new Order(ref).place()); }
+        @Transactional public void placeAndFail(String ref) {
+            orders.save(new Order(ref).place());
+            throw new IllegalStateException("payment declined");                 // RuntimeException → rollback
+        }
+    }
+
+    @Bean CommandLineRunner demo(ProductRepository products, OrderService service, Listeners listeners, ApplicationEventPublisher publisher) {
+        return args -> {
+            System.out.println("-- A: auditing stamps on insert --");
+            Product p = products.save(new Product("BOLT-7", 80));
+            Product loaded = products.findById(p.id).orElseThrow();
+            System.out.println("createdBy = " + loaded.createdBy + ", createdAt = " + loaded.createdAt);
+            System.out.println("updatedAt == createdAt: " + loaded.updatedAt.equals(loaded.createdAt));
+
+            System.out.println("-- B: stamps on update --");
+            loaded.setPriceInCents(95);
+            Product after = products.findById(products.save(loaded).id).orElseThrow();
+            System.out.println("updatedBy = " + after.updatedBy + ", updatedAt = " + after.updatedAt);
+            System.out.println("updatedAt after createdAt: " + after.updatedAt.isAfter(after.createdAt));
+            System.out.println("callbacks: prePersist = " + prePersist.get() + ", postLoad = " + postLoad.get());
+
+            System.out.println("-- C: a domain event, committed --");
+            service.place("ORD-1");
+            System.out.println(listeners.drain());
+
+            System.out.println("-- D: a domain event, rolled back --");
+            try { service.placeAndFail("ORD-2"); } catch (IllegalStateException e) { System.out.println("caught " + e.getMessage()); }
+            System.out.println(listeners.drain());
+
+            System.out.println("-- E: published directly, outside any transaction --");
+            publisher.publishEvent(new OrderPlaced("ORD-3"));
+            System.out.println(listeners.drain());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Auditing.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:auditing;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Auditing">
+Hibernate: create global temporary table HTE_orders(rn_ integer not null, id bigint, reference varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, createdAt timestamp(6) with time zone, id bigint, updatedAt timestamp(6) with time zone, sku varchar(16), createdBy varchar(255), updatedBy varchar(255), primary key (rn_)) transactional
+Hibernate: drop table if exists orders cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists orders_seq
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence orders_seq start with 1 increment by 50
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table orders (id bigint not null, reference varchar(255) not null unique, primary key (id))
+Hibernate: create table product (price_in_cents integer not null, created_at timestamp(6) with time zone, id bigint not null, updated_at timestamp(6) with time zone, sku varchar(16) not null unique, created_by varchar(255), updated_by varchar(255), primary key (id))
+-- A: auditing stamps on insert --
+Hibernate: select next value for product_seq
+Hibernate: insert into product (created_at,created_by,price_in_cents,sku,updated_at,updated_by,id) values (?,?,?,?,?,?,?)
+Hibernate: select p1_0.id,p1_0.created_at,p1_0.created_by,p1_0.price_in_cents,p1_0.sku,p1_0.updated_at,p1_0.updated_by from product p1_0 where p1_0.id=?
+createdBy = picker-42, createdAt = 2026-10-15T09:00:00Z
+updatedAt == createdAt: true
+-- B: stamps on update --
+Hibernate: select p1_0.id,p1_0.created_at,p1_0.created_by,p1_0.price_in_cents,p1_0.sku,p1_0.updated_at,p1_0.updated_by from product p1_0 where p1_0.id=?
+Hibernate: update product set created_at=?,created_by=?,price_in_cents=?,sku=?,updated_at=?,updated_by=? where id=?
+Hibernate: select p1_0.id,p1_0.created_at,p1_0.created_by,p1_0.price_in_cents,p1_0.sku,p1_0.updated_at,p1_0.updated_by from product p1_0 where p1_0.id=?
+updatedBy = picker-42, updatedAt = 2026-10-15T09:00:01Z
+updatedAt after createdAt: true
+callbacks: prePersist = 1, postLoad = 3
+-- C: a domain event, committed --
+Hibernate: select next value for orders_seq
+Hibernate: insert into orders (reference,id) values (?,?)
+[after commit: ORD-1, inside tx: ORD-1]
+-- D: a domain event, rolled back --
+Hibernate: select next value for orders_seq
+caught payment declined
+[inside tx: ORD-2]
+-- E: published directly, outside any transaction --
+[inside tx: ORD-3]
+Hibernate: drop table if exists orders cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists orders_seq
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <ul class="max-w-prose">
+    <li><strong>A.</strong> One <code>save</code> on a new entity: the <code>AuditingEntityListener</code>'s <code>@PrePersist</code> callback filled all four fields before the insert ran — look at the insert's column list. The clock was asked once, so <code>createdAt</code> and <code>updatedAt</code> are the same instant: a new row is "last modified" at creation.</li>
+    <li><strong>B.</strong> <code>save</code> on an existing entity is a <code>merge</code> (§2): the select loads the current row, the listener's <code>@PreUpdate</code> stamps <code>updatedAt</code>/<code>updatedBy</code> only, and the update writes every column because Hibernate updates all columns by default. The clock ticked once more, so <code>updatedAt</code> is one second later. The counters show plain JPA callbacks running alongside: one <code>@PrePersist</code>, three <code>@PostLoad</code>s for the three selects.</li>
+    <li><strong>C.</strong> <code>place()</code> only <em>records</em> the event; <code>orders.save()</code> publishes it. The <code>@EventListener</code> ran immediately, inside the still-open transaction; the <code>@TransactionalEventListener(AFTER_COMMIT)</code> ran after the commit. The output is sorted, because listener order is not a contract.</li>
+    <li><strong>D.</strong> Same save, then an exception: the transaction rolled back. Notice there is no <code>insert</code> at all — the flush never happened — yet the in-transaction listener had already run on a row that would never exist. The after-commit listener, correctly, did not. That asymmetry is the whole reason the second phase exists.</li>
+    <li><strong>E.</strong> Published by hand with no transaction. The plain listener runs; the transactional one does not, because there is no transaction to attach to. That is the default and it surprises people in batch jobs and tests — see <code>fallbackExecution</code> below.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch an event travel</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a domain event's lifecycle">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">From registerEvent to the listener</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="event-flow"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">State</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Listener log</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="event-flow">
+    {
+      "lang": "java",
+      "code": "@Transactional\nvoid place(String ref) {\n    Order o = new Order(ref);\n    o.registerEvent(new OrderPlaced(ref));   // held in the aggregate\n    orders.save(o);                           // proxy: @DomainEvents → publishEvent\n    //   @EventListener runs here, inside the tx\n    //   @AfterDomainEventPublication clears the list\n    if (declined) throw new IllegalStateException();\n}\n// commit → @TransactionalEventListener(AFTER_COMMIT)\n// rollback → AFTER_ROLLBACK / AFTER_COMPLETION only",
+      "steps": [
+        { "line": 1, "vars": { "transaction": "begun by the proxy", "events held": "0" }, "out": "",
+          "note": "The @Transactional proxy starts a transaction before the method body runs. Nothing has been published." },
+        { "line": 4, "vars": { "transaction": "active", "events held": "1 (OrderPlaced)" }, "out": "",
+          "note": "registerEvent only appends to a transient list inside the aggregate (@DomainEvents exposes it). No listener has seen anything yet." },
+        { "line": 5, "vars": { "transaction": "active", "events held": "1 → published", "repository": "EventPublishingRepositoryProxyPostProcessor" }, "out": "",
+          "note": "save() goes through the repository proxy. After the delegate's save, the proxy reads the @DomainEvents collection and publishes each event through the ApplicationEventPublisher — synchronously, on this thread." },
+        { "line": 6, "vars": { "transaction": "active", "@EventListener": "ran", "@TransactionalEventListener": "registered as a synchronization" }, "out": "inside tx: ORD-1",
+          "note": "A plain @EventListener runs right now, inside the transaction. A @TransactionalEventListener does not run: it registers itself to be called at the chosen phase of this transaction." },
+        { "line": 7, "vars": { "transaction": "active", "events held": "0" }, "out": "inside tx: ORD-1",
+          "note": "@AfterDomainEventPublication clears the aggregate's list so a second save does not republish." },
+        { "line": 8, "vars": { "transaction": "active", "declined": "false" }, "out": "inside tx: ORD-1",
+          "note": "Happy path first: no exception, the method returns normally." },
+        { "line": 10, "vars": { "transaction": "committed", "AFTER_COMMIT listener": "ran" }, "out": "inside tx: ORD-1\nafter commit: ORD-1",
+          "note": "The proxy commits; Spring's transaction synchronization fires AFTER_COMMIT and the second listener runs. It runs outside the transaction — any repository call it makes is a new one, and an exception here cannot undo the commit." },
+        { "line": 8, "vars": { "transaction": "active", "declined": "true", "events held": "0" }, "out": "inside tx: ORD-2",
+          "note": "Second run, ORD-2: the in-transaction listener has already run on an order that is about to vanish. Then the method throws." },
+        { "line": 11, "vars": { "transaction": "rolled back", "AFTER_COMMIT listener": "never called", "AFTER_ROLLBACK listener": "would run" }, "out": "inside tx: ORD-2",
+          "note": "Rollback: no insert was ever flushed, the AFTER_COMMIT synchronization is discarded. Only AFTER_ROLLBACK or AFTER_COMPLETION listeners would see this event. Side effects belong after commit — or in an outbox table written inside the transaction." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">When does each one run?</h3>
+
+  <div class="lm-card lm-match-wrap" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag each annotation onto the moment it fires, or click one then the other
+    </div>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Annotations to place">
+        <button type="button" class="lm-chip" data-chip="prepersist"><code>@PrePersist</code></button>
+        <button type="button" class="lm-chip" data-chip="eventlistener"><code>@EventListener</code></button>
+        <button type="button" class="lm-chip" data-chip="txlistener"><code>@TransactionalEventListener</code> (AFTER_COMMIT)</button>
+        <button type="button" class="lm-chip" data-chip="lastmodified"><code>@LastModifiedDate</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Moments">
+        <button type="button" class="lm-slot" data-slot="prepersist" data-label="just before the insert statement"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">just before the insert statement, on first persist</span></button>
+        <button type="button" class="lm-slot" data-slot="eventlistener" data-label="synchronously when save() publishes, inside the transaction"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">synchronously when <code>save()</code> publishes, inside the transaction</span></button>
+        <button type="button" class="lm-slot" data-slot="txlistener" data-label="after the commit, with no transaction active"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">after the commit, with no transaction active; never on rollback</span></button>
+        <button type="button" class="lm-slot" data-slot="lastmodified" data-label="when dirty checking is about to flush an update"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">when dirty checking is about to flush an update (<code>@PreUpdate</code> time)</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four. The two auditing stamps are JPA callbacks under the hood (<code>AuditingEntityListener</code> implements <code>@PrePersist</code> and <code>@PreUpdate</code>), so they fire at flush time, inside the transaction. The two event listeners differ only in <em>when</em>: one during publication, the other at a transaction phase. Choose the phase by asking "must this only happen if the data is really there?"</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The pieces, and the choices inside them</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Auditing and event building blocks</caption>
+      <thead><tr><th scope="col">Piece</th><th scope="col">What it does</th><th scope="col">Decide</th></tr></thead>
+      <tbody>
+        <tr><td><code>@EnableJpaAuditing</code></td><td>Registers the auditing handler; <code>auditorAwareRef</code> and <code>dateTimeProviderRef</code> name the beans to consult</td><td>One per application, on a configuration class</td></tr>
+        <tr><td><code>AuditorAware&lt;T&gt;</code></td><td>Supplies the current principal as <code>Optional&lt;T&gt;</code>; empty leaves <code>@CreatedBy</code> null</td><td><code>T</code> is a <code>String</code> username or a user entity (then the field is a <code>@ManyToOne</code>); read it from the security context, never pass it around</td></tr>
+        <tr><td><code>DateTimeProvider</code></td><td>Supplies the timestamp as a <code>TemporalAccessor</code>; defaults to <code>LocalDateTime.now()</code></td><td>Override it in tests and for a <code>Clock</code>-driven application; field types can be <code>Instant</code>, <code>LocalDateTime</code>, <code>ZonedDateTime</code>, <code>long</code>, <code>Date</code></td></tr>
+        <tr><td><code>@EntityListeners(AuditingEntityListener.class)</code></td><td>Hooks the handler into JPA's <code>@PrePersist</code>/<code>@PreUpdate</code></td><td>On a <code>@MappedSuperclass</code> every audited entity extends, so no entity forgets it</td></tr>
+        <tr><td><code>@PrePersist</code> … <code>@PostLoad</code></td><td>Plain JPA callbacks on the entity or an <code>@EntityListeners</code> class</td><td>For invariants and derived fields; keep them free of repository calls and Spring beans (a JPA listener is not a Spring bean unless you wire it so)</td></tr>
+        <tr><td><code>AbstractAggregateRoot</code> / <code>@DomainEvents</code></td><td>Holds events until the repository's <code>save</code>/<code>saveAll</code>/<code>delete</code> publishes them, then <code>@AfterDomainEventPublication</code> clears them</td><td>Events fire only through the repository — an <code>em.persist</code> bypasses them; publish from the aggregate's behaviour methods, not from services</td></tr>
+        <tr><td><code>@TransactionalEventListener</code></td><td>Runs at <code>AFTER_COMMIT</code> (default), <code>AFTER_ROLLBACK</code>, <code>AFTER_COMPLETION</code> or <code>BEFORE_COMMIT</code></td><td><code>fallbackExecution = true</code> runs it even with no transaction; an <code>AFTER_COMMIT</code> listener that writes to the database needs its own <code>@Transactional(propagation = REQUIRES_NEW)</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Event and auditing gotchas</div>
+      <ul class="mb-0">
+        <li><strong>An <code>AFTER_COMMIT</code> listener cannot write in the committed transaction.</strong> It runs with the transaction's resources still bound but the transaction finished; a repository call inside it joins a transaction that will never commit again, and the write is silently lost. Annotate the listener <code>@Transactional(propagation = Propagation.REQUIRES_NEW)</code>, or hand the work to a queue.</li>
+        <li><strong>Phase D is the e-mail bug.</strong> An <code>@EventListener</code> that sends "your order is confirmed" has sent it for ORD-2, which was rolled back. Anything with an external side effect belongs in <code>AFTER_COMMIT</code> — or, if it must not be lost when the process dies between commit and send, in an <strong>outbox</strong> row written inside the transaction and delivered by a separate poller. Spring Modulith's <code>@ApplicationModuleListener</code> packages that pattern.</li>
+        <li><strong><code>@Async</code> plus <code>@TransactionalEventListener</code> loses the context twice.</strong> The listener runs on another thread with no transaction and no security context; <code>AuditorAware</code> returns empty and lazy loading fails. Pass ids in the event, not entities.</li>
+        <li><strong>Events only fire through <code>save</code>.</strong> Dirty checking at commit writes the aggregate's changes without calling the repository, so a method that mutates an aggregate and registers an event but never calls <code>save</code> publishes nothing. Call <code>save</code> explicitly when you register events.</li>
+        <li><strong><code>@CreatedBy</code> is null when nobody is logged in.</strong> Batch jobs and startup runners have no principal; either an <code>AuditorAware</code> that falls back to <code>"system"</code>, or a nullable column with that meaning. Decide, then write it down.</li>
+        <li><strong>Auditing columns are not history.</strong> They say who touched the row last; for <em>what changed</em> and the previous values you need Hibernate Envers (<code>@Audited</code>, shadow <code>_aud</code> tables) or an explicit event log. Envers is not on this class path and is out of scope, but it is the right next tool.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-auditing-events-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In phase D the transaction rolls back after <code>save</code>, yet the output shows <code>inside tx: ORD-2</code> and no <code>insert</code> statement. Why both?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-auditing-events-1"><span>The insert ran and was undone by the rollback; <code>show-sql</code> only prints committed statements <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-auditing-events-1"><span><code>save</code> queued the insert for the flush at commit, which never came; the <code>@EventListener</code> ran synchronously during publication, before the exception, on an order that then never reached the database <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-auditing-events-1"><span>Domain events are published before <code>save</code> runs, so the listener cannot know whether the save succeeded <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-auditing-events-1"><span>The listener ran in a separate thread and finished before the rollback <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Two JPA facts combine: <code>persist</code> only schedules the insert (JPA §3, write-behind), and the sequence value was fetched eagerly for the id — which is why <code>select next value</code> appears and <code>insert</code> does not. Meanwhile the event was published the moment <code>save</code> returned, inside the transaction, and the plain listener acted on it.</p>
+        <p class="mb-0"><strong>A</strong>: <code>show-sql</code> prints every statement Hibernate executes, committed or not; none ran. <strong>C</strong>: publication happens <em>after</em> the delegate <code>save</code>, in the repository proxy. <strong>D</strong>: listeners are synchronous on the calling thread unless annotated <code>@Async</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-auditing-events-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>An <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code> receives <code>OrderPlaced</code> and calls <code>auditLog.save(new AuditEntry(…))</code>. No exception is thrown, but the audit table stays empty. What is wrong?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-auditing-events-2"><span>After-commit listeners cannot access repositories at all <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-auditing-events-2"><span>The event was cleared by <code>@AfterDomainEventPublication</code> before the listener ran <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-auditing-events-2"><span>The listener runs while the original transaction's resources are still bound but it has already committed; the save joins that finished transaction and is never flushed. It needs <code>@Transactional(propagation = REQUIRES_NEW)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-auditing-events-2"><span><code>AuditEntry</code> must extend <code>AbstractAggregateRoot</code> to be saved from a listener <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The documented trap: at <code>AFTER_COMMIT</code> the synchronization still runs within the scope of the completed transaction, so a plain <code>@Transactional</code> (REQUIRED) joins it and its work is discarded. <code>REQUIRES_NEW</code> opens a real second transaction.</p>
+        <p class="mb-0"><strong>A</strong>: they can, with a new transaction. <strong>B</strong>: clearing the aggregate's list does not affect an event already handed to the publisher. <strong>D</strong>: <code>AbstractAggregateRoot</code> is about publishing events, not about being saveable.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-auditing-events-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of the following are true of Spring Data auditing as configured in the worked example? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The stamps are set in JPA <code>@PrePersist</code>/<code>@PreUpdate</code> callbacks, so an <code>update</code> via a bulk JPQL <code>@Modifying</code> query does not touch <code>updatedAt</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>createdAt</code> is taken from the database clock, so it is consistent across application instances <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A <code>Product</code> loaded, modified and saved from a <code>@TransactionalEventListener(AFTER_COMMIT)</code> gets a fresh <code>updatedAt</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Replacing the <code>DateTimeProvider</code> bean is the supported way to make timestamps deterministic in tests <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Bulk JPQL updates bypass the persistence context and its callbacks (JPA §6), so audited columns must be set in the statement itself. And the provider bean is precisely the hook this program uses — the printed stamps are proof.</p>
+        <p class="mb-0"><strong>B</strong>: the timestamp comes from the application's <code>DateTimeProvider</code> (JVM clock by default), which is why clock skew between instances is a real concern and why some teams use a database default instead. <strong>C</strong>: the save would join the finished transaction and be lost, the trap in question 2 — with <code>REQUIRES_NEW</code> it would stamp correctly.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="auditing-events"> Mark this section complete
+  </label>
+</section>

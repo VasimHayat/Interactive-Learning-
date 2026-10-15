@@ -1,0 +1,63 @@
+<section class="lm-section" id="prerequisites" data-title="Prerequisites" data-num="ii">
+  <p class="lm-eyebrow">Before you begin</p>
+  <h2 class="mb-4">Prerequisites</h2>
+
+  <p>This module assumes <em>JPA &amp; Hibernate</em>, and through it the earlier modules. It does not re-teach mapping: when a section shows an entity, it reads as a reminder, not an introduction. Spring Data is a thin layer, and almost every surprise in it is a JPA fact wearing a Spring stack trace, so the items below are leaned on constantly:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Prerequisite skills, where they were taught, and what depends on them here</caption>
+      <thead>
+        <tr><th scope="col">You should already be able to…</th><th scope="col">Taught in</th><th scope="col">Because this module…</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Map an entity: <code>@Id</code>, a generation strategy, <code>@Column</code>, enums as strings, embeddables</td><td>JPA §2</td><td>declares entities without comment and spends its attention on the repository that wraps them (§1, §2)</td></tr>
+        <tr><td>Trace an entity through transient, managed and detached, and say when dirty checking writes</td><td>JPA §3</td><td>explains what <code>save</code> actually does — <code>persist</code> or <code>merge</code> — in terms of those states (§2)</td></tr>
+        <tr><td>Name the owning side of an association and keep both sides in sync</td><td>JPA §4</td><td>uses bidirectional <code>Order</code>/<code>OrderLine</code> in queries, projections and the lab without re-deriving why the foreign key is where it is (§6, L)</td></tr>
+        <tr><td>Recognise the N+1 problem from a statement count and fix it with a fetch join or an entity graph</td><td>JPA §5</td><td>shows the same problem through a repository method and the Spring-specific fix, <code>@EntityGraph</code> (§6)</td></tr>
+        <tr><td>Explain <code>@Version</code> and what <code>OptimisticLockException</code> means</td><td>JPA §7</td><td>relies on the version column for <code>save</code>'s new-or-not decision and for the exception translation table (§2, §10)</td></tr>
+        <tr><td>Say what each <code>hbm2ddl.auto</code> mode does to a live schema</td><td>JPA §10</td><td>maps those modes onto <code>spring.jpa.hibernate.ddl-auto</code> and Spring Boot's own defaults, which differ by database type (§1, §12)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">What you need installed</div>
+      <p class="mb-2">A JDK <strong>21 or newer</strong>, plus the Spring Boot jars — 61 of them once the transitive graph is resolved, which is why this module's dependency list is not pinned by hand but resolved by <strong>Maven</strong> against Spring Boot's bill of materials. If you are working from the course repository, one command does it (it needs a Maven on your <code>PATH</code>, in <code>MAVEN_HOME</code>, or in the Maven Wrapper's cache under <code>~/.m2/wrapper</code>):</p>
+      <pre data-code data-lang="bash" data-nobar>
+node tools/fetch-deps.mjs java-spring-data     # resolves Spring Boot 4.1.1's graph into build/lib/java-spring-data/
+javac -cp "build/lib/java-spring-data/*" -d classes BootAnatomy.java
+java  -cp "classes;build/lib/java-spring-data/*" lm.anatomy.BootAnatomy   # : instead of ; on Linux/macOS
+      </pre>
+      <p class="mb-2">In a project of your own, the same stack is three starters under the Spring Boot parent — the parent is what pins every version:</p>
+      <pre data-code data-lang="xml" data-nobar>
+&lt;parent&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+  &lt;version&gt;4.1.1&lt;/version&gt;
+&lt;/parent&gt;
+&lt;dependencies&gt;
+  &lt;dependency&gt;&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;&lt;artifactId&gt;spring-boot-starter-data-jpa&lt;/artifactId&gt;&lt;/dependency&gt;
+  &lt;dependency&gt;&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;&lt;artifactId&gt;spring-boot-starter-validation&lt;/artifactId&gt;&lt;/dependency&gt;
+  &lt;dependency&gt;&lt;groupId&gt;com.h2database&lt;/groupId&gt;&lt;artifactId&gt;h2&lt;/artifactId&gt;&lt;scope&gt;runtime&lt;/scope&gt;&lt;/dependency&gt;
+&lt;/dependencies&gt;
+      </pre>
+      <p class="mb-0 text-sm">No versions on the starters: the parent's <code>dependencyManagement</code> supplies them, and that is exactly the mechanism <code>fetch-deps</code> reproduces by importing <code>spring-boot-dependencies</code> as a BOM. Every program in this module names its own package (<code>lm.anatomy</code>, <code>lm.repos</code>, …) because Spring component-scans the package of the application class, and the build compiles all programs into one directory.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Three habits to unlearn</div>
+      <p class="mb-2">Spring Data removes so much code that it is easy to stop thinking about what the remaining code does. Three habits in particular survive every code review and fail in production:</p>
+      <ul class="mb-0">
+        <li><strong>"<code>@Transactional</code> on the method is enough."</strong> The annotation does nothing by itself; a <em>proxy</em> around the bean does the work, and a call that does not pass through the proxy — a private method, a method the same object calls on itself — gets no transaction at all. Section 5 proves it with a transaction-name check that prints <code>null</code>.</li>
+        <li><strong>"Lazy loading just works in Spring."</strong> It works in a web request because <em>open-in-view</em> keeps a persistence context open from controller to template, which hides every N+1 behind a working page. Switch it off and the same code throws. Section 6 does exactly that.</li>
+        <li><strong>"<code>ddl-auto=update</code> keeps the schema in sync."</strong> Spring Boot defaults it to <code>create-drop</code> for an embedded database and <code>none</code> otherwise, and the JPA module already explained why <code>update</code> is a development convenience and never a deployment. Section 12 shows where Flyway slots in.</li>
+      </ul>
+    </div>
+  </div>
+</section>

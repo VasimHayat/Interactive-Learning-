@@ -1,0 +1,381 @@
+<section class="lm-section" id="threads" data-title="Threads, stacks and the shared heap" data-num="1">
+  <p class="lm-eyebrow">Section 1</p>
+  <h2 class="mb-4">Threads, stacks and the shared heap</h2>
+
+  <p>A thread is the unit the operating system schedules: a <strong>program counter</strong> that says which instruction runs next, a set of <strong>registers</strong>, and a <strong>stack</strong> holding the frames of the methods it is currently inside — their parameters and local variables. Each thread has its own. What threads do <em>not</em> have their own copy of is the <strong>heap</strong>: every object, every field, every array element lives in one shared space that all threads of the process see. That split is the whole subject of this module. Locals are private and therefore safe; fields are shared and therefore need rules.</p>
+
+  <p>Picture the warehouse. Three pickers walking the aisles each carry their own clipboard — that is a stack. The stock board on the wall is the heap. Two pickers can write on their own clipboards all day without conflict; the moment both update the same line on the board, the number can be wrong, and nobody is told.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">What each thread owns versus what all threads share</caption>
+      <thead><tr><th scope="col">Per thread (private)</th><th scope="col">Per process (shared)</th></tr></thead>
+      <tbody>
+        <tr><td>Program counter — where this thread is in the code</td><td>The heap — every object and array, including <code>String</code>s and boxed values</td></tr>
+        <tr><td>The stack — one frame per active method call, holding parameters and locals</td><td><code>static</code> fields, which are heap data attached to a class</td></tr>
+        <tr><td>Registers, and whatever the JIT cached in them</td><td>Loaded classes, the constant pool, interned strings</td></tr>
+        <tr><td><code>ThreadLocal</code> values, the interrupt flag, the thread's name and daemon status</td><td>Open files, sockets, the process's memory limit</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>One consequence is worth stating plainly: a reference held in a local variable is private, but the <em>object it points to</em> is not. Two threads holding references to the same <code>ArrayList</code> are sharing it, however private the variables look.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Three ways to create a thread, a daemon, an interruption, and a demonstration that recursion on one thread cannot disturb another. Note what the program prints: nothing until every thread has been <code>join</code>ed, and then only facts whose value does not depend on which thread ran first.</p>
+
+  <pre data-code data-lang="java" data-file="ThreadBasics.java" data-verify="ThreadBasics" data-hi="24,25,26,38,46">
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class ThreadBasics {
+    // shared heap: every thread sees the same list, so it must be a thread-safe one
+    static final List<String> results = Collections.synchronizedList(new ArrayList<>());
+    static volatile boolean flagRestored;
+
+    // each call lives in a frame on the CALLING thread's stack: three threads can
+    // recurse through this at once and n never interferes between them
+    static int depth(int n) {
+        if (n == 0) return 0;
+        return 1 + depth(n - 1);
+    }
+
+    static class Picker extends Thread {                               // 1. subclass Thread
+        private final String sku;
+        Picker(String sku) { super("picker-" + sku); this.sku = sku; }
+        @Override public void run() { results.add(sku + " depth=" + depth(500)); }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread a = new Picker("BOLT-7");
+        Thread b = new Thread(() -> results.add("NUT-3 depth=" + depth(700)), "picker-NUT-3");   // 2. Runnable
+        Thread c = Thread.ofPlatform().name("picker-CAM-9")                                       // 3. builder (Java 21)
+                         .start(() -> results.add("CAM-9 depth=" + depth(900)));              //    already started
+
+        Thread housekeeping = new Thread(() -> {
+            while (true) { try { Thread.sleep(50); } catch (InterruptedException e) { return; } }
+        }, "housekeeping");
+        housekeeping.setDaemon(true);          // a daemon does not keep the JVM alive
+        housekeeping.start();
+
+        Thread sleeper = new Thread(() -> {
+            try { Thread.sleep(10_000); }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();                    // restore the flag for whoever is above us
+                flagRestored = Thread.currentThread().isInterrupted();
+            }
+        }, "sleeper");
+        sleeper.start();
+        sleeper.interrupt();                   // cooperative: sleep throws, the loop above decides what to do
+
+        a.start(); b.start();
+        a.join(); b.join(); c.join(); sleeper.join();                  // nothing below runs until all four have finished
+
+        List<String> sorted = new ArrayList<>(results);
+        Collections.sort(sorted);
+        System.out.println("all joined           : " + (!a.isAlive() && !b.isAlive() && !c.isAlive()));
+        System.out.println("results (sorted)     : " + sorted);
+        System.out.println("states after join    : " + a.getState() + " " + b.getState() + " " + c.getState());
+        System.out.println("interrupt restored   : " + flagRestored);
+        System.out.println("daemon still running : " + housekeeping.isAlive() + " (the JVM exits regardless)");
+        System.out.println("this thread          : " + Thread.currentThread().getName());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ThreadBasics">
+all joined           : true
+results (sorted)     : [BOLT-7 depth=500, CAM-9 depth=900, NUT-3 depth=700]
+states after join    : TERMINATED TERMINATED TERMINATED
+interrupt restored   : true
+daemon still running : true (the JVM exits regardless)
+this thread          : main
+  </pre>
+
+  <p>Four things to take from it:</p>
+  <ul class="max-w-prose">
+    <li><strong>Subclassing <code>Thread</code> is the oldest form and the worst.</strong> It couples the <em>work</em> to the <em>worker</em>. Pass a <code>Runnable</code> (or, from §5 on, submit it to a pool) so the same task can run on any thread. The Java 21 builder <code>Thread.ofPlatform()</code> is the modern spelling and has a sibling, <code>ofVirtual()</code>, in §7.</li>
+    <li><strong><code>start()</code> creates the thread; <code>run()</code> does not.</strong> Calling <code>a.run()</code> directly would execute the picker's code on <code>main</code>, sequentially, with no second thread at all — a mistake that compiles and "works".</li>
+    <li><strong><code>join()</code> is how a thread waits for another to finish.</strong> It is also a memory barrier: after it returns you are guaranteed to see everything the joined thread wrote (§2). That is why the results are read only after the joins.</li>
+    <li><strong>The daemon is still alive when <code>main</code> ends, and the JVM exits anyway.</strong> The JVM shuts down when the last <em>non-daemon</em> thread finishes. Forget <code>setDaemon(true)</code> on a background loop and your program never exits; set it on a thread doing real work and that work is cut off mid-write.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Thread states</h3>
+
+  <p>A thread is always in exactly one of six states, and <code>Thread.getState()</code> reports it. The names matter because they are what a thread dump shows you when something is stuck.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The six thread states, how a thread enters each, and what a dump shows</caption>
+      <thead><tr><th scope="col">State</th><th scope="col">Meaning</th><th scope="col">How you get there</th></tr></thead>
+      <tbody>
+        <tr><td><code>NEW</code></td><td>Created, not yet started</td><td><code>new Thread(…)</code> before <code>start()</code></td></tr>
+        <tr><td><code>RUNNABLE</code></td><td>Running, or ready and waiting for a core</td><td><code>start()</code>; the OS decides when it actually runs</td></tr>
+        <tr><td><code>BLOCKED</code></td><td>Waiting to enter a <code>synchronized</code> block another thread holds</td><td>Contended monitor (§3). The classic sign of lock contention in a dump</td></tr>
+        <tr><td><code>WAITING</code></td><td>Waiting indefinitely for another thread to act</td><td><code>Object.wait()</code>, <code>Thread.join()</code>, <code>LockSupport.park()</code> — most idle pool workers sit here</td></tr>
+        <tr><td><code>TIMED_WAITING</code></td><td>Waiting with a deadline</td><td><code>Thread.sleep(ms)</code>, <code>wait(ms)</code>, <code>join(ms)</code>, <code>tryLock(timeout)</code></td></tr>
+        <tr><td><code>TERMINATED</code></td><td><code>run()</code> returned or threw</td><td>Cannot be restarted: a second <code>start()</code> throws <code>IllegalThreadStateException</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3"><code>count++</code> is three operations</h3>
+
+  <p>The compiler turns <code>count++</code> on a field into a load from the heap into a register, an add, and a store back. Between any two of those steps the scheduler can switch to another thread, which does the same three steps on the same field. Step through two threads incrementing once each and watch one increment disappear.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of two threads incrementing one field">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">A lost update</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="interleaving"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Heap and registers</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="interleaving">
+    {
+      "lang": "java",
+      "code": "static int count = 0;              // shared, on the heap\n\n// Thread A                        // Thread B\nint rA = count;      // load        int rB = count;      // load\nrA = rA + 1;         // add         rB = rB + 1;         // add\ncount = rA;          // store       count = rB;          // store\n\n// both threads ran count++ once",
+      "steps": [
+        { "line": 1, "vars": { "count (heap)": "0", "rA": "—", "rB": "—" }, "out": "",
+          "note": "One field on the heap, read and written by two threads. rA and rB are registers: private to each thread, invisible to the other." },
+        { "line": 4, "vars": { "count (heap)": "0", "rA": "0", "rB": "—", "running": "A" }, "out": "",
+          "note": "Thread A loads count into its register. It now holds a private copy of 0." },
+        { "line": 4, "vars": { "count (heap)": "0", "rA": "0", "rB": "0", "running": "B (A was pre-empted)" }, "out": "",
+          "note": "The scheduler switches to B before A can store. B loads count — still 0, because A has not written anything back yet." },
+        { "line": 5, "vars": { "count (heap)": "0", "rA": "1", "rB": "0", "running": "A" }, "out": "",
+          "note": "A gets the core back and adds one to its register. The heap is untouched." },
+        { "line": 6, "vars": { "count (heap)": "1", "rA": "1", "rB": "0", "running": "A" }, "out": "",
+          "note": "A stores 1. From the heap's point of view, one increment has happened. Correct so far." },
+        { "line": 5, "vars": { "count (heap)": "1", "rA": "1", "rB": "1", "running": "B" }, "out": "",
+          "note": "B adds one to ITS register, which still holds the stale 0 it loaded in step 3. B has no way to know the heap moved on." },
+        { "line": 6, "vars": { "count (heap)": "1", "rA": "1", "rB": "1", "running": "B" }, "out": "count = 1",
+          "note": "B stores 1 over A's 1. Two increments, final value 1. A's work is gone, silently: no exception, no warning, no log line." },
+        { "line": 8, "vars": { "count (heap)": "1", "should be": "2", "lost": "1" }, "out": "count = 1",
+          "note": "The fix is to make load-add-store indivisible: a synchronized block (§3) so B cannot load until A has stored, or an AtomicInteger (§4) whose incrementAndGet is a single CPU instruction." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Seeing it happen for real</h3>
+
+  <p>Four pickers each increment a plain <code>int</code> a million times, and in parallel an <code>AtomicInteger</code> the same number of times. A <code>CountDownLatch</code> holds all four at a start line so they genuinely run together. The program prints the <em>comparison</em>, not the number: the number is different on every run and every machine, which is itself the lesson.</p>
+
+  <pre data-code data-lang="java" data-file="LostUpdate.java" data-verify="LostUpdate" data-bad="16" data-hi="17">
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class LostUpdate {
+    static int plain;                                   // plain++ is load, add, store: three steps
+    static final AtomicInteger atomic = new AtomicInteger();
+    static final int PICKERS = 4, PER_PICKER = 1_000_000;
+
+    public static void main(String[] args) throws InterruptedException {
+        CountDownLatch go = new CountDownLatch(1);      // a start gate, so all four run at once
+        Thread[] pickers = new Thread[PICKERS];
+        for (int t = 0; t < PICKERS; t++) {
+            pickers[t] = new Thread(() -> {
+                try { go.await(); } catch (InterruptedException e) { return; }
+                for (int i = 0; i < PER_PICKER; i++) {
+                    plain++;                            // RACE: another thread can store between our load and our store
+                    atomic.incrementAndGet();           // one indivisible read-modify-write
+                }
+            }, "picker-" + t);
+            pickers[t].start();
+        }
+        go.countDown();
+        for (Thread p : pickers) p.join();
+
+        int expected = PICKERS * PER_PICKER;
+        System.out.println("expected               : " + expected);
+        System.out.println("plain int lost updates : " + (plain < expected));
+        System.out.println("AtomicInteger exact    : " + (atomic.get() == expected));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="LostUpdate">
+expected               : 4000000
+plain int lost updates : true
+AtomicInteger exact    : true
+  </pre>
+
+  <p>Run it yourself and print <code>plain</code>: you will typically see somewhere between one and three million, different every time. Nothing about the program is random. The variation is the scheduler, and a program whose answer depends on the scheduler has a <strong>race condition</strong>.</p>
+
+  <h3 class="mt-8 mb-3">Explore the race</h3>
+
+  <div class="lm-card" data-sandbox="race-simulator">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      How many increments survive?
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <p class="text-sm text-ink-muted">A seeded scheduler runs each thread for a random slice of load / add / store steps before switching. Every switch that lands between a load and its store costs an increment. This is a model of the race, not a JVM; press <em>Run again</em> for a different interleaving.</p>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Threads <span class="lm-readout" data-sb-threadsout>4</span></span>
+        <input type="range" data-sb-threads min="2" max="8" value="4" step="1">
+      </label>
+      <label class="lm-field grow">
+        <span>Increments per thread <span class="lm-readout" data-sb-incout>200</span></span>
+        <input type="range" data-sb-inc min="1" max="1000" value="200" step="1">
+      </label>
+      <label class="lm-check"><input type="checkbox" data-sb-sync> <code>synchronized</code> increment</label>
+      <button type="button" class="lm-btn" data-sb-again>Run again</button>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Stopping a thread: interruption is a request</h3>
+
+  <p>There is no safe way to kill a thread from outside; <code>Thread.stop()</code> was removed in Java 20 because it left locks and data in whatever state they happened to be in. What exists instead is a flag. <code>t.interrupt()</code> sets it; the target thread checks it, or is woken from a blocking call by <code>InterruptedException</code>, and decides for itself how to stop cleanly. Three rules keep this cooperative scheme working:</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Handling interruption">
+      <button type="button" class="lm-tab" role="tab" id="tab-threads-poll" aria-controls="panel-threads-poll" aria-selected="true" tabindex="0">Poll the flag</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-threads-restore" aria-controls="panel-threads-restore" aria-selected="false" tabindex="-1">Restore it</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-threads-swallow" aria-controls="panel-threads-swallow" aria-selected="false" tabindex="-1">Never swallow it</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-threads-poll" aria-labelledby="tab-threads-poll" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+// a loop that does not block must check the flag itself
+while (!Thread.currentThread().isInterrupted()) {
+    pickNextOrder();                 // CPU work, no sleeping or waiting
+}
+// fall out of the loop: release resources, return normally
+      </pre>
+      <p class="mb-0"><code>isInterrupted()</code> reads the flag and leaves it set. The static <code>Thread.interrupted()</code> reads <em>and clears</em> it, which is almost never what you want in a loop condition.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-threads-restore" aria-labelledby="tab-threads-restore" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// a blocking call throws InterruptedException AND CLEARS THE FLAG
+try {
+    queue.take();                    // or sleep(), join(), wait(), Future.get()
+} catch (InterruptedException e) {
+    Thread.currentThread().interrupt();   // put the flag back for the code that called us
+    return;                               // then stop what we were doing
+}
+      </pre>
+      <p class="mb-0">If you cannot propagate the exception (because a <code>Runnable</code> cannot throw it), restoring the flag is how the next layer up — a pool worker, a loop — finds out it was asked to stop. This is exactly what the <code>sleeper</code> thread in the worked example does.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-threads-swallow" aria-labelledby="tab-threads-swallow" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar data-bad="3">
+try {
+    Thread.sleep(1_000);
+} catch (InterruptedException e) { }    // the interruption is now lost forever
+      </pre>
+      <p class="mb-0">The empty catch is the single most common concurrency bug an IDE will write for you. The flag was cleared by <code>sleep</code>, you threw the exception away, and the thread that asked you to stop will wait for you indefinitely. At minimum, restore the flag.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Reading a thread dump</h3>
+
+  <p>When a service hangs, the first diagnostic is a thread dump: <code>jstack &lt;pid&gt;</code>, or <code>jcmd &lt;pid&gt; Thread.print</code>, or <kbd>Ctrl</kbd>+<kbd>Break</kbd> on Windows and <code>kill -3</code> elsewhere. It lists every thread, its state, and its stack. Here are two entries from a stuck warehouse, annotated:</p>
+
+  <pre data-code data-lang="plain" data-nobar data-hi="2,4" data-bad="9">
+"picker-BOLT-7" #23 prio=5 os_prio=0 cpu=12.50ms elapsed=0.31s tid=0x... nid=0x1f2c waiting for monitor entry
+   java.lang.Thread.State: BLOCKED (on object monitor)
+        at InventoryService.reserve(InventoryService.java:41)
+        - waiting to lock <0x000000071a2b3c40> (a java.lang.Object)
+        at Picker.run(Picker.java:18)
+
+"picker-NUT-3" #24 prio=5 os_prio=0 cpu=15.00ms elapsed=0.31s tid=0x... nid=0x1f2d runnable
+   java.lang.Thread.State: RUNNABLE
+        at java.net.SocketInputStream.socketRead0(Native Method)     <- reading from a socket while HOLDING the lock
+        - locked <0x000000071a2b3c40> (a java.lang.Object)
+        at InventoryService.reserve(InventoryService.java:44)
+        at Picker.run(Picker.java:18)
+  </pre>
+
+  <p>Read it bottom-up per thread, and look for the same monitor address in a <code>waiting to lock</code> line and a <code>locked</code> line. Here <code>picker-NUT-3</code> holds monitor <code>0x…3c40</code> while doing network I/O, and <code>picker-BOLT-7</code> is <code>BLOCKED</code> waiting for it. One slow socket has serialised every picker in the building. The fix is in §3: never hold a lock across I/O. A dump with many threads <code>BLOCKED</code> on one address is contention; two threads each <code>waiting to lock</code> what the other has <code>locked</code> is deadlock, and modern dumps print <code>Found one Java-level deadlock</code> at the bottom to save you the search.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Thread gotchas</div>
+      <ul class="mb-0">
+        <li><strong>An exception in a thread kills only that thread.</strong> <code>run()</code> throwing an unchecked exception prints a stack trace to stderr and the thread dies; <code>main</code> never hears about it and the JVM carries on. Install <code>Thread.setDefaultUncaughtExceptionHandler</code> to log and alert, and prefer executors (§5), whose <code>Future</code> captures the exception for you.</li>
+        <li><strong><code>ThreadLocal</code> leaks in pools.</strong> A value set on a pool thread stays on it after the task ends, and the next task — possibly a different user's request — inherits it. Always <code>remove()</code> in a <code>finally</code>. Java 21 adds <code>ScopedValue</code> (preview) for exactly this reason.</li>
+        <li><strong>Priorities are hints the OS may ignore.</strong> <code>setPriority</code> does nothing on most Linux configurations. Code that relies on a high-priority thread running first is wrong on the machine it will be deployed to.</li>
+        <li><strong><code>sleep</code> and <code>wait</code> are not the same kind of thing.</strong> <code>Thread.sleep</code> pauses and holds any locks it owns. <code>Object.wait</code> <em>releases</em> the monitor it is called on and must be called inside <code>synchronized</code> — it is a signalling primitive (§3), not a delay.</li>
+        <li><strong>Platform threads are expensive.</strong> Each reserves roughly a megabyte of stack and costs a kernel call to create and to switch. Creating one per request works until the first busy day; §5 and §7 are the answers.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-threads-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A colleague replaces <code>picker.start()</code> with <code>picker.run()</code> "because it's clearer". The program still prints the right results. What actually changed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-threads-1"><span>Nothing — <code>run()</code> starts the thread too, it just does not return until it finishes <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-threads-1"><span>No new thread exists; the picker's code ran on the calling thread, sequentially <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-threads-1"><span>The thread started, but in the <code>NEW</code> state, so it cannot be joined <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-threads-1"><span>It throws <code>IllegalThreadStateException</code> because the thread was never started <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>run()</code> is an ordinary method; calling it executes the body on whichever thread called it. Only <code>start()</code> asks the OS for a new thread and then invokes <code>run()</code> on it. The results are correct because the work still happened — just with no concurrency, which is why this mistake survives code review.</p>
+        <p class="mb-0"><strong>A</strong> is the misconception exactly. <strong>C</strong>: the thread object stays <code>NEW</code> because it never started; <code>join()</code> on a <code>NEW</code> thread simply returns immediately. <strong>D</strong>: that exception comes from calling <code>start()</code> twice, not from calling <code>run()</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-threads-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>In the worked example, the <code>sleeper</code>'s catch block calls <code>Thread.currentThread().interrupt()</code> after catching <code>InterruptedException</code>. Why is that necessary?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-threads-2"><span>To interrupt the thread that called <code>sleeper.interrupt()</code> in return <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-threads-2"><span>To make <code>sleep</code> throw again on the next loop iteration <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-threads-2"><span>Because <code>sleep</code> cleared the interrupt flag when it threw; restoring it lets callers further up the stack see that an interruption happened <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-threads-2"><span>It is required or the thread cannot terminate <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Blocking methods clear the flag as they throw. If the catch block cannot propagate the exception — a <code>Runnable</code> cannot — re-setting the flag is the only way a pool worker or an outer loop can learn that the thread was asked to stop.</p>
+        <p class="mb-0"><strong>A</strong>: <code>interrupt()</code> is called on the <em>current</em> thread, not on the interrupter. <strong>B</strong> would be true of a loop that slept again, but the point is the opposite — to stop, not to keep throwing. <strong>D</strong>: a thread terminates when <code>run()</code> returns, flag or no flag.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-threads-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>main</code> has returned. Which of these threads keep the JVM running? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A thread created with <code>new Thread(r)</code>, started, currently in <code>Thread.sleep(60_000)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A thread with <code>setDaemon(true)</code> in an infinite loop <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A thread from <code>Thread.ofPlatform().start(r)</code> blocked in <code>queue.take()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A virtual thread from <code>Thread.ofVirtual().start(r)</code> blocked in <code>queue.take()</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> The JVM exits when the last non-daemon thread ends, and a thread's state — sleeping, blocked, running — is irrelevant to that rule. Both A and C are ordinary platform threads, non-daemon by default, so each alone keeps the process alive, possibly forever.</p>
+        <p class="mb-0"><strong>B</strong> is a daemon: the JVM abandons it at exit, loop or no loop. <strong>D</strong>: virtual threads are <em>always</em> daemon threads (§7), so a program whose only remaining work is on virtual threads exits — a surprise the first time it happens.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="threads"> Mark this section complete
+  </label>
+</section>

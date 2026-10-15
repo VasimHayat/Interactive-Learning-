@@ -1,0 +1,414 @@
+<section class="lm-section" id="classloading" data-title="Class loading, linking and initialization" data-num="10">
+  <p class="lm-eyebrow">Section 10</p>
+  <h2 class="mb-4">Class loading, linking and initialization</h2>
+
+  <p>Fundamentals §1 said the JVM "loads" a class the first time it is needed. That one word hides three phases with different timing, different failure modes and different rules, and the gaps between them are where some of Java's most confusing errors live: a class that is found but not usable, a static field that reads as zero, a <code>NoClassDefFoundError</code> for a class that is plainly on the class path.</p>
+
+  <p>The three phases are <strong>loading</strong> (find the bytes, parse them, create a <code>Class</code> object), <strong>linking</strong> (verify the bytecode is well-formed and safe, prepare static fields with their default values, optionally resolve symbolic references), and <strong>initialization</strong> (run the static initializers, in order). Loading and linking happen when a class is first <em>referenced</em>; initialization is deferred until the class is first <em>actively used</em> — and the JLS lists exactly what counts as active use.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The triggers of class initialization</caption>
+      <thead><tr><th scope="col">Initialization is triggered by (JLS §12.4.1)</th><th scope="col">Not triggered by</th></tr></thead>
+      <tbody>
+        <tr><td>Creating an instance with <code>new</code></td><td>Referencing the class literal <code>Foo.class</code></td></tr>
+        <tr><td>Invoking a static method</td><td>Loading via <code>ClassLoader.loadClass</code></td></tr>
+        <tr><td>Assigning or reading a static field that is <em>not</em> a compile-time constant</td><td>Reading a <code>static final</code> compile-time constant (javac inlined it)</td></tr>
+        <tr><td><code>Class.forName(name)</code> (its default is <code>initialize = true</code>)</td><td><code>Class.forName(name, false, loader)</code></td></tr>
+        <tr><td>Initializing a subclass (the superclass goes first)</td><td>Initializing a class that <em>implements</em> an interface (the interface stays uninitialized unless it has default methods)</td></tr>
+        <tr><td>Being the class that holds <code>main</code></td><td>Declaring an array of the type: <code>Foo[] a = new Foo[8]</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example: when static initializers run</h3>
+
+  <p>Every static block here prints when it runs. Read the output against the triggers above; the ordering is specified, not accidental.</p>
+
+  <pre data-code data-lang="java" data-file="ClassInit.java" data-verify="ClassInit">
+public class ClassInit {
+
+    static int trace(String what, int value) {
+        System.out.println("  init: " + what);
+        return value;
+    }
+
+    static class Base {
+        static int counter = trace("Base.counter", 1);
+        static { trace("Base static block", 0); }
+    }
+
+    static class Derived extends Base {
+        static int level = trace("Derived.level", 2);
+        static { trace("Derived static block", 0); }
+    }
+
+    static class Lazy {
+        static { trace("Lazy static block", 0); }
+        static final int SIZE = 8;                 // compile-time constant: inlined by javac
+        static int size = 8;                       // a real static field
+    }
+
+    static class ViaName {
+        static { trace("ViaName static block", 0); }
+    }
+
+    static class Holder {
+        static { trace("Holder static block", 0); }
+        static final Object INSTANCE = new Object();
+    }
+
+    interface Config {
+        int LIMIT = trace("Config.LIMIT", 10);     // not a constant: initialised on first use
+    }
+
+    static class Trap {
+        static int first = Trap.second + 1;        // qualified name: legal, reads the DEFAULT 0
+        static int second = 5;
+    }
+
+    static class Broken {
+        static int value = 1 / zero();
+        static int zero() { return 0; }
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("-- a compile-time constant does not initialise its class --");
+        System.out.println("Lazy.SIZE = " + Lazy.SIZE);
+        System.out.println("Lazy.size = " + Lazy.size);
+
+        System.out.println("-- superclass first, then subclass, textual order within each --");
+        System.out.println("Derived.level = " + Derived.level);
+
+        System.out.println("-- loadClass loads but does not initialise; Class.forName does --");
+        ClassLoader app = ClassInit.class.getClassLoader();
+        Class<?> loaded = app.loadClass("ClassInit$ViaName");
+        System.out.println("loaded " + loaded.getSimpleName() + ", nothing printed yet");
+        Class.forName("ClassInit$ViaName", false, app);
+        System.out.println("forName(init=false): still nothing");
+        Class.forName("ClassInit$ViaName");
+        System.out.println("forName(): initialised");
+
+        System.out.println("-- the holder idiom: lazy, thread-safe, no locks --");
+        System.out.println("about to touch Holder.INSTANCE");
+        Object o = Holder.INSTANCE;
+        System.out.println("got instance: " + (o != null));
+
+        System.out.println("-- an interface initialises when a non-constant field is read --");
+        System.out.println("Config.LIMIT = " + Config.LIMIT);
+
+        System.out.println("-- forward reference: a static reads a later static's default --");
+        System.out.println("Trap.first = " + Trap.first + ", Trap.second = " + Trap.second);
+
+        System.out.println("-- a failing initialiser: two different errors --");
+        try {
+            System.out.println(Broken.value);
+        } catch (ExceptionInInitializerError e) {
+            System.out.println("first use : " + e.getClass().getSimpleName()
+                    + " caused by " + e.getCause().getClass().getSimpleName());
+        }
+        try {
+            System.out.println(Broken.value);
+        } catch (NoClassDefFoundError e) {
+            System.out.println("second use: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ClassInit">
+-- a compile-time constant does not initialise its class --
+Lazy.SIZE = 8
+  init: Lazy static block
+Lazy.size = 8
+-- superclass first, then subclass, textual order within each --
+  init: Base.counter
+  init: Base static block
+  init: Derived.level
+  init: Derived static block
+Derived.level = 2
+-- loadClass loads but does not initialise; Class.forName does --
+loaded ViaName, nothing printed yet
+forName(init=false): still nothing
+  init: ViaName static block
+forName(): initialised
+-- the holder idiom: lazy, thread-safe, no locks --
+about to touch Holder.INSTANCE
+  init: Holder static block
+got instance: true
+-- an interface initialises when a non-constant field is read --
+  init: Config.LIMIT
+Config.LIMIT = 10
+-- forward reference: a static reads a later static's default --
+Trap.first = 1, Trap.second = 5
+-- a failing initialiser: two different errors --
+first use : ExceptionInInitializerError caused by ArithmeticException
+second use: NoClassDefFoundError: Could not initialize class ClassInit$Broken
+  </pre>
+
+  <p>Six facts, one per block of output:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>Lazy.SIZE</code> printed without initializing <code>Lazy</code>.</strong> <code>static final int SIZE = 8</code> is a compile-time constant, so javac copied the literal <code>8</code> into <code>main</code>'s bytecode; at runtime <code>Lazy</code> is never consulted. This is also why changing a constant in a library and not recompiling its users leaves them with the old value.</li>
+    <li><strong>Superclass before subclass, and textual order within a class.</strong> Field initializers and static blocks are one sequence, executed top to bottom.</li>
+    <li><strong><code>loadClass</code> and <code>forName(…, false, …)</code> produce a <code>Class</code> object but run no code.</strong> Only the one-argument <code>Class.forName</code> initializes — which is why JDBC drivers historically registered themselves from a static block triggered by <code>Class.forName("com.vendor.Driver")</code>.</li>
+    <li><strong>The holder idiom is lazy initialization for free.</strong> <code>Holder</code> is not initialized until <code>INSTANCE</code> is read, the JVM guarantees initialization happens exactly once even under contention, and no lock is ever visible to you. It beats double-checked locking on every axis.</li>
+    <li><strong>The forward-reference trap.</strong> <code>first = second + 1</code> is a compile error, but <code>first = Trap.second + 1</code> is legal — and reads the default value <code>0</code> that linking's <em>prepare</em> step gave <code>second</code> before any initializer ran. The result is <code>1</code>, silently.</li>
+    <li><strong>A static initializer that throws poisons the class.</strong> The first use gets <code>ExceptionInInitializerError</code> wrapping the real cause. Every later use gets a bare <code>NoClassDefFoundError: Could not initialize class</code> with <em>no cause attached</em> — the class is marked erroneous forever in this JVM. When you see that message in a log, scroll up: the real exception was logged once, earlier, often at start-up.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Who loads what: the loader hierarchy</h3>
+
+  <p>A class loader is an object that turns a name into a <code>Class</code>. Since JDK 9 there are three built-in ones, arranged parent-first, and each is responsible for a set of modules:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The built-in class loaders</caption>
+      <thead><tr><th scope="col">Loader</th><th scope="col"><code>getName()</code></th><th scope="col">Loads</th><th scope="col">Parent</th></tr></thead>
+      <tbody>
+        <tr><td>Bootstrap</td><td>— (appears as <code>null</code>)</td><td><code>java.base</code> and the core modules: <code>String</code>, <code>Object</code>, collections</td><td>none</td></tr>
+        <tr><td>Platform</td><td><code>platform</code></td><td>The rest of the JDK: <code>java.sql</code>, <code>java.net.http</code>, <code>java.xml</code>…</td><td>bootstrap</td></tr>
+        <tr><td>Application (system)</td><td><code>app</code></td><td>Your class path and module path</td><td>platform</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The rule connecting them is <strong>parent delegation</strong>: a loader asked for a class first asks its parent, and only searches its own sources if every ancestor came back empty. The consequence is that <code>java.lang.String</code> is <em>always</em> the bootstrap loader's <code>String</code>, no matter what jar someone puts on the class path — you cannot replace core classes by shadowing them, which is a security property, not an inconvenience.</p>
+
+  <pre data-code data-lang="java" data-file="Loaders.java" data-verify="Loaders">
+import java.io.IOException;
+import java.io.InputStream;
+
+public class Loaders {
+
+    /* Follows standard delegation and, once every parent has given up,
+       refuses — so the fall-through is visible. */
+    static class Strict extends ClassLoader {
+        Strict(ClassLoader parent) { super(parent); }
+        @Override protected Class<?> findClass(String name) throws ClassNotFoundException {
+            System.out.println("  Strict.findClass(" + name + "): parents had no answer");
+            throw new ClassNotFoundException(name);
+        }
+    }
+
+    public static class Twin { public Twin() { } }   // public: the copy lives in a different runtime package
+
+    /* Child-first for one class: defines its own copy from the bytes on the
+       class path instead of asking its parent. */
+    static class ChildFirst extends ClassLoader {
+        ChildFirst(ClassLoader parent) { super(parent); }
+        @Override protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            if (name.equals("Loaders$Twin")) {
+                try (InputStream in = Loaders.class.getResourceAsStream("Loaders$Twin.class")) {
+                    byte[] bytes = in.readAllBytes();
+                    return defineClass(name, bytes, 0, bytes.length);
+                } catch (IOException e) {
+                    throw new ClassNotFoundException(name, e);
+                }
+            }
+            return super.loadClass(name, resolve);
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        ClassLoader app = Loaders.class.getClassLoader();
+        System.out.println("-- the built-in hierarchy --");
+        System.out.println("String's loader is bootstrap (null) : " + (String.class.getClassLoader() == null));
+        System.out.println("java.sql.Driver's loader           : " + java.sql.Driver.class.getClassLoader().getName());
+        System.out.println("Loaders' loader                    : " + app.getName());
+        System.out.println("its parent                         : " + app.getParent().getName());
+        System.out.println("the platform loader's parent       : " + app.getParent().getParent());
+
+        System.out.println("-- delegation: parents are asked first --");
+        Strict strict = new Strict(app);
+        Class<?> s = strict.loadClass("java.lang.String");
+        System.out.println("String via Strict is the same Class : " + (s == String.class));
+        Class<?> me = strict.loadClass("Loaders");
+        System.out.println("Loaders via Strict is the same Class: " + (me == Loaders.class)
+                + " (defined by " + me.getClassLoader().getName() + ")");
+        try {
+            strict.loadClass("com.acme.Missing");
+        } catch (ClassNotFoundException e) {
+            System.out.println("ClassNotFoundException: " + e.getMessage());
+        }
+
+        System.out.println("-- identity is (loader, name): the same bytes loaded twice --");
+        Class<?> twin2 = new ChildFirst(app).loadClass("Loaders$Twin");
+        System.out.println("same name      : " + twin2.getName().equals(Twin.class.getName()));
+        System.out.println("same Class     : " + (twin2 == Twin.class));
+        Object copy = twin2.getDeclaredConstructor().newInstance();
+        System.out.println("instanceof Twin: " + (copy instanceof Twin));
+        System.out.println("named module   : " + Loaders.class.getModule().isNamed()
+                + "; String lives in " + String.class.getModule().getName());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Loaders">
+-- the built-in hierarchy --
+String's loader is bootstrap (null) : true
+java.sql.Driver's loader           : platform
+Loaders' loader                    : app
+its parent                         : platform
+the platform loader's parent       : null
+-- delegation: parents are asked first --
+String via Strict is the same Class : true
+Loaders via Strict is the same Class: true (defined by app)
+  Strict.findClass(com.acme.Missing): parents had no answer
+ClassNotFoundException: com.acme.Missing
+-- identity is (loader, name): the same bytes loaded twice --
+same name      : true
+same Class     : false
+instanceof Twin: false
+named module   : false; String lives in java.base
+  </pre>
+
+  <p>The last block is the one to remember. <code>ChildFirst</code> read the <em>same</em> <code>.class</code> bytes the application loader had already used and defined them again. The result is a second, unrelated <code>Class</code> object with the same name: a <code>Twin</code> from one loader is not <code>instanceof</code> the <code>Twin</code> from the other, and a cast between them throws <code>ClassCastException</code> with the baffling message "<code>Loaders$Twin cannot be cast to Loaders$Twin</code>". A class's identity is the pair <strong>(defining loader, binary name)</strong>, not the name alone. Application servers and plugin systems exploit this deliberately — a child-first loader per deployment lets two web apps ship different versions of the same library — and it is also why they leak: a loader stays alive as long as any of its classes is reachable, and with it every class it defined and all of their statics.</p>
+
+  <h3 class="mt-8 mb-3">Watch delegation resolve a request</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of parent-delegating class loading">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">loadClass("com.acme.Picker")</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">ClassLoader.loadClass, simplified</div>
+        <div data-stepper-code data-for="loader-delegation"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Loaders currently asked (top = active)</div>
+        <div class="lm-mem" data-stepper-stack></div>
+        <div class="lm-stepper-label mt-4">State</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="loader-delegation">
+    {
+      "lang": "java",
+      "code": "Class<?> c = appLoader.loadClass(\"com.acme.Picker\");\n\n// inside ClassLoader.loadClass(name):\nClass<?> c = findLoadedClass(name);          // already defined by me?\nif (c == null) {\n    if (parent != null) c = parent.loadClass(name);   // ask up the chain\n    else                c = findBootstrapClassOrNull(name);\n}\nif (c == null) c = findClass(name);           // only now: search my own sources",
+      "steps": [
+        { "line": 1, "stack": ["app"], "vars": { "request": "com.acme.Picker", "asked": "app" },
+          "note": "The application loader receives the request. It will not look at the class path yet — delegation comes first." },
+        { "line": 4, "stack": ["app"], "vars": { "request": "com.acme.Picker", "app cache": "miss" },
+          "note": "Every loader keeps a table of classes it has already defined. First time through, it is empty." },
+        { "line": 6, "stack": ["app", "platform"], "vars": { "request": "com.acme.Picker", "app cache": "miss", "delegated to": "platform" },
+          "note": "The app loader hands the request to its parent and waits. The platform loader runs the same code." },
+        { "line": 4, "stack": ["app", "platform"], "vars": { "request": "com.acme.Picker", "platform cache": "miss" },
+          "note": "The platform loader has never defined this class either." },
+        { "line": 7, "stack": ["app", "platform", "bootstrap"], "vars": { "request": "com.acme.Picker", "bootstrap knows": "java.base, java.logging, …", "result": "null" },
+          "note": "The platform loader's parent is the bootstrap loader, reached through a native call. It knows only the core modules. com.acme.Picker is not one of them: null." },
+        { "line": 9, "stack": ["app", "platform"], "vars": { "request": "com.acme.Picker", "platform modules": "java.sql, java.xml, …", "result": "ClassNotFoundException" },
+          "note": "Back in the platform loader, findClass searches its own modules. Nothing there. The exception propagates to the app loader, which catches it and treats it as 'parent had no answer'." },
+        { "line": 9, "stack": ["app"], "vars": { "request": "com.acme.Picker", "class path": "lib/inventory.jar", "found": "com/acme/Picker.class", "defineClass": "→ Class object" },
+          "note": "Only now does the app loader search the class path. It finds the bytes, calls defineClass, and the JVM creates the Class object — loaded and linked, not yet initialized." },
+        { "line": 1, "stack": ["app"], "vars": { "c.getClassLoader()": "app", "identity": "(app, com.acme.Picker)" },
+          "note": "The request returns. The class's identity is the pair (defining loader, name); the defining loader is the one whose findClass succeeded, not the one that was asked first." },
+        { "line": 4, "stack": ["app"], "vars": { "request": "com.acme.Picker (again)", "app cache": "HIT — same Class object" },
+          "note": "A second request for the same name never leaves the app loader: findLoadedClass returns the cached Class. One loader, one name, one Class — forever, until the loader itself is collected." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Two errors that look alike</h3>
+
+  <p>Both say a class could not be used. They mean opposite things about <em>when</em> it went wrong.</p>
+
+  <pre data-output data-label="Two different failures" data-variant="error">
+Exception in thread "main" java.lang.ClassNotFoundException: com.acme.Picker
+        at java.base/jdk.internal.loader.BuiltinClassLoader.loadClass(BuiltinClassLoader.java:641)
+        at java.base/java.lang.Class.forName0(Native Method)
+        at java.base/java.lang.Class.forName(Class.java:534)
+        at com.acme.Boot.main(Boot.java:12)
+
+Exception in thread "main" java.lang.NoClassDefFoundError: com/acme/Picker
+        at com.acme.Boot.main(Boot.java:12)
+Caused by: java.lang.ClassNotFoundException: com.acme.Picker
+        ... 1 more
+  </pre>
+
+  <ul class="max-w-prose">
+    <li><strong><code>ClassNotFoundException</code></strong> is a <em>checked exception</em> thrown by an explicit lookup by name — <code>Class.forName</code>, <code>loadClass</code>. The loader searched and found nothing. The fix is a class path or spelling fix.</li>
+    <li><strong><code>NoClassDefFoundError</code></strong> is an <em>error</em> thrown by the JVM itself when bytecode that <em>compiled against</em> a class cannot resolve it at runtime. Two causes, told apart by the message: with a <code>Caused by: ClassNotFoundException</code>, the class existed at compile time and is missing now — a dependency not shipped, a jar with the wrong version. With "<code>Could not initialize class</code>" and <em>no</em> cause, the class was found but its static initializer failed earlier; look for the <code>ExceptionInInitializerError</code> that preceded it.</li>
+  </ul>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Class-loading gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Classloader leaks eat Metaspace.</strong> A <code>ThreadLocal</code> set from a web app and never removed, a JDBC driver registered in the <code>DriverManager</code> (which lives in the platform loader), a shutdown hook, a static cache in a shared library keyed by an app's class — each pins the app's loader after undeployment. Redeploy ten times and the Metaspace OOM arrives. §9's table has the diagnostics.</li>
+        <li><strong>Static state is per loader, not per JVM.</strong> A "singleton" in a library loaded by two child-first loaders is two singletons. Logging frameworks and <code>DriverManager</code> have had decades of bugs from this.</li>
+        <li><strong>Initialization can deadlock.</strong> Two classes whose static initializers touch each other, initialized concurrently by two threads, each hold their own initialization lock while waiting for the other's. The JVM does not detect it; a thread dump shows both threads "in <code>&lt;clinit&gt;</code>". Keep static initializers free of cross-class calls.</li>
+        <li><strong>The verifier is not optional.</strong> <code>-Xverify:none</code> and <code>-noverify</code> are deprecated for removal because skipping verification lets malformed bytecode corrupt the JVM; the start-up time they saved is now negligible.</li>
+        <li><strong>Resolution is lazy too.</strong> A method call to a class that does not exist fails only when that line executes, not when the calling class loads — which is why a missing optional dependency can lurk until a rarely used feature is hit. <code>javap -v</code> shows the constant pool entries that will be resolved.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-classloading-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Class <code>Prices</code> has a static block that prints "loaded". Which of these lines prints it?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-classloading-1"><span><code>Class&lt;?&gt; c = Prices.class;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-classloading-1"><span><code>int n = Prices.count;</code> where <code>count</code> is <code>static int count = 0;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-classloading-1"><span><code>int n = Prices.MAX;</code> where <code>MAX</code> is <code>static final int MAX = 100;</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-classloading-1"><span><code>Prices[] all = new Prices[4];</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Reading a static field that is not a compile-time constant is active use, and the class is initialized first — even though <code>count</code> is zero and the read looks trivial.</p>
+        <p class="mb-0"><strong>A</strong> loads the class (the literal needs a <code>Class</code> object) but does not initialize it. <strong>C</strong> never touches <code>Prices</code> at runtime: javac inlined <code>100</code>. <strong>D</strong> creates an array object whose element type is <code>Prices</code>; the array class is loaded, <code>Prices</code> is not initialized until an element is constructed.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-classloading-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A plugin system loads each plugin with its own child-first <code>URLClassLoader</code>. Plugin A returns an <code>Order</code> object to the host, and the host's <code>(Order) result</code> cast throws <code>ClassCastException: com.acme.Order cannot be cast to com.acme.Order</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-classloading-2"><span>The plugin was compiled against a different version of <code>Order</code> with a different <code>serialVersionUID</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-classloading-2"><span>The host's <code>Order</code> has not been initialized yet, so the cast cannot be checked <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-classloading-2"><span>The plugin's loader defined its own <code>Order</code> from a copy of the class, so the two <code>Class</code> objects are unrelated types with the same name <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-classloading-2"><span>Parent delegation only applies to <code>java.*</code> packages, so application classes are always loaded twice <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Child-first means the plugin loader defined <code>Order</code> itself instead of delegating to the host's loader. Identity is (loader, name), so the plugin's <code>Order</code> and the host's are two types. The fix is the standard one: shared API classes must live only in the parent, and the child loader must delegate for them.</p>
+        <p class="mb-0"><strong>A</strong> is about serialization, which is not involved in a cast. <strong>B</strong> confuses initialization with type checking; casts never trigger or need initialization. <strong>D</strong> is false — delegation is the default for every package, and the problem here is that the plugin loader deliberately broke it.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-classloading-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>A service logs <code>NoClassDefFoundError: Could not initialize class com.acme.RateTable</code> on every request, with no "Caused by". Which statements are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The class was found; its static initializer threw on first use, and the JVM now refuses it permanently <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>The class is missing from the class path <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Catching the error and retrying will succeed once the underlying problem is fixed <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>The real cause is an <code>ExceptionInInitializerError</code> logged once, earlier, probably at start-up <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> "Could not initialize class" is the second-and-later failure of a class whose <code>&lt;clinit&gt;</code> threw. The first failure carried the cause as <code>ExceptionInInitializerError</code>; later ones do not. Find the first one.</p>
+        <p class="mb-0"><strong>B</strong> would produce a <code>NoClassDefFoundError</code> <em>with</em> a <code>Caused by: ClassNotFoundException</code>. <strong>C</strong> is false within one JVM: an erroneous class stays erroneous; the only retry is a restart (or a fresh class loader).</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="classloading"> Mark this section complete
+  </label>
+</section>

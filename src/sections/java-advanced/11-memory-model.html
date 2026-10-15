@@ -1,0 +1,266 @@
+<section class="lm-section" id="memory-model" data-title="The Java memory model: visibility and happens-before" data-num="2">
+  <p class="lm-eyebrow">Section 2</p>
+  <h2 class="mb-4">The Java memory model: visibility and happens-before</h2>
+
+  <p>Section 1 showed two threads corrupting a counter because an increment is three steps. This section is about a stranger problem: a thread writes a field, and another thread <em>never sees the write at all</em>. Not late — never. The reason is that "memory" is not one place. Each core has its own caches and a store buffer that holds writes before they reach shared memory; the JIT compiler keeps fields in registers and hoists reads out of loops; the CPU executes instructions out of order when they do not depend on each other. Every one of those optimisations is invisible to a single thread, which is exactly why they are legal. A second thread can see all of them.</p>
+
+  <p>The <strong>Java Memory Model</strong> (JLS chapter 17) is the contract that says when a write by one thread is guaranteed to be visible to a read by another. It is stated in terms of one relation, <strong>happens-before</strong>: if action A happens-before action B, then B sees the effects of A. If two threads touch the same field, at least one of them writes, and there is no happens-before between them, the program has a <strong>data race</strong>, and the JMM promises almost nothing about what the reader sees.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Three guaranteed-visible patterns, each printing a fact that the JMM promises. There is deliberately no fourth program showing the <em>failure</em>: a racy read may happen to see the write on your machine today, so a demonstration of it cannot be verified. The failure is shown as a step-through below instead.</p>
+
+  <pre data-code data-lang="java" data-file="Visibility.java" data-verify="Visibility" data-hi="4,14,18,25,29,31">
+import java.util.concurrent.CountDownLatch;
+
+public class Visibility {
+    static volatile boolean stop;      // volatile: a write is guaranteed to become visible, promptly
+    static int reserved;               // plain: visible to another thread only across a happens-before edge
+    static int payload;                // plain, but published under a volatile write below
+    static volatile int ready;
+
+    public static void main(String[] args) throws InterruptedException {
+        // 1. a volatile flag stops a spinning reader
+        CountDownLatch spinning = new CountDownLatch(1);
+        Thread reader = new Thread(() -> {
+            spinning.countDown();
+            while (!stop) Thread.onSpinWait();         // without volatile the JIT may hoist this read out of the loop
+        }, "reader");
+        reader.start();
+        spinning.await();
+        stop = true;
+        reader.join(5_000);
+        System.out.println("reader stopped         : " + !reader.isAlive());
+
+        // 2. Thread.join is a happens-before edge: the plain write is visible after it
+        Thread writer = new Thread(() -> reserved = 42, "writer");
+        writer.start();
+        writer.join();
+        System.out.println("seen after join        : " + reserved);
+
+        // 3. piggybacking: a plain write BEFORE a volatile write is visible AFTER the volatile read
+        Thread producer = new Thread(() -> { payload = 7; ready = 1; }, "producer");
+        producer.start();
+        while (ready == 0) Thread.onSpinWait();
+        System.out.println("payload after volatile : " + payload);
+        producer.join();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Visibility">
+reader stopped         : true
+seen after join        : 42
+payload after volatile : 7
+  </pre>
+
+  <p>Take <code>stop</code> and delete the word <code>volatile</code>. The program is now allowed to hang: the JIT, seeing a loop that reads a field no one in <em>this thread</em> writes, may read it once into a register and spin on the register forever. On HotSpot it frequently does exactly that once the loop gets hot. The second block shows that you do not always need <code>volatile</code>: <code>join()</code> is itself an edge, so <code>reserved</code> is plain and still correctly seen. The third block is the pattern the JDK's own collections rely on — one volatile write "publishes" every plain write that preceded it in program order.</p>
+
+  <h3 class="mt-8 mb-3">The happens-before edges</h3>
+
+  <p>There are only a handful of ways to create the relation, and every concurrency utility in the JDK is built from them. Within one thread, program order is an edge; between threads, you need one of the rows below. The relation is <strong>transitive</strong>, which is what makes piggybacking work: plain write → volatile write → volatile read → plain read chains into one guarantee.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">The happens-before rules of the Java memory model</caption>
+      <thead><tr><th scope="col">This…</th><th scope="col">happens-before this</th><th scope="col">What it gives you</th></tr></thead>
+      <tbody>
+        <tr><td>Each action in a thread</td><td>every later action in the same thread</td><td>Program order. Single-threaded code just works</td></tr>
+        <tr><td>Unlocking a monitor (<code>synchronized</code> exit)</td><td>every later lock of the <em>same</em> monitor</td><td>Everything done inside one <code>synchronized</code> block is visible inside the next one on that lock</td></tr>
+        <tr><td>A write to a <code>volatile</code> field</td><td>every later read of that field</td><td>Visibility without a lock, plus the piggybacked plain writes before it</td></tr>
+        <tr><td><code>Thread.start()</code></td><td>every action in the started thread</td><td>Configure an object, then hand it to a new thread, safely</td></tr>
+        <tr><td>Every action in a thread</td><td><code>join()</code> returning, or <code>isAlive()</code> returning false</td><td>Results are safe to read after joining — the pattern every verified program here uses</td></tr>
+        <tr><td><code>t.interrupt()</code></td><td>the target detecting it</td><td>Rarely relied on directly</td></tr>
+        <tr><td>The end of a constructor that writes <code>final</code> fields</td><td>any read of those fields through a reference published after it</td><td>Correctly constructed immutable objects need no synchronisation at all</td></tr>
+        <tr><td><code>java.util.concurrent</code> hand-offs: <code>countDown</code>→<code>await</code>, <code>put</code>→<code>take</code>, <code>submit</code>→task→<code>get</code>, <code>Atomic*</code> write→read</td><td>(as documented on each class)</td><td>The reason you rarely write <code>volatile</code> by hand</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Which synchronisation makes the write visible?</h3>
+
+  <div class="lm-card" data-sandbox="happens-before">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      A writer sets <code>reserved = 42</code>; a reader reads it. Is 42 guaranteed?
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>What connects the two threads</span>
+        <select data-sb-sync>
+          <option value="none" selected>Nothing — plain field, no synchronisation</option>
+          <option value="volatile">A volatile flag written after, read before</option>
+          <option value="sync-same">Both synchronize on the same lock</option>
+          <option value="sync-diff">Each synchronizes on a different lock</option>
+          <option value="start">The writer writes, then calls reader.start()</option>
+          <option value="join">The reader calls writer.join() first</option>
+          <option value="latch">CountDownLatch: countDown() then await()</option>
+          <option value="atomic">An AtomicInteger incremented after, read before</option>
+          <option value="executor">ExecutorService: submit(), then Future.get()</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Watch a reordering</h3>
+
+  <p>The question that convinces most people the JMM is real: two threads, two plain fields, and an outcome that seems impossible if you believe writes happen in the order you wrote them.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a legal reordering under the Java memory model">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Can r1 be 1 while r2 is 0?</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="reordering"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What each thread observes</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Outcome</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="reordering">
+    {
+      "lang": "java",
+      "code": "int x = 0, y = 0;                  // two plain fields\n\n// Thread 1              // Thread 2\nx = 1;                   int r1 = y;\ny = 1;                   int r2 = x;\n\n// is (r1, r2) == (1, 0) possible?",
+      "steps": [
+        { "line": 1, "vars": { "x": "0", "y": "0", "r1": "—", "r2": "—" }, "out": "",
+          "note": "The intuition: if Thread 2 saw y == 1, then Thread 1 had already executed x = 1, so r2 must be 1. That reasoning assumes every thread sees one global order of writes. The JMM makes no such promise for plain fields." },
+        { "line": [4, 5], "vars": { "Thread 1 wrote": "x = 1; y = 1  (program order)", "Thread 1 emits": "y = 1, then x = 1" }, "out": "",
+          "note": "Nothing in Thread 1 depends on x before y is written, so the JIT may reorder the two stores, or the CPU's store buffer may let y reach memory first. Within Thread 1 the result is identical, which is why this is allowed." },
+        { "line": 4, "vars": { "y (as seen by T2)": "1", "r1": "1", "x (as seen by T2)": "0 — still in T1's store buffer", "r2": "—" }, "out": "",
+          "note": "Thread 2 reads y and gets 1: the store that was emitted first has landed." },
+        { "line": 5, "vars": { "r1": "1", "r2": "0" }, "out": "(r1, r2) = (1, 0)",
+          "note": "Thread 2 reads x and gets 0, because that store has not landed yet. Both reads were perfectly ordinary loads. There is no happens-before edge between the threads, so this is a data race and (1, 0) is a legal outcome." },
+        { "line": 7, "vars": { "fix": "declare y volatile", "effect": "x = 1 cannot be moved after y = 1; reading y == 1 acquires x = 1" }, "out": "(1, 0) now impossible",
+          "note": "A volatile write is a release: every write before it in program order is complete and visible before it. A volatile read is an acquire: nothing after it can be moved before it. With y volatile, r1 == 1 implies r2 == 1. The same guarantee comes from a lock, a latch, or any row in the table above." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What <code>volatile</code> is, and is not</h3>
+
+  <p>A <code>volatile</code> field gives you two things: every read sees the most recent write (visibility), and the compiler and CPU may not move memory operations across it in the forbidden directions (ordering). It gives you <strong>nothing</strong> about atomicity. <code>volatile int hits; hits++</code> is still a load, an add and a store, and two threads still lose updates — the only difference from §1 is that each load is guaranteed fresh, which does not help. The rule of thumb:</p>
+
+  <ul class="max-w-prose">
+    <li>A flag or a reference that one thread writes and others read: <code>volatile</code> is enough and cheaper than a lock.</li>
+    <li>A value that is read-modified-written: a lock (§3) or an atomic (§4). Never <code>volatile</code> alone.</li>
+    <li>Several fields that must change together: a lock. <code>volatile</code> on each of them individually does not make the <em>combination</em> consistent.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Safe publication and the cheapest correct answer</h3>
+
+  <p>Most visibility bugs are publication bugs: one thread builds an object and another thread reaches it through a shared reference before, or in the middle of, construction. The <code>final</code>-field rule in the table removes the problem for <strong>immutable objects</strong>: once a constructor has finished writing <code>final</code> fields, any thread that obtains a reference to the object afterwards — through any path, locked or not — sees those fields correctly initialised. A record (Intermediate §8) is therefore safe to hand between threads with no synchronisation at all. The single most effective concurrency technique is to make shared data immutable and share it freely.</p>
+
+  <p>When you genuinely need a lazily created, shared mutable singleton, the two correct shapes are:</p>
+
+  <pre data-code data-lang="java" data-nobar data-hi="2,4">
+class PriceTable {
+    private static volatile PriceTable instance;    // volatile is the whole point: without it a thread can see a non-null reference to a half-built object
+    static PriceTable get() {
+        PriceTable p = instance;                    // one volatile read on the fast path
+        if (p == null) {
+            synchronized (PriceTable.class) {
+                p = instance;
+                if (p == null) instance = p = new PriceTable();
+            }
+        }
+        return p;
+    }
+}
+
+// simpler, just as lazy, and no volatile: class initialization is done once, under a lock the JVM owns (§10)
+class PriceTable2 {
+    private static class Holder { static final PriceTable2 INSTANCE = new PriceTable2(); }
+    static PriceTable2 get() { return Holder.INSTANCE; }
+}
+  </pre>
+
+  <p>Double-checked locking without the <code>volatile</code> was the canonical broken idiom of the early 2000s, and it is still broken. The holder idiom avoids the question entirely, which is why it should be your default.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Memory model gotchas</div>
+      <ul class="mb-0">
+        <li><strong>"It works on my machine" proves nothing.</strong> A racy program is <em>allowed</em> to behave as you hoped. It will stop doing so on a different CPU, after a JIT recompilation, or at 3 a.m. under load. The only evidence that matters is a happens-before edge you can point to.</li>
+        <li><strong>Synchronising the writer alone is not enough.</strong> The edge is from an unlock to a later lock of the <em>same</em> monitor. A <code>synchronized</code> setter and an unsynchronised getter is still a data race.</li>
+        <li><strong><code>volatile</code> on an array or collection reference covers the reference only.</strong> <code>volatile int[] counts</code> makes the assignment of a new array visible; <code>counts[3]++</code> is still a plain, racy read-modify-write of an element. The same holds for a <code>volatile List</code>.</li>
+        <li><strong>64-bit plain fields may tear.</strong> A non-volatile <code>long</code> or <code>double</code> write is permitted to happen as two 32-bit halves, so a reader can see a value that was never written. In practice 64-bit JVMs do not tear, but the specification allows it; <code>volatile</code> forbids it.</li>
+        <li><strong>Leaking <code>this</code> from a constructor defeats the <code>final</code> guarantee.</strong> Registering the object as a listener, or starting a thread that captures it, <em>inside</em> the constructor publishes it before the freeze. Use a static factory that constructs, then registers.</li>
+        <li><strong><code>VarHandle</code> offers finer modes.</strong> <code>setRelease</code>/<code>getAcquire</code> give the ordering half of <code>volatile</code> without the full fence, and <code>setOpaque</code> gives only progress. They are for library authors; §11 shows the mechanism.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-memory-model-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>static volatile int hits;</code> and two threads each run <code>hits++</code> a million times. After both join, what can <code>hits</code> be?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-memory-model-1"><span>Exactly 2,000,000 — <code>volatile</code> makes the increment atomic <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-memory-model-1"><span>Anything from 2 up to 2,000,000 — reads are fresh but load-add-store still interleaves <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-memory-model-1"><span>Exactly 2,000,000, but only on x86 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-memory-model-1"><span>It does not compile: <code>++</code> is not permitted on a volatile field <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>volatile</code> guarantees that each load sees the latest store and that stores are ordered; it does nothing to make the three steps of <code>++</code> one step. Two threads can still load the same value and both store value+1. The theoretical minimum is tiny because, pathologically, almost every increment could be overwritten.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>C</strong> confuse visibility with atomicity; no architecture makes a three-instruction sequence atomic by itself. <strong>D</strong>: it compiles fine, which is precisely the trap. Use <code>AtomicInteger</code> (§4).</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-memory-model-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>The writer sets <code>reserved = 42</code> inside <code>synchronized (lockA)</code>. The reader reads <code>reserved</code> inside <code>synchronized (lockB)</code>, where <code>lockB</code> is a different object. Is the reader guaranteed to see 42?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-memory-model-2"><span>Yes — any <code>synchronized</code> block flushes all caches <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-memory-model-2"><span>Yes, as long as the reader's block starts after the writer's block ends <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-memory-model-2"><span>No — the edge is unlock→lock of the <em>same</em> monitor; two different locks create no edge <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-memory-model-2"><span>No, but it would be guaranteed if <code>reserved</code> were <code>final</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The monitor rule is per object. Locking <code>lockB</code> says nothing about writes made under <code>lockA</code>, so this is a data race dressed up as synchronised code — slower than no locks and exactly as wrong.</p>
+        <p class="mb-0"><strong>A</strong> describes a mental model ("flush the caches") that HotSpot does not implement and the JMM does not promise. <strong>B</strong>: wall-clock order is not happens-before; "after" in real time guarantees nothing without an edge. <strong>D</strong>: a <code>final</code> field cannot be reassigned, so the scenario could not exist; the <code>final</code> rule is about construction, not later writes.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-memory-model-3" data-answer="a,b,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these create a happens-before edge between two threads? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>t.start()</code> in the parent, then any action inside <code>t</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Any action inside <code>t</code>, then <code>t.join()</code> returning in the parent <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>latch.countDown()</code> in one thread, then <code>latch.await()</code> returning in another <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>Thread.sleep(100)</code> in the reader, "to give the writer time" <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, B and C.</strong> Thread start, thread termination observed through <code>join</code>, and the documented hand-off of every <code>java.util.concurrent</code> synchroniser are all edges in the table above.</p>
+        <p class="mb-0"><strong>D</strong> is the one that looks like it works. Sleeping orders nothing: when the reader wakes it performs an ordinary load, and the JMM permits that load to return the stale value no matter how long it waited. Code that "fixes" a visibility bug with a sleep has hidden it.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="memory-model"> Mark this section complete
+  </label>
+</section>

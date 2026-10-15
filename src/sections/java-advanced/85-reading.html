@@ -1,0 +1,74 @@
+<section class="lm-section" id="reading" data-title="Further reading" data-num="R">
+  <p class="lm-eyebrow">Where to go next</p>
+  <h2 class="mb-4">Further reading</h2>
+
+  <p>Primary sources only — the specification chapters that define the memory model and class loading, the JEPs behind each runtime feature, the HotSpot documentation, and the few books worth the shelf space. These are links, but nothing on this page loads them; the module remains fully offline.</p>
+
+  <h3 class="mt-8 mb-3">Specifications</h3>
+  <ul>
+    <li><strong>JLS SE 21, Chapter 17 — Threads and Locks</strong> — the Java memory model itself: happens-before, the definition of a data race, the rules for <code>volatile</code> and <code>final</code> fields, and <code>wait</code>/<code>notify</code> semantics. Dense, but §17.4 is the one chapter every concurrency claim in this module traces back to (§1, §2, §3).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html</span></li>
+    <li><strong>JLS SE 21, §12.4 — Initialization of Classes and Interfaces</strong> — the exact list of what triggers initialization and the locking procedure that makes it happen once (§10).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jls/se21/html/jls-12.html#jls-12.4</span></li>
+    <li><strong>JVMS SE 21, Chapter 5 — Loading, Linking, and Initializing</strong> — loading, verification, preparation, resolution, and the class-loader delegation contract, from the virtual machine's side (§10).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-5.html</span></li>
+    <li><strong>Java Object Serialization Specification</strong> — the stream format, <code>writeReplace</code>/<code>readResolve</code>, and the record serialization rules (§14).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/index.html</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">The JEPs</h3>
+  <ul>
+    <li><strong>JEP 444: Virtual Threads</strong> — the design, the mounting model, what pins, and why pooling them is wrong (§7).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/444</span></li>
+    <li><strong>JEP 453: Structured Concurrency (Preview)</strong> — <code>StructuredTaskScope</code> and the argument for treating a group of subtasks as one unit (§7).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/453</span></li>
+    <li><strong>JEP 491: Synchronize Virtual Threads without Pinning</strong> — the Java 24 change that removes the <code>synchronized</code> pinning described in §7.<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/491</span></li>
+    <li><strong>JEP 439: Generational ZGC</strong> — why a concurrent collector still wants generations, and the <code>-XX:+ZGenerational</code> flag (§8).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/439</span></li>
+    <li><strong>JEP 290: Filter Incoming Serialization Data</strong> and <strong>JEP 415: Context-Specific Deserialization Filters</strong> — <code>ObjectInputFilter</code>, <code>jdk.serialFilter</code>, and the filter factory (§14).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/290 · https://openjdk.org/jeps/415</span></li>
+    <li><strong>JEP 261: Module System</strong> — the module path, readability, the unnamed and automatic modules, and the <code>--add-*</code> flags (§12).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/261</span></li>
+    <li><strong>JEP 403: Strongly Encapsulate JDK Internals</strong> — the Java 17 change behind every <code>InaccessibleObjectException</code> (§11, §12).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/403</span></li>
+    <li><strong>JEP 328: Flight Recorder</strong> — what JFR records and why its overhead is low enough for production (§13).<br><span class="text-sm text-ink-subtle">https://openjdk.org/jeps/328</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">HotSpot documentation</h3>
+  <ul>
+    <li><strong>HotSpot Virtual Machine Garbage Collection Tuning Guide</strong> — the generations, each collector's knobs, and the ergonomics that pick defaults for you (§8, §9).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/gctuning/index.html</span></li>
+    <li><strong>JDK Mission Control and <code>jfr</code> tool documentation</strong> — recording, the event catalogue, and reading a recording from the command line (§13).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/jfapi/ · https://docs.oracle.com/en/java/javase/21/docs/specs/man/jfr.html</span></li>
+    <li><strong><code>java.util.concurrent</code> package summary</strong> — the "Memory Consistency Properties" section states, in one page, every happens-before edge the library provides (§2, §4, §5).<br><span class="text-sm text-ink-subtle">https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/package-summary.html</span></li>
+    <li><strong>JMH — Java Microbenchmark Harness</strong> — the samples directory is the documentation; read them in order, they are numbered (§13).<br><span class="text-sm text-ink-subtle">https://github.com/openjdk/jmh</span></li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Books</h3>
+  <ul>
+    <li><strong>Java Concurrency in Practice</strong>, Brian Goetz et al. — still the reference for §1 to §6. It predates virtual threads and <code>CompletableFuture</code>, but the model it teaches — publication, confinement, invariants, the memory model — is exactly what those features are built on. Read it cover to cover.</li>
+    <li><strong>Optimizing Java</strong>, Benjamin J. Evans, James Gough and Chris Newland — GC internals, the JIT, JMH, JFR and the measurement discipline of §8, §9 and §13, written for working engineers rather than JVM implementers.</li>
+    <li><strong>The Java Module System</strong>, Nicolai Parlog — the long-form treatment of §12, including the migration strategy for a class-path application.</li>
+    <li><strong>Inside the Java Virtual Machine</strong>, Bill Venners — dated in detail (it predates HotSpot's JIT) but the clearest conceptual account of class loading, linking and the execution model in §10.</li>
+    <li><strong>Effective Java</strong>, Joshua Bloch, 3rd edition — items 78 to 84 are the concurrency chapter; items 85 to 90 are the case against serialization that §14 summarises.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Tools worth knowing now</h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Diagnostic tools for this module's material</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Use it to</th></tr></thead>
+      <tbody>
+        <tr><td><code>jcmd</code></td><td>Everything, by pid: <code>Thread.print</code>, <code>GC.heap_dump</code>, <code>VM.flags</code>, <code>JFR.start</code>. The one tool to learn if you learn one.</td></tr>
+        <tr><td><code>jstack</code></td><td>A thread dump; take three ten seconds apart and diff them. Prints the deadlock cycle when there is one.</td></tr>
+        <tr><td><code>jfr</code></td><td>Start, dump and print Flight Recorder recordings without Mission Control: <code>jfr print --events jdk.GCPhasePause rec.jfr</code>.</td></tr>
+        <tr><td><code>jdeps</code></td><td>Find which modules and packages a jar really uses, and which JDK internals it reaches into, before you migrate it.</td></tr>
+        <tr><td><code>jlink</code></td><td>Build a runtime image containing only the modules you need — smaller containers, faster start.</td></tr>
+        <tr><td>async-profiler</td><td>Sampling CPU and allocation profiler without the safepoint bias of the JDK's built-in sampler; produces flame graphs.</td></tr>
+        <tr><td>JDK Mission Control</td><td>Open a <code>.jfr</code> file and see GC pauses, allocation, lock contention and hot methods on one timeline.</td></tr>
+        <tr><td>Eclipse Memory Analyzer (MAT)</td><td>Open a heap dump; the dominator tree and "path to GC roots" answer "what is holding this" in minutes.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Where to go from here</div>
+      <p>This is the last module of the course. Everything from here is practice on real systems, and three things will teach you more than any further reading.</p>
+      <ul class="mb-0">
+        <li><strong>Finish the lab's extensions.</strong> Each one — a reservation timeout, a rate limiter on the quote service, an idempotent transfer log — forces a design decision this module only described.</li>
+        <li><strong>Read <em>Java Concurrency in Practice</em> cover to cover</strong>, now that every chapter has a section here you can check it against. Then reread §2: the memory model is the part people get wrong years into their careers.</li>
+        <li><strong>Profile a real service.</strong> Attach JFR to something you run, for an hour, under real load. Read the GC log, take a thread dump during a slow request, find the three hottest methods. Nothing in §8, §9 or §13 is really yours until you have done that once on a system whose behaviour you did not already know.</li>
+      </ul>
+    </div>
+  </div>
+</section>

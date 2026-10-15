@@ -1,0 +1,509 @@
+<section class="lm-section" id="queries" data-title="JPQL, the Criteria API and native SQL" data-num="6">
+  <p class="lm-eyebrow">Section 6</p>
+  <h2 class="mb-4">JPQL, the Criteria API and native SQL</h2>
+
+  <p><code>find()</code> gets you one row by primary key. Everything else — a filtered list, a report, a page of results, a bulk price change — needs a query, and JPA gives you three ways to write one. <strong>JPQL</strong> is a query language over <em>entities and their attributes</em>: you name <code>Product</code> and <code>p.priceInCents</code>, never the table or the column, and Hibernate translates to the SQL of whatever database it is talking to. The <strong>Criteria API</strong> builds the same query from Java objects, which is the right tool when the shape of the query depends on which filters a user filled in. <strong>Native SQL</strong> is the escape hatch for the one query per project that genuinely needs a database-specific feature.</p>
+
+  <p>The mental model that keeps JPQL from feeling like "SQL with the keywords moved": a JPQL query walks the <em>object graph</em>. <code>l.product.sku</code> is a path through a <code>@ManyToOne</code>, and Hibernate turns the path into a join for you. <code>o.lines is empty</code> is a predicate on a collection, and Hibernate turns it into a <code>not exists</code> subquery. You describe what you want in terms of the model from §2 and §4; the SQL below each query in the worked example is what that description became.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>One factory, three entities, eleven queries. The order with no lines (<code>initech</code>) is there on purpose: it is what makes <code>left join</code> and <code>is empty</code> show their difference from their inner-join cousins. Every <code>Hibernate:</code> line is the SQL this program actually sent to H2.</p>
+
+  <pre data-code data-lang="java" data-file="Queries.java" data-verify="Queries" data-hi="106,114,120,145,181">
+import jakarta.persistence.*;
+import jakarta.persistence.criteria.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Queries {
+
+    public enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    @NamedQuery(name = "Product.bySku", query = "select p from Product p where p.sku = :sku")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        @Enumerated(EnumType.STRING) @Column(nullable = false, length = 16)
+        private Category category;
+        private int priceInCents;
+
+        protected Product() {}
+        Product(String sku, Category category, int priceInCents) {
+            this.sku = sku; this.category = category; this.priceInCents = priceInCents;
+        }
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+        @Override public String toString() { return sku + "@" + priceInCents + "c"; }
+    }
+
+    @Entity(name = "PurchaseOrder")                 // "Order" is an SQL keyword; name the entity and table safely
+    @Table(name = "purchase_order")
+    public static class PurchaseOrder {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, length = 32)
+        private String customer;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL)
+        private List<OrderLine> lines = new ArrayList<>();
+
+        protected PurchaseOrder() {}
+        PurchaseOrder(String customer) { this.customer = customer; }
+        PurchaseOrder add(Product p, int qty) { lines.add(new OrderLine(this, p, qty)); return this; }
+        String customer() { return customer; }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "order_id")
+        private PurchaseOrder order;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "product_id")
+        private Product product;
+        private int qty;
+
+        protected OrderLine() {}
+        OrderLine(PurchaseOrder order, Product product, int qty) { this.order = order; this.product = product; this.qty = qty; }
+    }
+
+    /** A DTO for projections: the query instantiates it directly, no entity is hydrated. */
+    public record SkuRevenue(String sku, long cents) {}
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class).managedClass(PurchaseOrder.class).managedClass(OrderLine.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Queries;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    static void seed(EntityManagerFactory emf) {
+        try (EntityManager em = emf.createEntityManager()) {
+            em.getTransaction().begin();
+            Product bolt = new Product("BOLT-7", Category.FASTENER, 80);
+            Product nut  = new Product("NUT-3",  Category.FASTENER, 25);
+            Product gird = new Product("GIRD-1", Category.STRUCTURAL, 120_000);
+            Product cam  = new Product("CAM-9",  Category.MOTION, 2_300);
+            for (Product p : List.of(bolt, nut, gird, cam)) em.persist(p);
+            em.persist(new PurchaseOrder("acme").add(bolt, 100).add(nut, 400));
+            em.persist(new PurchaseOrder("globex").add(bolt, 50).add(gird, 1));
+            em.persist(new PurchaseOrder("initech"));                       // an order with no lines
+            em.getTransaction().commit();
+        }
+    }
+
+    static void section(String title) { System.out.println("-- " + title + " --"); }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+            seed(emf);
+            try (EntityManager em = emf.createEntityManager()) {
+
+                section("named parameter");
+                List<Product> dear = em.createQuery(
+                        "select p from Product p where p.priceInCents > :min order by p.sku", Product.class)
+                    .setParameter("min", 1_000).getResultList();
+                System.out.println(dear);
+
+                section("join + aggregate + having + DTO projection");
+                List<SkuRevenue> revenue = em.createQuery(
+                        "select new Queries$SkuRevenue(p.sku, sum(l.qty * p.priceInCents)) " +
+                        "from OrderLine l join l.product p " +
+                        "group by p.sku having sum(l.qty) >= :minQty order by p.sku", SkuRevenue.class)
+                    .setParameter("minQty", 100L).getResultList();
+                System.out.println(revenue);
+
+                section("left join: products that were never ordered still appear");
+                List<Object[]> counts = em.createQuery(
+                        "select p.sku, count(l) from Product p left join OrderLine l on l.product = p " +
+                        "group by p.sku order by p.sku", Object[].class).getResultList();
+                for (Object[] row : counts) System.out.println(row[0] + " ordered on " + row[1] + " line(s)");
+
+                section("pagination");
+                List<Product> page2 = em.createQuery("select p from Product p order by p.sku", Product.class)
+                    .setFirstResult(2).setMaxResults(2).getResultList();
+                System.out.println(page2);
+
+                section("in with a list parameter");
+                System.out.println(em.createQuery(
+                        "select p from Product p where p.sku in :skus order by p.sku", Product.class)
+                    .setParameter("skus", List.of("NUT-3", "CAM-9")).getResultList());
+
+                section("collection predicates: is empty, size()");
+                System.out.println(em.createQuery(
+                        "select o.customer from PurchaseOrder o where o.lines is empty", String.class).getResultList());
+                System.out.println(em.createQuery(
+                        "select o.customer from PurchaseOrder o where size(o.lines) = 2 order by o.customer", String.class).getResultList());
+
+                section("named query, single result, result stream");
+                Product bolt = em.createNamedQuery("Product.bySku", Product.class)
+                    .setParameter("sku", "BOLT-7").getSingleResult();
+                System.out.println("single = " + bolt);
+                long cheap = em.createQuery("select p from Product p", Product.class)
+                    .getResultStream().filter(p -> p.priceInCents() < 100).count();
+                System.out.println("cheap via stream = " + cheap);
+
+                section("bulk update bypasses the persistence context");
+                em.getTransaction().begin();
+                int changed = em.createQuery(
+                        "update Product p set p.priceInCents = p.priceInCents + 5 where p.category = :c")
+                    .setParameter("c", Category.FASTENER).executeUpdate();
+                System.out.println("rows updated = " + changed);
+                System.out.println("managed copy still says " + bolt.priceInCents() + "c");
+                em.refresh(bolt);
+                System.out.println("after refresh " + bolt.priceInCents() + "c");
+                em.getTransaction().commit();
+
+                section("native SQL");
+                List<Object[]> raw = em.createNativeQuery(
+                        "select sku, priceInCents from product where category = 'FASTENER' order by sku", Object[].class)
+                    .getResultList();
+                for (Object[] row : raw) System.out.println(row[0] + " " + row[1]);
+
+                section("Criteria API: a dynamic filter");
+                System.out.println(find(em, Category.FASTENER, null));
+                System.out.println(find(em, null, 2_000));
+
+                section("Criteria API: construct projection");
+                CriteriaBuilder cb = em.getCriteriaBuilder();
+                CriteriaQuery<SkuRevenue> cq = cb.createQuery(SkuRevenue.class);
+                Root<OrderLine> l = cq.from(OrderLine.class);
+                Join<OrderLine, Product> p = l.join("product");
+                cq.select(cb.construct(SkuRevenue.class, p.get("sku"), cb.sum(cb.prod(l.<Integer>get("qty"), p.<Integer>get("priceInCents")))))
+                  .groupBy(p.get("sku"))
+                  .orderBy(cb.asc(p.get("sku")));
+                System.out.println(em.createQuery(cq).getResultList());
+            }
+        }
+    }
+
+    /** Predicates are added only for the filters the caller supplied — no string concatenation. */
+    static List<Product> find(EntityManager em, Category category, Integer minPrice) {
+        CriteriaBuilder cb = em.getCriteriaBuilder();
+        CriteriaQuery<Product> cq = cb.createQuery(Product.class);
+        Root<Product> p = cq.from(Product.class);
+        List<Predicate> where = new ArrayList<>();
+        if (category != null) where.add(cb.equal(p.get("category"), category));
+        if (minPrice != null) where.add(cb.ge(p.get("priceInCents"), minPrice));
+        cq.select(p).where(where.toArray(new Predicate[0])).orderBy(cb.asc(p.get("sku")));
+        return em.createQuery(cq).getResultList();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Queries">
+Hibernate: create global temporary table HTE_purchase_order(rn_ integer not null, id bigint, customer varchar(32), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), category enum ('FASTENER','MOTION','STRUCTURAL'), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_order_line(qty integer, rn_ integer not null, id bigint, order_id bigint, product_id bigint, primary key (rn_)) transactional
+Hibernate: drop table if exists order_line cascade 
+Hibernate: drop table if exists product cascade 
+Hibernate: drop table if exists purchase_order cascade 
+Hibernate: drop sequence if exists order_line_SEQ
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: drop sequence if exists purchase_order_SEQ
+Hibernate: create sequence order_line_SEQ start with 1 increment by 50
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create sequence purchase_order_SEQ start with 1 increment by 50
+Hibernate: create table order_line (qty integer not null, id bigint not null, order_id bigint not null, product_id bigint not null, primary key (id))
+Hibernate: create table product (priceInCents integer not null, id bigint not null, sku varchar(16) not null unique, category enum ('FASTENER','MOTION','STRUCTURAL') not null, primary key (id))
+Hibernate: create table purchase_order (id bigint not null, customer varchar(32) not null, primary key (id))
+Hibernate: alter table if exists order_line add constraint FK7yrmqn07gn80k15tfs34428x6 foreign key (order_id) references purchase_order
+Hibernate: alter table if exists order_line add constraint FKpf904tci8garypkvm32cqupye foreign key (product_id) references product
+Hibernate: select next value for product_SEQ
+Hibernate: select next value for product_SEQ
+Hibernate: select next value for purchase_order_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: select next value for purchase_order_SEQ
+Hibernate: insert into product (category,priceInCents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,priceInCents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,priceInCents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,priceInCents,sku,id) values (?,?,?,?)
+Hibernate: insert into purchase_order (customer,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into purchase_order (customer,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into purchase_order (customer,id) values (?,?)
+-- named parameter --
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.priceInCents>? order by p1_0.sku
+[CAM-9@2300c, GIRD-1@120000c]
+-- join + aggregate + having + DTO projection --
+Hibernate: select p1_0.sku,sum((ol1_0.qty*p1_0.priceInCents)) from order_line ol1_0 join product p1_0 on p1_0.id=ol1_0.product_id group by p1_0.sku having sum(ol1_0.qty)>=? order by p1_0.sku
+[SkuRevenue[sku=BOLT-7, cents=12000], SkuRevenue[sku=NUT-3, cents=10000]]
+-- left join: products that were never ordered still appear --
+Hibernate: select p1_0.sku,count(ol1_0.id) from product p1_0 left join order_line ol1_0 on ol1_0.product_id=p1_0.id group by p1_0.sku order by p1_0.sku
+BOLT-7 ordered on 2 line(s)
+CAM-9 ordered on 0 line(s)
+GIRD-1 ordered on 1 line(s)
+NUT-3 ordered on 1 line(s)
+-- pagination --
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 order by p1_0.sku offset ? rows fetch first ? rows only
+[GIRD-1@120000c, NUT-3@25c]
+-- in with a list parameter --
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.sku in (?,?) order by p1_0.sku
+[CAM-9@2300c, NUT-3@25c]
+-- collection predicates: is empty, size() --
+Hibernate: select po1_0.customer from purchase_order po1_0 where not exists(select 1 from order_line l1_0 where po1_0.id=l1_0.order_id)
+[initech]
+Hibernate: select po1_0.customer from purchase_order po1_0 where (select count(*) from order_line l1_0 where po1_0.id=l1_0.order_id)=2 order by po1_0.customer
+[acme, globex]
+-- named query, single result, result stream --
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.sku=?
+single = BOLT-7@80c
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0
+cheap via stream = 2
+-- bulk update bypasses the persistence context --
+Hibernate: update product p1_0 set priceInCents=(p1_0.priceInCents+5) where p1_0.category=?
+rows updated = 2
+managed copy still says 80c
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+after refresh 85c
+-- native SQL --
+Hibernate: select sku, priceInCents from product where category = 'FASTENER' order by sku
+BOLT-7 85
+NUT-3 30
+-- Criteria API: a dynamic filter --
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.sku
+[BOLT-7@85c, NUT-3@25c]
+Hibernate: select p1_0.id,p1_0.category,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.priceInCents>=? order by p1_0.sku
+[CAM-9@2300c, GIRD-1@120000c]
+-- Criteria API: construct projection --
+Hibernate: select p1_0.sku c0,sum((ol1_0.qty*p1_0.priceInCents)) c1 from order_line ol1_0 join product p1_0 on p1_0.id=ol1_0.product_id group by c0 order by 1
+[SkuRevenue[sku=BOLT-7, cents=12750], SkuRevenue[sku=GIRD-1, cents=120000], SkuRevenue[sku=NUT-3, cents=12000]]
+  </pre>
+
+  <h3 class="mt-8 mb-3">Reading the SQL, query by query</h3>
+
+  <ul>
+    <li><strong>Named parameter.</strong> <code>:min</code> became a JDBC <code>?</code>. The value travels separately from the SQL text, so the database can cache one plan for every price, and a value that happens to contain a quote cannot change the query. Never build a JPQL string with <code>+ sku + "'"</code>; that is the SQL-injection bug with an extra layer of paint.</li>
+    <li><strong>Join, aggregate, <code>having</code>, DTO.</strong> <code>join l.product p</code> became <code>join product p1_0 on p1_0.id=ol1_0.product_id</code> — Hibernate knew the foreign key from the <code>@ManyToOne</code> mapping. <code>select new Queries$SkuRevenue(…)</code> handed each row straight to the record's constructor: no <code>Product</code> entity was loaded, nothing became managed, and the result is a plain immutable value you can return from a service without a lazy-loading worry. The class name in <code>select new</code> is the <em>binary</em> name, hence the <code>$</code> for a nested record.</li>
+    <li><strong>Left join with <code>on</code>.</strong> <code>count(l)</code> became <code>count(ol1_0.id)</code>, which counts <code>0</code> for <code>CAM-9</code> because its joined columns are all <code>null</code>. An inner <code>join</code> would have dropped the row; a path like <code>p.lines</code> would have required a mapped collection. The explicit <code>on</code> clause (JPA 2.1) lets you join two entities that have no mapped association between them.</li>
+    <li><strong>Pagination.</strong> <code>setFirstResult(2).setMaxResults(2)</code> became <code>offset ? rows fetch first ? rows only</code> — the SQL:2008 form, chosen by the H2 dialect; MySQL would get <code>limit ?,?</code>. Pagination without an <code>order by</code> is a bug: the database is free to return pages in any order, and the same row can appear on two pages.</li>
+    <li><strong><code>in :skus</code>.</strong> The list was expanded to <code>in (?,?)</code> — one placeholder per element, bound in order. A list of a different length is a different SQL string, which matters for the database's plan cache when callers pass lists of wildly varying sizes.</li>
+    <li><strong>Collection predicates.</strong> <code>o.lines is empty</code> became <code>not exists(select 1 …)</code> and <code>size(o.lines) = 2</code> became a correlated <code>(select count(*) …) = 2</code>. Neither loaded a single <code>OrderLine</code>; the database answered the question about the collection.</li>
+    <li><strong>Named query, single result, stream.</strong> <code>@NamedQuery</code> is parsed and validated once, at factory start-up, so a typo fails at boot rather than at 3 a.m. <code>getSingleResult()</code> throws <code>NoResultException</code> on zero rows and <code>NonUniqueResultException</code> on two; for a lookup that may miss, prefer <code>getResultList()</code> or Hibernate's <code>uniqueResultOptional()</code>. The stream example is a trap shown deliberately: <code>filter(p -&gt; p.priceInCents() &lt; 100)</code> ran in Java <em>after</em> every product had been loaded — look at the SQL, it has no <code>where</code>. Filter in the query, not in the stream.</li>
+    <li><strong>Bulk update.</strong> One <code>update product … where category=?</code> changed two rows without loading either. The price is the point of the next three lines: <code>bolt</code> was loaded earlier in this same persistence context, and it still says <code>80c</code>, because a bulk statement talks to the database directly and the first-level cache (§3) is never told. <code>refresh()</code> re-reads the row. In the Criteria filter further down, <code>NUT-3</code> prints as <code>25c</code> for the same reason: the query returned the row, but the identity guarantee handed back the already-managed instance with its stale field. Bulk operations belong at the start of a transaction, or in one of their own.</li>
+    <li><strong>Native SQL.</strong> Tables and columns, verbatim, sent as written. The default column name for <code>priceInCents</code> is <code>priceInCents</code> — Hibernate's default naming strategy copies the field name; a <code>CamelCaseToUnderscoresNamingStrategy</code> would make it <code>price_in_cents</code>, and a native query is the first thing that breaks when someone changes the strategy.</li>
+    <li><strong>Criteria, dynamic filter.</strong> <code>find(em, FASTENER, null)</code> and <code>find(em, null, 2_000)</code> produced two different <code>where</code> clauses from one method and zero string concatenation. That is what the Criteria API is for. The second query, <code>construct(…)</code>, is the typed twin of <code>select new</code>; note Hibernate aliased the columns <code>c0</code>, <code>c1</code> and ordered by position.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch a JPQL query become SQL</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of JPQL translation">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">From entity paths to table columns</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">JPQL</div>
+        <div data-stepper-code data-for="jpql-translation"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Resolution</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL so far</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="jpql-translation">
+    {
+      "lang": "java",
+      "code": "select new Queries$SkuRevenue(p.sku, sum(l.qty * p.priceInCents))\nfrom OrderLine l join l.product p\ngroup by p.sku\nhaving sum(l.qty) >= :minQty\norder by p.sku",
+      "steps": [
+        { "line": 2, "vars": { "phase": "parse → semantic model", "OrderLine": "entity → table order_line, alias ol1_0" }, "out": "from order_line ol1_0",
+          "note": "The ANTLR grammar parses the string; the semantic model (SQM) then resolves every identifier against the mapping metadata. OrderLine is an entity name, so it maps to its table." },
+        { "line": 2, "vars": { "phase": "semantic model", "OrderLine": "order_line ol1_0", "l.product": "@ManyToOne → FK product_id → table product, alias p1_0" }, "out": "from order_line ol1_0\n  join product p1_0 on p1_0.id = ol1_0.product_id",
+          "note": "A join through an association needs no on clause in JPQL: the mapping already says which column is the foreign key. Hibernate writes the on clause for you." },
+        { "line": 1, "vars": { "phase": "semantic model", "p.sku": "p1_0.sku", "l.qty * p.priceInCents": "ol1_0.qty * p1_0.priceInCents", "select new": "dynamic instantiation — call SkuRevenue(String, Long)" }, "out": "select p1_0.sku, sum((ol1_0.qty * p1_0.priceInCents))\nfrom order_line ol1_0\n  join product p1_0 on p1_0.id = ol1_0.product_id",
+          "note": "Each attribute path becomes a column reference. select new tells Hibernate to feed each result row to a constructor instead of building entities, so nothing from this query will be managed." },
+        { "line": 3, "vars": { "phase": "SQL AST", "group by p.sku": "group by p1_0.sku" }, "out": "select p1_0.sku, sum((ol1_0.qty * p1_0.priceInCents))\nfrom order_line ol1_0\n  join product p1_0 on p1_0.id = ol1_0.product_id\ngroup by p1_0.sku",
+          "note": "The resolved model is turned into an SQL syntax tree. From here on nothing is JPQL any more; the tree is made of tables, columns and expressions." },
+        { "line": 4, "vars": { "phase": "SQL AST", ":minQty": "JDBC parameter ? — bound later as Long 100" }, "out": "…\ngroup by p1_0.sku\nhaving sum(ol1_0.qty) >= ?",
+          "note": "A named parameter becomes a positional JDBC placeholder. The value is sent in the bind step, never spliced into the text, which is why the same plan serves every value." },
+        { "line": 5, "vars": { "phase": "dialect rendering", "order by p.sku": "order by p1_0.sku", "dialect": "H2Dialect" }, "out": "select p1_0.sku,sum((ol1_0.qty*p1_0.priceInCents)) from order_line ol1_0 join product p1_0 on p1_0.id=ol1_0.product_id group by p1_0.sku having sum(ol1_0.qty)>=? order by p1_0.sku",
+          "note": "The dialect renders the tree as text for this database. Pagination, boolean literals, sequence calls and lock hints are the places where dialects differ; this query renders the same almost everywhere." },
+        { "line": 1, "vars": { "phase": "execute + instantiate", "rows": "2", "result": "[SkuRevenue[BOLT-7, 12000], SkuRevenue[NUT-3, 10000]]" }, "out": "(statement executed; two rows → two SkuRevenue records)",
+          "note": "Each row is passed to the SkuRevenue constructor. The persistence context is not consulted and not updated: a DTO query is the cheapest read JPA offers." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What a fragment of JPQL turns into</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a JPQL fragment onto the SQL it produces, or click one then the other
+    </div>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="JPQL fragments to place">
+        <button type="button" class="lm-chip" data-chip="fetch"><code>join fetch o.lines</code></button>
+        <button type="button" class="lm-chip" data-chip="size"><code>size(o.lines)</code></button>
+        <button type="button" class="lm-chip" data-chip="empty"><code>o.lines is empty</code></button>
+        <button type="button" class="lm-chip" data-chip="new"><code>select new Dto(…)</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="SQL effects">
+        <button type="button" class="lm-slot" data-slot="fetch" data-label="a join whose columns are all selected, so the collection is initialised in the same round trip"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">join + the joined table's columns in the select list; collection initialised, no second query</span></button>
+        <button type="button" class="lm-slot" data-slot="size" data-label="a correlated count subquery"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle"><code>(select count(*) from order_line … where …)</code></span></button>
+        <button type="button" class="lm-slot" data-slot="empty" data-label="a not exists subquery"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle"><code>not exists(select 1 from order_line … where …)</code></span></button>
+        <button type="button" class="lm-slot" data-slot="new" data-label="a select of scalar columns with no entity hydration"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">scalar columns only; rows go to a constructor, nothing becomes managed</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. The first is a <em>fetch</em> join: it changes what is loaded, not what is returned, and §5 shows why it is the standard cure for N+1. The middle two push a question about a collection down to the database. The last avoids the persistence context entirely.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Projections, pages, native SQL and hints</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Query topics">
+      <button type="button" class="lm-tab" role="tab" id="tab-queries-proj" aria-controls="panel-queries-proj" aria-selected="true" tabindex="0">Projections</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-queries-page" aria-controls="panel-queries-page" aria-selected="false" tabindex="-1">Pagination</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-queries-native" aria-controls="panel-queries-native" aria-selected="false" tabindex="-1">Native SQL</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-queries-hints" aria-controls="panel-queries-hints" aria-selected="false" tabindex="-1">Hints and the metamodel</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-queries-proj" aria-labelledby="tab-queries-proj" tabindex="0">
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Kinds of query result</caption>
+          <thead><tr><th scope="col">You select</th><th scope="col">You get</th><th scope="col">Managed?</th><th scope="col">Use when</th></tr></thead>
+          <tbody>
+            <tr><td><code>select p from Product p</code></td><td><code>List&lt;Product&gt;</code></td><td>yes</td><td>you will modify the rows, or need lazy associations later</td></tr>
+            <tr><td><code>select p.sku, p.priceInCents …</code></td><td><code>List&lt;Object[]&gt;</code></td><td>no</td><td>quick scalar reads; brittle — a reordered select list changes the indexes</td></tr>
+            <tr><td>the same, with <code>Tuple.class</code></td><td><code>List&lt;Tuple&gt;</code>, access by alias</td><td>no</td><td>scalar reads with names instead of indexes</td></tr>
+            <tr><td><code>select new pkg.Dto(…)</code> or Criteria <code>construct</code></td><td><code>List&lt;Dto&gt;</code></td><td>no</td><td>read-only views, API responses, reports — the default for anything you do not update</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0 text-sm">Hibernate 6+ also instantiates a record or a class with a matching constructor when you pass it as the result type without <code>select new</code>: <code>createQuery("select p.sku, p.priceInCents from Product p", SkuPrice.class)</code>. It is convenient and non-standard; <code>select new</code> is the portable spelling.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-queries-page" aria-labelledby="tab-queries-page" tabindex="0" hidden>
+      <p><code>setFirstResult</code> / <code>setMaxResults</code> become the dialect's offset and limit syntax, and they are the only correct way to page: loading everything and calling <code>subList</code> is a memory bomb with a delay fuse.</p>
+      <p>The trap is <strong>paginating a fetch join</strong>. <code>select o from PurchaseOrder o join fetch o.lines</code> returns one SQL row per <em>line</em>, so a database-side limit of 10 rows is not 10 orders. Hibernate refuses to guess: it loads the whole result set and pages in memory, logging <code>HHH90003004: firstResult/maxResults specified with collection fetch; applying in memory</code>. Page the parent ids first, then fetch the collections for that page in a second query, or use <code>@BatchSize</code> (§5).</p>
+      <p class="mb-0">Keyset pagination — <code>where (placedOn, id) &gt; (:lastDate, :lastId) order by placedOn, id</code> — is what large tables need; offset pagination re-reads every skipped row.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-queries-native" aria-labelledby="tab-queries-native" tabindex="0" hidden>
+      <p>A native query is sent verbatim, so it can use anything the database has: window functions, <code>jsonb</code> operators, recursive CTEs, vendor hints. The cost is portability and the fact that Hibernate cannot validate it at start-up.</p>
+      <pre data-code data-lang="java" data-nobar>
+// scalars: List&lt;Object[]&gt;
+em.createNativeQuery("select sku, priceInCents from product where category = :c", Object[].class)
+  .setParameter("c", "FASTENER").getResultList();
+
+// entities: Hibernate maps the columns by name onto the entity — they ARE managed
+em.createNativeQuery("select * from product where priceInCents &gt; 1000", Product.class).getResultList();
+
+// a DTO via @SqlResultSetMapping(name = "skuRevenue",
+//     classes = @ConstructorResult(targetClass = SkuRevenue.class,
+//               columns = { @ColumnResult(name = "sku"), @ColumnResult(name = "cents", type = Long.class) }))
+em.createNativeQuery("select p.sku as sku, sum(l.qty * p.priceInCents) as cents from order_line l " +
+                     "join product p on p.id = l.product_id group by p.sku", "skuRevenue").getResultList();
+      </pre>
+      <p class="mb-0 text-sm">Parameters work exactly as in JPQL; never concatenate. A native <em>update</em> bypasses the persistence context just like a JPQL bulk update, with the same staleness consequence.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-queries-hints" aria-labelledby="tab-queries-hints" tabindex="0" hidden>
+      <ul>
+        <li><code>setHint("org.hibernate.readOnly", true)</code> — Hibernate skips the dirty-checking snapshot for the loaded entities: less memory, no accidental <code>UPDATE</code>. §9 uses it for reports.</li>
+        <li><code>setHint("org.hibernate.fetchSize", 500)</code> — the JDBC fetch size for <code>getResultStream()</code>, so a million-row export does not load a million rows at once (driver-dependent; PostgreSQL also needs a transaction).</li>
+        <li><code>setHint("jakarta.persistence.query.timeout", 5000)</code> — milliseconds before the driver cancels the statement.</li>
+        <li><code>setHint("jakarta.persistence.fetchgraph", graph)</code> — an entity graph (§5) decides what to fetch eagerly for this one query.</li>
+      </ul>
+      <p class="mb-0">The <strong>static metamodel</strong> (<code>Product_.sku</code>, <code>Product_.priceInCents</code>), generated at compile time by <code>hibernate-jpamodelgen</code>, replaces the string <code>p.get("sku")</code> in Criteria queries with a typed, refactoring-safe reference. Any Criteria query longer than a few lines should use it; this module's examples use strings only because they must compile from a single file.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Query mistakes that pass code review</div>
+      <ul class="mb-0">
+        <li><strong>Filtering in Java.</strong> <code>getResultList().stream().filter(…)</code> loads every row to throw most away. If the predicate can be said in JPQL, say it there.</li>
+        <li><strong>Implicit joins in the <code>where</code> clause.</strong> <code>where l.product.category = :c</code> is fine; <code>select l.product from OrderLine l</code> is an implicit <em>inner</em> join that silently drops lines whose product is null. Write the join you mean.</li>
+        <li><strong>Bulk update, then trusting managed entities.</strong> Shown above: the entities are stale until <code>refresh()</code> or <code>clear()</code>. Hibernate's <code>Statistics</code> will not warn you.</li>
+        <li><strong>Pagination without <code>order by</code>.</strong> Pages overlap and skip. Order by something unique — add the id as a tiebreaker.</li>
+        <li><strong>Building JPQL with string concatenation for optional filters.</strong> It works until the day two filters are both null and you ship <code>where and</code>. The Criteria API exists for exactly this.</li>
+        <li><strong><code>getSingleResult()</code> for a lookup that may miss.</strong> <code>NoResultException</code> is an unchecked exception that also marks the transaction for rollback in a container. Use <code>getResultList()</code> and check <code>isEmpty()</code>, or <code>getResultStream().findFirst()</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-queries-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A colleague writes <code>em.createQuery("select p from Product p where p.sku = '" + sku + "'")</code>. What is wrong with it?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-queries-1"><span>Nothing — JPQL is not SQL, so injection does not apply <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-queries-1"><span>It is injectable, and every distinct SKU is a new query string the database must plan separately <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-queries-1"><span>JPQL does not allow string literals in a <code>where</code> clause <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-queries-1"><span>It only fails if the SKU contains a space <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> JPQL is translated to SQL and sent to the database, so a value containing <code>' or '1'='1</code> rewrites the query exactly as it would in raw SQL. Even with trusted input, each distinct string is a distinct statement that must be parsed and planned; a <code>:sku</code> parameter gives one plan for every value.</p>
+        <p class="mb-0"><strong>A</strong> is the dangerous belief that makes this bug common. <strong>C</strong> is false: literals are legal, which is why the code compiles and runs. <strong>D</strong> misses that a quote, not a space, is the problem — and that the plan-cache cost applies to every value.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-queries-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Inside a transaction, <code>bolt</code> is a managed <code>Product</code> at <code>80c</code>. You run <code>em.createQuery("update Product p set p.priceInCents = p.priceInCents + 5").executeUpdate()</code>. What does <code>bolt.priceInCents()</code> return immediately afterwards?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-queries-2"><span><code>85</code> — the persistence context applies the update to managed entities <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-queries-2"><span><code>80</code> — a bulk statement goes straight to the database and the managed copy is now stale <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-queries-2"><span>It throws, because managed entities cannot coexist with a bulk update <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-queries-2"><span><code>80</code> until commit, then <code>85</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The worked example printed exactly this: <code>managed copy still says 80c</code>. A bulk JPQL or native update is executed as one SQL statement; Hibernate does not know which managed objects it touched and does not try to find out. <code>refresh(bolt)</code> or <code>clear()</code> is on you.</p>
+        <p class="mb-0"><strong>A</strong> describes what people expect and is why the bug is subtle. <strong>C</strong> is wrong: nothing throws, which is the whole problem. <strong>D</strong> is wrong too: commit flushes dirty entities to the database, it never pulls database changes into entities — and if <code>bolt</code> were dirty, its stale <code>80</code> would overwrite the <code>85</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-queries-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these produce <em>no</em> managed entities? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>select new Queries$SkuRevenue(p.sku, sum(…)) from OrderLine l join l.product p group by p.sku</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>select p from Product p where p.category = :c</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>select p.sku, p.priceInCents from Product p</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>em.createNativeQuery("select * from product", Product.class)</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> A constructor projection and a scalar projection both return values that are not entities; the persistence context is neither consulted nor populated, and nothing will be dirty-checked at flush.</p>
+        <p class="mb-0"><strong>B</strong> returns entities, which are managed. <strong>D</strong> is the one people miss: a native query whose result type is an entity class maps the columns onto managed entities exactly like a JPQL query would — it is only the <em>text</em> that bypasses Hibernate, not the result handling.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="queries"> Mark this section complete
+  </label>
+</section>

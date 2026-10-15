@@ -1,0 +1,456 @@
+<section class="lm-section" id="relationships" data-title="Relationships and the owning side" data-num="4">
+  <p class="lm-eyebrow">Section 4</p>
+  <h2 class="mb-4">Relationships and the owning side</h2>
+
+  <p>A relational database stores a relationship in exactly one place: a foreign-key column, or a row in a join table. An object graph stores it in two — <code>order.getLines()</code> and <code>line.getOrder()</code> are both references, and nothing forces them to agree. JPA bridges that gap with a rule that explains most relationship bugs: <strong>one side owns the column, and only writes to the owning side reach the database.</strong> The other side, marked <code>mappedBy</code>, is the <em>inverse</em> side: Hibernate loads it, iterates it, cascades through it, but never consults it when deciding what to write.</p>
+
+  <p>For <code>@ManyToOne</code> / <code>@OneToMany</code> the owning side is always the <em>many</em> side, because that is the table holding the foreign key — an <code>order_line</code> row has one <code>order_id</code>; an <code>orders</code> row has nowhere to put a list. For <code>@ManyToMany</code> neither table has the key; the side that declares <code>@JoinTable</code> owns the join table. For <code>@OneToOne</code> you choose: the side with <code>@JoinColumn</code> owns the key, and <code>@MapsId</code> lets the dependent row reuse the parent's primary key instead of adding a second column.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: five associations, and the bug in block 1</h3>
+
+  <p>Block 1 does what every beginner does — adds the line to the order's list and persists both — and the database quietly stores a line that belongs to nobody. Block 2 fixes it with a two-line helper. The rest of the program maps a many-to-many, a shared-key one-to-one, orphan removal and cascading delete, and shows the SQL each one costs.</p>
+
+  <pre data-code data-lang="java" data-file="Relationships.java" data-verify="Relationships" data-hi="20,26,58,76,85,94,95" data-bad="130">
+import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+
+public class Relationships {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+
+        // many-to-many: THIS side owns the join table because it declares @JoinTable
+        @ManyToMany
+        @JoinTable(name = "product_supplier",
+                   joinColumns = @JoinColumn(name = "product_id"),
+                   inverseJoinColumns = @JoinColumn(name = "supplier_id"))
+        private Set<Supplier> suppliers = new HashSet<>();
+
+        // one-to-one, inverse side: the FK (shared primary key) lives in product_details
+        @OneToOne(mappedBy = "product", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+        private ProductDetails details;
+
+        protected Product() {}
+        Product(String sku) { this.sku = sku; }
+        Long id() { return id; }
+        String sku() { return sku; }
+        Set<Supplier> suppliers() { return suppliers; }
+        void addSupplier(Supplier s) { suppliers.add(s); s.products.add(this); }
+        void setDetails(ProductDetails d) { this.details = d; d.product = this; }
+    }
+
+    @Entity(name = "Supplier")
+    @Table(name = "supplier")
+    public static class Supplier {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true)
+        private String name;
+        @ManyToMany(mappedBy = "suppliers")                // inverse: never written from here
+        private Set<Product> products = new HashSet<>();
+        protected Supplier() {}
+        Supplier(String name) { this.name = name; }
+        String name() { return name; }
+    }
+
+    @Entity(name = "ProductDetails")
+    @Table(name = "product_details")
+    public static class ProductDetails {
+        @Id
+        private Long id;                                   // no @GeneratedValue: copied from product
+        @OneToOne(fetch = FetchType.LAZY)
+        @MapsId                                            // "my primary key IS the product's primary key"
+        @JoinColumn(name = "product_id")
+        private Product product;
+        private String description;
+        protected ProductDetails() {}
+        ProductDetails(String description) { this.description = description; }
+        Long id() { return id; }
+        String description() { return description; }
+    }
+
+    @Entity(name = "Order")
+    @Table(name = "orders")                                // ORDER is a reserved word in SQL
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        private String reference;
+
+        // inverse side: the FK order_id lives in order_line, so this side is mappedBy
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+        private List<OrderLine> lines = new ArrayList<>();
+
+        protected Order() {}
+        Order(String reference) { this.reference = reference; }
+        Long id() { return id; }
+        List<OrderLine> lines() { return lines; }
+
+        // the sync helper: sets BOTH sides, so the owning side gets written
+        void addLine(OrderLine line) { lines.add(line); line.order = this; }
+        void removeLine(OrderLine line) { lines.remove(line); line.order = null; }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY)                 // optional by default, so a line CAN exist with no order
+        @JoinColumn(name = "order_id")                     // owning side: this column IS the relationship
+        private Order order;
+        private String sku;
+        private int qty;
+        protected OrderLine() {}
+        OrderLine(String sku, int qty) { this.sku = sku; this.qty = qty; }
+        Long id() { return id; }
+        String sku() { return sku; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class).managedClass(Supplier.class).managedClass(ProductDetails.class)
+            .managedClass(Order.class).managedClass(OrderLine.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Relationships;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    static long count(EntityManager em, String sql) {
+        return ((Number) em.createNativeQuery(sql).getSingleResult()).longValue();
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+
+            System.out.println("-- 1. setting only the inverse side: the FK is never written --");
+            Long orphanOrderId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Order o = new Order("WRONG-1");
+                OrderLine line = new OrderLine("BOLT-7", 10);
+                o.lines().add(line);                       // inverse side only: line.order stays null
+                em.persist(o);
+                em.persist(line);
+                em.getTransaction().commit();
+                orphanOrderId = o.id();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("order_line rows with order_id null: " + count(em, "select count(*) from order_line where order_id is null"));
+            }
+
+            System.out.println("-- 2. the sync helper sets the owning side: FK written, lines cascaded --");
+            Long orderId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Order o = new Order("ORD-1");
+                o.addLine(new OrderLine("BOLT-7", 10));
+                o.addLine(new OrderLine("NUT-3", 40));
+                o.addLine(new OrderLine("CAM-9", 1));
+                em.persist(o);                             // cascade = ALL persists the lines too
+                em.getTransaction().commit();
+                orderId = o.id();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("order_line rows for ORD-1: " + count(em, "select count(*) from order_line where order_id = " + orderId));
+            }
+
+            System.out.println("-- 3. orphanRemoval: dropping a line from the collection deletes the row --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Order o = em.find(Order.class, orderId);
+                OrderLine cam = o.lines().stream().filter(l -> l.sku().equals("CAM-9")).findFirst().orElseThrow();
+                o.removeLine(cam);
+                em.getTransaction().commit();
+                System.out.println("lines left: " + count(em, "select count(*) from order_line where order_id = " + orderId));
+            }
+
+            System.out.println("-- 4. many-to-many: the @JoinTable side writes the join rows --");
+            Long boltId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Supplier acme = new Supplier("Acme Fasteners");
+                Supplier zeta = new Supplier("Zeta Metals");
+                Product bolt = new Product("BOLT-7");
+                bolt.addSupplier(acme);
+                bolt.addSupplier(zeta);
+                em.persist(acme); em.persist(zeta); em.persist(bolt);   // no cascade on many-to-many
+                em.getTransaction().commit();
+                boltId = bolt.id();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                Product bolt = em.find(Product.class, boltId);
+                Set<String> names = new TreeSet<>();
+                for (Supplier s : bolt.suppliers()) names.add(s.name());
+                System.out.println("suppliers of BOLT-7: " + names);
+                System.out.println("join rows: " + count(em, "select count(*) from product_supplier"));
+            }
+
+            System.out.println("-- 5. one-to-one with @MapsId: the details row reuses the product's id --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = em.find(Product.class, boltId);
+                bolt.setDetails(new ProductDetails("M8 hex bolt, zinc plated"));
+                em.getTransaction().commit();              // cascade ALL on the one-to-one persists it
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                ProductDetails d = em.find(ProductDetails.class, boltId);
+                System.out.println("details id == product id: " + d.id().equals(boltId) + ", " + d.description());
+            }
+
+            System.out.println("-- 6. cascade REMOVE: deleting the order deletes its lines first --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.remove(em.find(Order.class, orderId));
+                em.getTransaction().commit();
+                System.out.println("order_line rows left: " + count(em, "select count(*) from order_line"));
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Relationships">
+Hibernate: create global temporary table HTE_product(rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_supplier(rn_ integer not null, id bigint, name varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_orders(rn_ integer not null, id bigint, reference varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_order_line(qty integer, rn_ integer not null, id bigint, order_id bigint, sku varchar(255), primary key (rn_)) transactional
+Hibernate: drop table if exists order_line cascade
+Hibernate: drop table if exists orders cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop table if exists product_details cascade
+Hibernate: drop table if exists product_supplier cascade
+Hibernate: drop table if exists supplier cascade
+Hibernate: drop sequence if exists order_line_SEQ
+Hibernate: drop sequence if exists orders_SEQ
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: drop sequence if exists supplier_SEQ
+Hibernate: create sequence order_line_SEQ start with 1 increment by 50
+Hibernate: create sequence orders_SEQ start with 1 increment by 50
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create sequence supplier_SEQ start with 1 increment by 50
+Hibernate: create table order_line (qty integer not null, id bigint not null, order_id bigint, sku varchar(255), primary key (id))
+Hibernate: create table orders (id bigint not null, reference varchar(255), primary key (id))
+Hibernate: create table product (id bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: create table product_details (product_id bigint not null, description varchar(255), primary key (product_id))
+Hibernate: create table product_supplier (product_id bigint not null, supplier_id bigint not null, primary key (product_id, supplier_id))
+Hibernate: create table supplier (id bigint not null, name varchar(255) not null unique, primary key (id))
+Hibernate: alter table if exists order_line add constraint FKk9f9t1tmkbq5w27u8rrjbxxg6 foreign key (order_id) references orders
+Hibernate: alter table if exists product_details add constraint FKrhahp4f26x99lqf0kybcs79rb foreign key (product_id) references product
+Hibernate: alter table if exists product_supplier add constraint FKojmkj7n4g02l3vj0lf10j7rer foreign key (supplier_id) references supplier
+Hibernate: alter table if exists product_supplier add constraint FK9ycab4fchfe9g9uxleti557pv foreign key (product_id) references product
+-- 1. setting only the inverse side: the FK is never written --
+Hibernate: select next value for orders_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: select count(*) from order_line where order_id is null
+order_line rows with order_id null: 1
+-- 2. the sync helper sets the owning side: FK written, lines cascaded --
+Hibernate: select next value for orders_SEQ
+Hibernate: select next value for order_line_SEQ
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,qty,sku,id) values (?,?,?,?)
+Hibernate: select count(*) from order_line where order_id = 2
+order_line rows for ORD-1: 3
+-- 3. orphanRemoval: dropping a line from the collection deletes the row --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 where o1_0.id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: delete from order_line where id=?
+Hibernate: select count(*) from order_line where order_id = 2
+lines left: 2
+-- 4. many-to-many: the @JoinTable side writes the join rows --
+Hibernate: select next value for supplier_SEQ
+Hibernate: select next value for supplier_SEQ
+Hibernate: select next value for product_SEQ
+Hibernate: insert into supplier (name,id) values (?,?)
+Hibernate: insert into supplier (name,id) values (?,?)
+Hibernate: insert into product (sku,id) values (?,?)
+Hibernate: insert into product_supplier (product_id,supplier_id) values (?,?)
+Hibernate: insert into product_supplier (product_id,supplier_id) values (?,?)
+Hibernate: select p1_0.id,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: select pd1_0.product_id,pd1_0.description from product_details pd1_0 where pd1_0.product_id=?
+Hibernate: select s1_0.product_id,s1_1.id,s1_1.name from product_supplier s1_0 join supplier s1_1 on s1_1.id=s1_0.supplier_id where s1_0.product_id=?
+suppliers of BOLT-7: [Acme Fasteners, Zeta Metals]
+Hibernate: select count(*) from product_supplier
+join rows: 2
+-- 5. one-to-one with @MapsId: the details row reuses the product's id --
+Hibernate: select p1_0.id,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: select pd1_0.product_id,pd1_0.description from product_details pd1_0 where pd1_0.product_id=?
+Hibernate: insert into product_details (description,product_id) values (?,?)
+Hibernate: select pd1_0.product_id,pd1_0.description from product_details pd1_0 where pd1_0.product_id=?
+details id == product id: true, M8 hex bolt, zinc plated
+-- 6. cascade REMOVE: deleting the order deletes its lines first --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 where o1_0.id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.qty,l1_0.sku from order_line l1_0 where l1_0.order_id=?
+Hibernate: delete from order_line where id=?
+Hibernate: delete from order_line where id=?
+Hibernate: delete from orders where id=?
+Hibernate: select count(*) from order_line
+order_line rows left: 1
+  </pre>
+
+  <p>Reading the schema first: <code>order_line.order_id</code> is nullable because the <code>@ManyToOne</code> is <code>optional</code> by default — that is what lets block 1 store an orphan instead of failing. Add <code>optional = false</code> and the column becomes <code>not null</code>, block 1 fails at flush with <code>PropertyValueException</code>, and every join Hibernate generates for the association becomes an inner join instead of a left join. Prefer that whenever the business rule really is "a line always belongs to an order". Then the six blocks:</p>
+  <ol class="max-w-prose">
+    <li><strong>The inverse side is ignored for writes.</strong> <code>o.lines().add(line)</code> changes the Java object only. Hibernate inserts the line from <em>its</em> state — and <code>line.order</code> is <code>null</code> — so the foreign key is <code>null</code>. No error, no warning: a row that no order will ever find.</li>
+    <li><strong>The helper sets both sides.</strong> <code>addLine</code> writes <code>line.order = this</code>, the owning side, and the FK is populated. <code>cascade = ALL</code> also means <code>em.persist(o)</code> reaches the three lines; the three inserts follow the order's. Note <code>order_id = 2</code>: block 1's order took id 1.</li>
+    <li><strong><code>orphanRemoval</code> turns "no longer in the collection" into <code>delete</code>.</strong> Removing <code>CAM-9</code> from the list produces exactly one <code>delete from order_line where id=?</code>. Without <code>orphanRemoval</code>, the same code would leave the row in place with <code>order_id</code> nulled — because a <code>List</code> element disappearing is not, by itself, a deletion.</li>
+    <li><strong>Many-to-many rows come from the <code>@JoinTable</code> side.</strong> <code>addSupplier</code> adds to <code>Product.suppliers</code> (owning) <em>and</em> <code>Supplier.products</code> (inverse); only the first matters for the two <code>product_supplier</code> inserts. Look at the <code>find(Product)</code> afterwards: it also runs a <code>select … from product_details</code>. That lazy <code>@OneToOne(mappedBy)</code> on the inverse side <em>cannot</em> be lazy — Hibernate must know whether to put <code>null</code> or a proxy in the field, and the only way to know is to query. The gotcha callout covers the fix.</li>
+    <li><strong><code>@MapsId</code> shares the primary key.</strong> <code>product_details</code> has no <code>id</code> of its own; its <code>product_id</code> is both primary key and foreign key, so <code>d.id().equals(boltId)</code>. Hibernate copied the parent's id when it persisted the dependent entity through the cascade.</li>
+    <li><strong>Cascade REMOVE orders the deletes correctly.</strong> Lines first, then the order, so the foreign key constraint never complains. The surviving row is block 1's orphan — the database kept it because nothing references it.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Which side did you set?</h3>
+
+  <div class="lm-card" data-sandbox="owning-side">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h6l2 3h8v9H4z"/><path d="M4 7V4h5"/></svg>
+      What Hibernate writes for the sides you set
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Association</span>
+        <select data-sb-type>
+          <option value="o2m" selected>Order 1 — n OrderLine (bidirectional)</option>
+          <option value="m2m">Product n — n Supplier (join table)</option>
+        </select>
+      </label>
+      <label class="lm-check"><input type="checkbox" data-sb-inverse checked> Set the <strong>inverse</strong> side (the <code>mappedBy</code> collection)</label>
+      <label class="lm-check"><input type="checkbox" data-sb-owning> Set the <strong>owning</strong> side (the FK field / <code>@JoinTable</code> collection)</label>
+      <label class="lm-check"><input type="checkbox" data-sb-cascade checked> <code>cascade = PERSIST</code> on the parent's collection</label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Cascade and orphan removal, chosen deliberately</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Cascade types and when each is appropriate</caption>
+      <thead><tr><th scope="col">Setting</th><th scope="col">What propagates</th><th scope="col">Use it for</th><th scope="col">Never for</th></tr></thead>
+      <tbody>
+        <tr><td><code>CascadeType.PERSIST</code></td><td><code>persist</code> reaches the associated entities</td><td>Children that exist only as part of the parent (order lines, address of a customer)</td><td>Shared references — a <code>Product</code> referenced by many lines must be persisted once, on its own</td></tr>
+        <tr><td><code>CascadeType.MERGE</code></td><td><code>merge</code> copies the whole graph</td><td>Detached aggregates edited as a unit</td><td>Graphs containing entities the user did not load — stale copies overwrite fresh rows</td></tr>
+        <tr><td><code>CascadeType.REMOVE</code></td><td><code>remove</code> deletes the associated entities too</td><td>Composition: the child has no meaning without the parent</td><td><code>@ManyToMany</code> — it deletes the <em>other side's entity</em>, not just the join row; and <code>@ManyToOne</code>, which would delete the shared parent</td></tr>
+        <tr><td><code>CascadeType.ALL</code></td><td>All of the above plus <code>REFRESH</code> and <code>DETACH</code></td><td>Parent-owned children, which is where <code>orphanRemoval</code> usually joins it</td><td>Anything that is not strictly owned</td></tr>
+        <tr><td><code>orphanRemoval = true</code></td><td>Removing an element from the collection, or setting a one-to-one to <code>null</code>, deletes the row</td><td>Collections that <em>are</em> the parent's state — the same cases as <code>REMOVE</code></td><td>Reassigning a child to a different parent (it gets deleted, then re-inserted; with a <code>List</code> you may get a constraint violation in between)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Collection types and join defaults">
+      <button type="button" class="lm-tab" role="tab" id="tab-relationships-list" aria-controls="panel-relationships-list" aria-selected="true" tabindex="0">List or Set?</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-relationships-uni" aria-controls="panel-relationships-uni" aria-selected="false" tabindex="-1">Unidirectional one-to-many</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-relationships-defaults" aria-controls="panel-relationships-defaults" aria-selected="false" tabindex="-1">Fetch defaults</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-relationships-list" aria-labelledby="tab-relationships-list" tabindex="0">
+      <p>A <code>List</code> without <code>@OrderColumn</code> is what Hibernate calls a <strong>bag</strong>: unordered, duplicates allowed, and — because the database cannot tell two equal rows apart — some changes are implemented by <em>deleting every row and re-inserting the survivors</em>. Removing one element from a 500-element bag on the owning side of a <code>@ManyToMany</code> is 1 delete-all plus 499 inserts. A <code>Set</code> can address rows individually and emits one <code>delete</code>. Two bags also cannot be <code>join fetch</code>ed together (§5).</p>
+      <ul class="mb-0">
+        <li><code>Set</code> for <code>@ManyToMany</code> and for any collection you will <code>join fetch</code> alongside another.</li>
+        <li><code>List</code> + <code>@OrderColumn(name = "position")</code> when order is part of the data (steps in a recipe). Hibernate maintains the column — at the cost of updating every later row on an insert in the middle.</li>
+        <li><code>List</code> with <code>@OrderBy("sku")</code> only sorts on load; it is still a bag for writes. Fine for a <code>mappedBy</code> side with cascaded children, which is the case in the worked example.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-relationships-uni" aria-labelledby="tab-relationships-uni" tabindex="0" hidden>
+      <p>A <code>@OneToMany</code> with no <code>@ManyToOne</code> on the other side and no <code>@JoinColumn</code> has nowhere to put the foreign key, so Hibernate invents a <strong>join table</strong> (<code>orders_order_line</code>) and maintains it with extra inserts and deletes — a surprise in the DDL and a tax on every write. Add <code>@JoinColumn(name = "order_id")</code> to the collection to put the key where you expected it; better, make the association bidirectional and let the many side own it, which is the mapping the database actually wants.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-relationships-defaults" aria-labelledby="tab-relationships-defaults" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Default fetch type per association kind</caption>
+          <thead><tr><th scope="col">Association</th><th scope="col">Default</th><th scope="col">Recommended</th></tr></thead>
+          <tbody>
+            <tr><td><code>@ManyToOne</code></td><td><code>EAGER</code></td><td><code>LAZY</code>, always — the default is the single most common cause of accidental joins</td></tr>
+            <tr><td><code>@OneToOne</code></td><td><code>EAGER</code></td><td><code>LAZY</code> on the owning (<code>@JoinColumn</code> / <code>@MapsId</code>) side; the <code>mappedBy</code> side cannot be lazy without bytecode enhancement</td></tr>
+            <tr><td><code>@OneToMany</code></td><td><code>LAZY</code></td><td>Keep it</td></tr>
+            <tr><td><code>@ManyToMany</code></td><td><code>LAZY</code></td><td>Keep it</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Relationship gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The inverse <code>@OneToOne</code> is eager whatever you write.</strong> Block 4 proves it: <code>find(Product)</code> also selected <code>product_details</code>. Hibernate cannot create a proxy for a field that might legitimately be <code>null</code> without querying. Fixes: map the association only from the dependent side (drop <code>Product.details</code>), use <code>@MapsId</code> on the owning side so the parent's id <em>is</em> the key (then Hibernate can proxy), or enable bytecode enhancement.</li>
+        <li><strong>Never put a <code>@ManyToOne</code> entity in <code>equals</code>/<code>hashCode</code> of the child</strong> — a lazy proxy's class is not the entity's class, and comparing it loads it. And never add an entity to a <code>HashSet</code> before its id is generated if <code>hashCode</code> uses the id: the hash changes after <code>persist</code> and the set can no longer find it (§11).</li>
+        <li><strong>Cascading <code>REMOVE</code> through a <code>@ManyToMany</code></strong> deletes the supplier when you delete the product. Nothing in the mapping warns you.</li>
+        <li><strong>Bidirectional sync is your job.</strong> Forgetting the inverse side will not corrupt the database (only the owning side is written) but it will give you an in-memory order that does not list its own lines until reloaded — and a test that passes against the database while the object graph is wrong.</li>
+        <li><strong><code>@JoinColumn</code> names default to <code>field_referencedId</code>.</strong> Without it the column is <code>order_id</code> only because the field is <code>order</code>; rename the field and the schema changes. Always name the column.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-relationships-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In a bidirectional <code>Order</code> – <code>OrderLine</code> mapping, which side is the owning side, and why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-relationships-1"><span><code>Order</code>, because it holds the collection and the cascade <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-relationships-1"><span><code>OrderLine</code>, because its table holds the <code>order_id</code> foreign-key column <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-relationships-1"><span>Whichever side you persist first in a transaction <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-relationships-1"><span>Whichever side declares <code>cascade</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The owning side is the side that maps the physical column. A one-row-per-line foreign key can only live in <code>order_line</code>, so <code>OrderLine.order</code> owns the relationship and <code>Order.lines</code> must be <code>mappedBy</code>.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>D</strong> confuse ownership with cascade — cascade decides which <em>operations</em> propagate, not which side is written. <strong>C</strong> is invented; ownership is fixed in the mapping, not by call order.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-relationships-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>Product</code> has <code>@ManyToMany(cascade = CascadeType.ALL) Set&lt;Supplier&gt; suppliers</code>. You call <code>em.remove(product)</code>. What happens to <code>Acme Fasteners</code>, a supplier that also supplies forty other products?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-relationships-2"><span>Only the <code>product_supplier</code> join rows for this product are deleted <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-relationships-2"><span>Hibernate refuses with an exception because the supplier is still referenced <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-relationships-2"><span>Hibernate tries to delete the supplier entity itself; the database rejects it with a foreign-key violation from the other forty join rows (or deletes it, if no constraint exists) <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-relationships-2"><span>Nothing — cascade does not apply to <code>@ManyToMany</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>REMOVE</code> cascades to the <em>entity</em> on the other side, not to the join rows. Hibernate queues <code>delete from supplier</code>; whether that succeeds depends only on the database's constraints. Either outcome is wrong, which is why cascade <code>REMOVE</code> (and therefore <code>ALL</code>) has no place on a many-to-many.</p>
+        <p class="mb-0"><strong>A</strong> is what happens <em>without</em> cascade — Hibernate always cleans this product's join rows. <strong>B</strong>: Hibernate does not check for other references; the database might. <strong>D</strong>: cascade applies to every association type.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-relationships-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about <code>orphanRemoval = true</code> on <code>Order.lines</code> are correct? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>order.getLines().remove(line)</code> on a managed order deletes the <code>order_line</code> row at flush <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It is the same as <code>cascade = CascadeType.REMOVE</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Moving a line to another order by removing it here and adding it there can delete the row and re-insert it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Without it, removing a line from the collection sets its <code>order_id</code> to <code>null</code> at flush <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Orphan removal watches the collection: an element that leaves it is deleted. That is also why re-parenting is risky — the removal schedules a delete even though another order now references the line.</p>
+        <p class="mb-0"><strong>B</strong>: <code>REMOVE</code> cascades a <code>remove</code> call on the parent; it does nothing when an element merely leaves the collection. The two are complementary, not equal. <strong>D</strong>: without orphan removal, and with the many side owning the key, removing from the inverse collection changes <em>nothing</em> in the database — the line's own <code>order</code> field still points at the order. Only the sync helper's <code>line.order = null</code> would null the column.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="relationships"> Mark this section complete
+  </label>
+</section>

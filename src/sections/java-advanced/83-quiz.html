@@ -1,0 +1,220 @@
+<section class="lm-section" id="quiz" data-title="Self-assessment quiz" data-num="Q">
+  <p class="lm-eyebrow">Assessment</p>
+  <h2 class="mb-4">Self-assessment quiz</h2>
+  <p>Sixteen questions covering all fourteen learning objectives. Answer every one, then submit — nothing is marked until you do, and the explanations stay hidden until then. Your answers are saved locally, so you can leave and come back.</p>
+
+  <div class="lm-quiz" data-quiz>
+
+    <!-- objective 1: what a thread owns and shares; count++ -->
+    <div class="lm-q" data-q id="qz-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Two threads share one <code>int count</code> and each runs <code>count++</code> once. Both start with <code>count == 41</code>. Which final values are possible?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-1"><span>Only 43 — a single increment cannot be interrupted <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-1"><span>43, or an exception if both write at the same instant <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-1"><span>42 or 43 — each thread loads, adds and stores separately, so both may load 41 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-1"><span>41, 42 or 43 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> <code>count++</code> is load, add, store. If both threads load 41 before either stores, both store 42 and one increment is lost; if they run one after the other, 43. <strong>A</strong> is the intuition the bug relies on. <strong>B</strong>: memory writes never throw; a race is silent. <strong>D</strong>: each thread stores at least 42, so 41 cannot survive.</p></div>
+    </div>
+
+    <!-- objective 1: reading a thread dump / thread lifecycle -->
+    <div class="lm-q" data-q id="qz-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>Thread t = new Thread(task); t.start(); t.start();</code> — what happens on the second line's second call?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-2"><span>The task runs a second time on a new OS thread <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-2"><span><code>IllegalThreadStateException</code> — a thread can be started once <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-2"><span>It is ignored while the thread is alive and restarts it once it terminates <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-2"><span>The task runs on the calling thread, like <code>run()</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> A <code>Thread</code> object goes <code>NEW</code> → <code>RUNNABLE</code> → … → <code>TERMINATED</code> once; <code>start()</code> on anything but <code>NEW</code> throws, even after termination. <strong>A</strong> and <strong>C</strong> describe a reusable worker, which is what a thread <em>pool</em> is for. <strong>D</strong> is what calling <code>run()</code> directly does — the classic mistake, but not this one.</p></div>
+    </div>
+
+    <!-- objective 2: happens-before -->
+    <div class="lm-q" data-q id="qz-3" data-answer="b,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Thread W writes <code>price = 80</code> (a plain field) and then does X. Thread R does Y and then reads <code>price</code>. Which (X, Y) pairs <em>guarantee</em> R reads 80? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>X: <code>Thread.sleep(1000)</code>; Y: nothing <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>X: write a <code>volatile boolean ready = true</code>; Y: loop until <code>ready</code> is true <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>X: <code>latch.countDown()</code>; Y: <code>latch.await()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>X: W's <code>run()</code> returns; Y: <code>w.join()</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B, C and D.</strong> Each creates a happens-before edge: volatile write → volatile read (and everything before the write rides along), <code>countDown</code> → <code>await</code> returning, and thread termination → <code>join</code>. <strong>A</strong> is the one people reach for and it guarantees nothing: time is not synchronisation; without an edge the JIT may hoist R's read out of a loop and R can spin forever on a stale value.</p></div>
+    </div>
+
+    <!-- objective 2: volatile not atomic -->
+    <div class="lm-q" data-q id="qz-4" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>A team "fixes" a lost-update bug by changing <code>int hits</code> to <code>volatile int hits</code>, leaving <code>hits++</code> in place. What did they get?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-4"><span>A correct counter — <code>volatile</code> makes the increment atomic <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-4"><span>A compile error — <code>++</code> is not allowed on volatile fields <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-4"><span>Visibility of each store, but the same lost updates — the load-add-store gap is unchanged <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-4"><span>A counter that is correct on x86 but not on ARM <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> <code>volatile</code> orders and publishes individual reads and writes; <code>hits++</code> is still three of them. <strong>A</strong> is the single most common memory-model misconception. <strong>B</strong>: it compiles fine, which is the problem. <strong>D</strong>: the race is in the Java semantics, not the hardware; it loses updates everywhere. The fix is <code>AtomicInteger</code> or a lock.</p></div>
+    </div>
+
+    <!-- objective 3: locks, reentrancy -->
+    <div class="lm-q" data-q id="qz-5" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">5.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+static synchronized void reserve() { audit(); System.out.println("reserved"); }
+static synchronized void audit()   { System.out.println("audited"); }
+public static void main(String[] a) { reserve(); }
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-5"><span><code>audited</code> then <code>reserved</code> — intrinsic locks are reentrant <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-5"><span>Deadlock: <code>audit()</code> waits for the class lock that <code>reserve()</code> holds <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-5"><span><code>IllegalMonitorStateException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-5"><span>Only <code>reserved</code> — the nested synchronized call is skipped <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> Both methods lock the same monitor (the <code>Class</code> object), and a thread that already owns a monitor may enter it again; the JVM counts the depth. <strong>B</strong> would be true of a non-reentrant lock — Java has none in the standard library except <code>StampedLock</code>. <strong>C</strong> is thrown by <code>wait</code>/<code>notify</code> without owning the monitor, not by nested entry. <strong>D</strong>: nothing is ever skipped.</p></div>
+    </div>
+
+    <!-- objective 3: deadlock prevention -->
+    <div class="lm-q" data-q id="qz-6" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">6.</span><span><code>transfer(a, b)</code> locks <code>a</code> then <code>b</code>; a concurrent <code>transfer(b, a)</code> locks <code>b</code> then <code>a</code>. Which change makes deadlock impossible?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-6"><span>Lock on <code>System.identityHashCode(a) &lt; System.identityHashCode(b) ? a : b</code> first <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-6"><span>Lock on the account with the smaller <em>account id</em> first, in both calls <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-6"><span>Make <code>transfer</code> a <code>synchronized</code> instance method of <code>Account</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-6"><span>Add <code>Thread.sleep(1)</code> between the two lock acquisitions <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> A global order over a stable, unique key breaks the circular wait. <strong>A</strong> is almost right and is the textbook trap: identity hash codes can collide, and when they do the tie must be broken with a third lock, or the order is undefined. <strong>C</strong> locks only <code>this</code> — the <em>other</em> account is unprotected, so the invariant breaks instead of deadlocking. <strong>D</strong> changes the timing, which makes the deadlock rarer and therefore harder to reproduce; it removes nothing.</p></div>
+    </div>
+
+    <!-- objective 4: CHM compound actions -->
+    <div class="lm-q" data-q id="qz-7" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">7.</span><span>Eight threads count picks per SKU in a <code>ConcurrentHashMap&lt;String, Integer&gt; picks</code>. Which line is correct?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-7"><span><code>picks.put(sku, picks.getOrDefault(sku, 0) + 1);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-7"><span><code>synchronized (sku) { picks.put(sku, picks.getOrDefault(sku, 0) + 1); }</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-7"><span><code>picks.merge(sku, 1, Integer::sum);</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-7"><span><code>picks.computeIfAbsent(sku, k -&gt; 0); picks.get(sku)++;</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> <code>merge</code> performs the read-modify-write atomically for that key, inside the bin lock. <strong>A</strong> is a check-then-act in two calls; a concurrent map makes each call safe, not the pair. <strong>B</strong> locks on a <code>String</code> — two equal SKUs from different sources may be different objects, and interned literals are shared with the whole JVM; either way it is the wrong lock. <strong>D</strong> does not compile: <code>get</code> returns a value, not a variable, and the increment would be on an unboxed copy anyway.</p></div>
+    </div>
+
+    <!-- objective 4: CAS / collections selection -->
+    <div class="lm-q" data-q id="qz-8" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">8.</span><span>Which statements about compare-and-swap are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>It updates a location only if it still holds the value the caller expected, in one hardware instruction <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A failed CAS blocks the thread until the value is restored <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>It makes <code>AtomicInteger.incrementAndGet</code> wait-free with no retries <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>It cannot tell that a value went A → B → A in between, which is the ABA problem <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A and D.</strong> <strong>B</strong> is the opposite of the point: CAS never blocks; the caller reloads and retries. <strong>C</strong>: <code>incrementAndGet</code> <em>is</em> a retry loop around CAS, which is why <code>LongAdder</code> exists for hot counters — under heavy contention the retries pile up.</p></div>
+    </div>
+
+    <!-- objective 5: pool growth rule -->
+    <div class="lm-q" data-q id="qz-9" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">9.</span><span><code>new ThreadPoolExecutor(2, 8, 60, SECONDS, new LinkedBlockingQueue&lt;&gt;())</code> receives 1,000 quick tasks at once. How many threads does it run at peak?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-9"><span>8 — it grows to the maximum under load <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-9"><span>2 — the unbounded queue never fills, so the pool never grows past core <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-9"><span>1,000 — one per task, trimmed after 60 seconds <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-9"><span>It throws <code>RejectedExecutionException</code> after the first 8 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The growth rule is core → queue → max → reject, and the queue step only passes when <code>offer</code> fails. An unbounded queue never refuses, so <code>maximumPoolSize</code> is dead configuration. <strong>A</strong> is what everyone assumes. <strong>C</strong> describes <code>newCachedThreadPool</code>, whose <code>SynchronousQueue</code> always "fails" to queue. <strong>D</strong> needs a full queue first.</p></div>
+    </div>
+
+    <!-- objective 5: shutdown / JVM exit; task exceptions -->
+    <div class="lm-q" data-q id="qz-10" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">10.</span><span><code>pool.submit(() -&gt; { throw new IllegalStateException("boom"); });</code> and nobody calls <code>get()</code>. Where does the exception go?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-10"><span>To the thread's uncaught-exception handler, which prints it to stderr <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-10"><span>It propagates out of <code>submit()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-10"><span>Into the returned <code>Future</code>, where it waits as an <code>ExecutionException</code> cause — silently, forever <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-10"><span>The pool thread dies and the pool shrinks by one <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> <code>submit</code> wraps the task in a <code>FutureTask</code> that catches everything; the worker thread survives and the exception is only observable through <code>get()</code>. <strong>A</strong> is what happens with <code>execute()</code> — the difference is a frequent interview follow-up. <strong>B</strong>: <code>submit</code> returns before the task runs. <strong>D</strong>: the worker is unharmed, which is precisely why nothing is logged.</p></div>
+    </div>
+
+    <!-- objective 6: which thread runs a stage -->
+    <div class="lm-q" data-q id="qz-11" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">11.</span><span>Predict the output on a thread named <code>main</code>:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+CompletableFuture&lt;Integer&gt; done = CompletableFuture.completedFuture(1);
+boolean onMain = done.thenApply(x -&gt; Thread.currentThread().getName().equals("main")).join();
+System.out.println(onMain);
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-11"><span><code>true</code> — the future was already complete, so the stage runs on the thread that attached it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-11"><span><code>false</code> — <code>thenApply</code> always runs on the common ForkJoinPool <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-11"><span>Either — it depends on the scheduler <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-11"><span>It does not compile: <code>join()</code> must be called from an async stage <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> A non-async stage runs on whichever thread completes the previous stage; when that stage is already complete at attach time, the attaching thread runs it inline. That is how a "callback" ends up doing heavy work on a request thread. <strong>B</strong> is the rule for <code>thenApplyAsync</code> with no executor. <strong>C</strong>: the rule is deterministic here. <strong>D</strong>: <code>join</code> is an ordinary method.</p></div>
+    </div>
+
+    <!-- objective 6: compose vs apply / error handling -->
+    <div class="lm-q" data-q id="qz-12" data-answer="b,c">
+      <p class="lm-q-stem"><span class="lm-q-num">12.</span><span><code>cf = supplyAsync(() -&gt; { throw new IllegalStateException("offline"); }, pool).thenApply(v -&gt; v + 1).exceptionally(e -&gt; -1);</code> Which are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The <code>thenApply</code> function runs with <code>v == null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>cf.join()</code> returns <code>-1</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Inside <code>exceptionally</code>, <code>e</code> is a <code>CompletionException</code> whose cause is the <code>IllegalStateException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Without the <code>exceptionally</code>, <code>cf.get()</code> would throw the <code>IllegalStateException</code> directly <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B and C.</strong> A failed stage skips every dependent value-stage (<strong>A</strong> is false: the function is never invoked) and passes the failure, wrapped in a <code>CompletionException</code>, to the first recovery stage — which is why code in <code>exceptionally</code> should unwrap with <code>getCause()</code> before matching on type. <strong>D</strong>: <code>get()</code> throws <code>ExecutionException</code> with the original as its cause; <code>join()</code> throws <code>CompletionException</code>. Neither throws the original bare.</p></div>
+    </div>
+
+    <!-- objective 7: virtual threads -->
+    <div class="lm-q" data-q id="qz-13" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">13.</span><span>A JDK 21 service moves its JDBC-heavy request handling from a 200-thread pool to one virtual thread per request. The driver does its socket reads inside <code>synchronized</code> methods. What happens under load?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-13"><span>Throughput rises in proportion to the number of virtual threads <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-13"><span><code>OutOfMemoryError: unable to create native thread</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-13"><span>Virtual threads pin their carriers during each read, so concurrency collapses to roughly the carrier count <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-13"><span>Nothing changes — JDBC calls are not blocking from the JVM's point of view <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> In 21 a virtual thread blocking inside a monitor cannot unmount, so each carrier is held for the duration of the read — <code>-Djdk.tracePinnedThreads</code> shows it. A driver using <code>ReentrantLock</code> would be fine; JEP 491 in Java 24 fixes <code>synchronized</code>. <strong>A</strong> is the promise, broken by pinning. <strong>B</strong>: virtual threads are not native threads; that error belongs to platform threads. <strong>D</strong>: socket reads are exactly the blocking the JVM detects.</p></div>
+    </div>
+
+    <!-- objective 8: generational GC / 9: heap sizing -->
+    <div class="lm-q" data-q id="qz-14" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">14.</span><span>A G1 log shows a Full GC every ten minutes; each one reclaims the heap from 3.9 GB back to a <em>steadily rising</em> 1.2, 1.5, 1.9, 2.4 GB. What is the most likely diagnosis and first action?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-14"><span>Undersized heap — raise <code>-Xmx</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-14"><span>A memory leak — take a heap dump and read the dominator tree <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-14"><span>Wrong collector — switch to ZGC to remove the pauses <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-14"><span>Normal generational behaviour — the old generation is meant to fill <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> After a Full GC only reachable objects remain, so a post-GC floor that climbs is a live set that keeps growing — something is retaining references. <strong>A</strong> buys time and moves the crash later. <strong>C</strong> changes how the garbage is collected, not how much is not garbage. <strong>D</strong>: old gen <em>filling</em> is normal; its post-collection minimum rising is not.</p></div>
+    </div>
+
+    <!-- objective 10: class loading -->
+    <div class="lm-q" data-q id="qz-15" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">15.</span><span>Predict the output:</span></p>
+      <pre data-code data-lang="java" data-nobar>
+class Prices { static final int MAX = 8; static { System.out.println("init"); } }
+public class Main { public static void main(String[] a) { System.out.println(Prices.MAX); } }
+      </pre>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-15"><span><code>8</code> only — a compile-time constant is inlined, so <code>Prices</code> is never initialised <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-15"><span><code>init</code> then <code>8</code> — any static access initialises the class <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-15"><span><code>init</code> then <code>8</code>, but only the first time the JVM runs <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-15"><span><code>8</code> then <code>init</code> — initialisation is deferred to a background thread <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> <code>static final int MAX = 8</code> is a constant variable (JLS §4.12.4); <code>javac</code> copies the literal into <code>Main</code>, and <code>Prices</code> is not an active use. Drop <code>final</code>, or make it <code>Integer.valueOf(8)</code>, and <strong>B</strong> becomes correct. <strong>C</strong>: the JVM has no memory between runs. <strong>D</strong>: initialisation is synchronous and happens-before the first use.</p></div>
+    </div>
+
+    <!-- objectives 11, 12, 13, 14: reflection, modules, measurement, serialization -->
+    <div class="lm-q" data-q id="qz-16" data-answer="a,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">16.</span><span>Which statements are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>On JDK 17+, <code>setAccessible(true)</code> on <code>java.lang.String</code>'s private <code>value</code> field throws <code>InaccessibleObjectException</code> unless the JVM was started with <code>--add-opens java.base/java.lang=ALL-UNNAMED</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A JMH benchmark that computes a value and discards it measures the cost of that computation accurately as long as it uses <code>@Fork</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A record deserialised from a tampered stream still runs its compact constructor, so a rejected value surfaces as an <code>InvalidObjectException</code> caused by the constructor's exception <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>An annotation with no <code>@Retention</code> is invisible to <code>isAnnotationPresent</code> at run time <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A, C and D.</strong> <strong>A</strong> is strong encapsulation of the JDK (default since 16). <strong>C</strong> was confirmed against JDK 21: the canonical constructor runs on every read and its <code>IllegalArgumentException</code> arrives wrapped in <code>InvalidObjectException</code>. <strong>D</strong>: the default retention is <code>CLASS</code>, kept in the bytecode but not loaded. <strong>B</strong> is false — forking isolates JVMs; it does nothing about dead-code elimination, which removes an unused result and the work that produced it. Return the value or sink it into a <code>Blackhole</code>.</p></div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mt-6" data-print="hide">
+      <button type="button" class="lm-btn lm-btn--primary" data-quiz-submit>Submit all 16 answers</button>
+      <button type="button" class="lm-btn" data-quiz-review hidden>Review wrong answers</button>
+    </div>
+    <div class="lm-score" data-quiz-score hidden></div>
+  </div>
+</section>

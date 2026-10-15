@@ -1,0 +1,330 @@
+<section class="lm-section" id="paging" data-title="Pagination, sorting, slices and keyset scrolling" data-num="7">
+  <p class="lm-eyebrow">Section 7</p>
+  <h2 class="mb-4">Pagination, sorting, slices and keyset scrolling</h2>
+
+  <p>Nobody wants all 400,000 products. A screen wants twenty, sorted somehow, and a way to ask for the next twenty. JPA gives you <code>setFirstResult</code>/<code>setMaxResults</code> and leaves the rest — the sort, the total, the "is there a next page" — to you. Spring Data turns that into three types you pass in and three you get back: a <code>Pageable</code> (page number, size, <code>Sort</code>) goes into any repository method, and a <code>Page</code>, <code>Slice</code> or <code>Window</code> comes out carrying the content plus exactly as much metadata as you asked to pay for.</p>
+
+  <p>"Pay for" is the right phrase. A <code>Page</code> knows the total, which costs a second <code>count</code> query on every request. A <code>Slice</code> knows only whether there is a next page, which costs one extra row. And both use <code>offset</code>, which makes page 5,000 as expensive as reading 100,000 rows the database then throws away. The scrolling API's <strong>keyset</strong> position fixes that by remembering <em>where</em> the last page ended instead of <em>how many</em> rows to skip. This section runs all of them against 23 products and reads the SQL each one produces.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: eight ways to ask for a few rows</h3>
+
+  <p>Twenty-three products, three categories, prices that are deliberately not in SKU order so a two-level sort has something to do.</p>
+
+  <pre data-code data-lang="java" data-file="Paging.java" data-verify="Paging" data-package="lm.paging" data-hi="39,41,42,43,45,47,61,62,68,73,78,86,88,92">
+package lm.paging;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.*;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.repository.query.Param;
+import java.util.List;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class Paging {
+
+    public enum Category { FASTENER, STRUCTURAL, TOOLING }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        @Enumerated(EnumType.STRING) @Column(nullable = false) Category category;
+        int priceInCents;
+        protected Product() {}
+        Product(String sku, Category category, int priceInCents) { this.sku = sku; this.category = category; this.priceInCents = priceInCents; }
+        public String getSku() { return sku; }
+        public int getPriceInCents() { return priceInCents; }
+        @Override public String toString() { return sku + "@" + priceInCents; }
+    }
+
+    public record ProductView(String sku, int priceInCents) {}
+
+    public interface ProductRepository extends JpaRepository<Product, Long> {
+        Slice<Product> findByCategory(Category category, Pageable pageable);                     // no count query
+
+        @Query(value = "select p from Product p where p.priceInCents > :min",
+               countQuery = "select count(p) from Product p where p.priceInCents > :min")
+        Page<Product> findExpensive(@Param("min") int min, Pageable pageable);
+
+        Window<Product> findFirst5ByCategoryOrderBySkuAsc(Category category, ScrollPosition position);   // scrolling API
+
+        List<Product> findByCategory(Category category, Limit limit, Sort sort);
+    }
+
+    static String skus(Iterable<Product> ps) {
+        StringBuilder sb = new StringBuilder("[");
+        for (Product p : ps) sb.append(sb.length() > 1 ? ", " : "").append(p.getSku());
+        return sb.append("]").toString();
+    }
+
+    @Bean CommandLineRunner demo(ProductRepository repo) {
+        return args -> {
+            Category[] cats = Category.values();
+            for (int i = 1; i <= 23; i++) {
+                repo.save(new Product(String.format("SKU-%02d", i), cats[i % 3], (i * 37) % 100 * 10));
+            }
+
+            System.out.println("-- A: Page with a two-level sort --");
+            Pageable first = PageRequest.of(0, 5, Sort.by("priceInCents").descending().and(Sort.by("sku")));
+            Page<Product> page = repo.findAll(first);
+            System.out.println("content = " + skus(page));
+            System.out.println("totalElements = " + page.getTotalElements() + ", totalPages = " + page.getTotalPages()
+                    + ", number = " + page.getNumber() + ", hasNext = " + page.hasNext());
+
+            System.out.println("-- B: the last page --");
+            Page<Product> last = repo.findAll(PageRequest.of(page.getTotalPages() - 1, 5, first.getSort()));
+            System.out.println("content = " + skus(last) + ", numberOfElements = " + last.getNumberOfElements() + ", hasNext = " + last.hasNext());
+
+            System.out.println("-- C: Slice, no count --");
+            Slice<Product> slice = repo.findByCategory(Category.FASTENER, PageRequest.of(0, 3, Sort.by("sku")));
+            System.out.println("content = " + skus(slice) + ", hasNext = " + slice.hasNext());
+
+            System.out.println("-- D: @Query with its own countQuery --");
+            Page<Product> dear = repo.findExpensive(600, PageRequest.of(0, 4, Sort.by("sku")));
+            System.out.println("content = " + skus(dear) + ", total = " + dear.getTotalElements());
+
+            System.out.println("-- E: Page.map to a DTO --");
+            Page<ProductView> views = page.map(p -> new ProductView(p.getSku(), p.getPriceInCents()));
+            System.out.println(views.getContent().get(0) + " of " + views.getTotalElements());
+
+            System.out.println("-- F: keyset scrolling --");
+            Window<Product> w1 = repo.findFirst5ByCategoryOrderBySkuAsc(Category.STRUCTURAL, ScrollPosition.keyset());
+            System.out.println("window 1 = " + skus(w1) + ", hasNext = " + w1.hasNext());
+            Window<Product> w2 = repo.findFirst5ByCategoryOrderBySkuAsc(Category.STRUCTURAL, w1.positionAt(w1.size() - 1));
+            System.out.println("window 2 = " + skus(w2) + ", hasNext = " + w2.hasNext());
+
+            System.out.println("-- G: Limit + Sort on a derived query --");
+            System.out.println(skus(repo.findByCategory(Category.TOOLING, Limit.of(3), Sort.by("priceInCents").descending())));
+
+            System.out.println("-- H: unpaged --");
+            System.out.println("all = " + repo.findAll(Pageable.unpaged()).getTotalElements());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Paging.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:paging;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Paging">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), category enum ('FASTENER','STRUCTURAL','TOOLING'), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, category enum ('FASTENER','STRUCTURAL','TOOLING') not null, primary key (id))
+Hibernate: select next value for product_seq
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: select next value for product_seq
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+Hibernate: insert into product (category,price_in_cents,sku,id) values (?,?,?,?)
+-- A: Page with a two-level sort --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 order by p1_0.price_in_cents desc,p1_0.sku offset ? rows fetch first ? rows only
+Hibernate: select count(p1_0.id) from product p1_0
+content = [SKU-08, SKU-16, SKU-05, SKU-13, SKU-21]
+totalElements = 23, totalPages = 5, number = 0, hasNext = true
+-- B: the last page --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 order by p1_0.price_in_cents desc,p1_0.sku offset ? rows fetch first ? rows only
+content = [SKU-03, SKU-11, SKU-19], numberOfElements = 3, hasNext = false
+-- C: Slice, no count --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.sku fetch first ? rows only
+content = [SKU-03, SKU-06, SKU-09], hasNext = true
+-- D: @Query with its own countQuery --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.price_in_cents>? order by p1_0.sku fetch first ? rows only
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.price_in_cents>?
+content = [SKU-02, SKU-05, SKU-08, SKU-10], total = 8
+-- E: Page.map to a DTO --
+ProductView[sku=SKU-08, priceInCents=960] of 23
+-- F: keyset scrolling --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.sku,p1_0.id fetch first ? rows only
+window 1 = [SKU-01, SKU-04, SKU-07, SKU-10, SKU-13], hasNext = true
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 where (p1_0.category=?) and (p1_0.sku>? or p1_0.sku=? and p1_0.id>?) order by p1_0.sku,p1_0.id fetch first ? rows only
+window 2 = [SKU-16, SKU-19, SKU-22], hasNext = false
+-- G: Limit + Sort on a derived query --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.price_in_cents desc fetch first ? rows only
+[SKU-08, SKU-05, SKU-02]
+-- H: unpaged --
+Hibernate: select p1_0.id,p1_0.category,p1_0.price_in_cents,p1_0.sku from product p1_0
+all = 23
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>What each phase paid for:</p>
+  <ul class="max-w-prose">
+    <li><strong>A — two statements.</strong> The <code>order by price_in_cents desc, sku</code> comes straight from the <code>Sort</code>; <code>offset ? rows fetch first ? rows only</code> is H2's (and SQL:2008's) pagination syntax, which Hibernate picks per dialect. Then <code>select count(p1_0.id)</code> runs so the <code>Page</code> can answer <code>getTotalElements()</code> and <code>getTotalPages()</code>. Every page request pays that count.</li>
+    <li><strong>B — one statement.</strong> Spring Data skips the count when it can derive the total: the last page returned 3 rows at offset 20, so the total must be 23. An optimisation, not a promise — do not design around it.</li>
+    <li><strong>C — one statement, size + 1.</strong> A <code>Slice</code> asks for <code>fetch first 4</code> when you wanted 3; if a fourth row comes back, <code>hasNext()</code> is true and the row is dropped. No count, so "page 1 of 937" cannot be shown, but infinite-scroll screens never needed it.</li>
+    <li><strong>D — your own count.</strong> A <code>@Query</code> that returns <code>Page</code> needs a <code>countQuery</code> whenever Spring Data cannot derive one (joins, <code>distinct</code>, native SQL — anything beyond a simple select). Without it you get a runtime error on the first call, not at startup.</li>
+    <li><strong>E — no statement.</strong> <code>Page.map</code> converts the content and keeps the metadata. Return <em>this</em> from a service, not a page of entities: the DTO page is complete, serialisable, and cannot trigger a lazy load.</li>
+    <li><strong>F — keyset.</strong> The first window has no position, so it is a plain <code>order by sku, id fetch first 5</code> — note that Spring Data appended <code>id</code> to make the sort unique. The second window carries the last row's keys: <code>where sku &gt; ? or (sku = ? and id &gt; ?)</code>. The database seeks to that key through the index and reads five rows; it never skips anything, so window 10,000 costs the same as window 1.</li>
+    <li><strong>G — <code>Limit</code>.</strong> When you want "the top 3" and nothing else, a <code>Limit</code> parameter plus a <code>Sort</code> is clearer than a <code>Pageable</code> you then ignore.</li>
+    <li><strong>H — <code>Pageable.unpaged()</code>.</strong> Accepted everywhere a <code>Pageable</code> is, returns everything, no count query. Useful for the "export all" path of a method that otherwise pages.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">What page N costs</h3>
+
+  <div class="lm-card" data-sandbox="pagination-cost">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      Offset versus keyset, by the numbers
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Rows in the table <span class="lm-readout" data-sb-rowsout>100,000</span></span>
+        <input type="range" data-sb-rows min="3" max="7" value="5" step="0.25">
+      </label>
+      <label class="lm-field">
+        <span>Page size</span>
+        <select data-sb-size>
+          <option>10</option><option selected>20</option><option>50</option><option>100</option>
+        </select>
+      </label>
+      <label class="lm-field grow">
+        <span>Page number <span class="lm-readout" data-sb-pageout>0</span></span>
+        <input type="range" data-sb-page min="0" max="100" value="0" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Result type</span>
+        <select data-sb-strategy>
+          <option value="page" selected>Page (offset + count)</option>
+          <option value="slice">Slice (offset, no count)</option>
+          <option value="keyset">Window (keyset)</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Sorting, safely</h3>
+
+  <pre data-code data-lang="java" data-nobar>
+Sort.by("priceInCents").descending().and(Sort.by("sku"))     // property paths, validated against the entity
+Sort.by(Sort.Direction.DESC, "category", "sku")
+Sort.by(Sort.Order.asc("sku").ignoreCase())
+
+Sort.TypedSort&lt;Product&gt; p = Sort.sort(Product.class);       // refactoring-safe
+p.by(Product::getPriceInCents).descending().and(p.by(Product::getSku));
+
+JpaSort.unsafe("length(sku)")                               // raw JPQL expression; never from user input
+
+// a @Query honours the Pageable's sort by appending it, so the query must not have its own order by
+@Query("select p from Product p where p.category = :c")
+Page&lt;Product&gt; byCategory(@Param("c") Category c, Pageable pageable);
+  </pre>
+
+  <p>A <code>Sort</code> built from property names is checked against the entity metamodel at query time; a typo throws <code>PropertyReferenceException</code> rather than producing bad SQL. That check is what makes it safe to build a <code>Sort</code> from a request parameter <em>after</em> validating the property against an allow-list. <code>JpaSort.unsafe</code> skips the check and interpolates the expression, which is why its name says so.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Pagination gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Paging a fetch join pages in memory.</strong> <code>@Query("select o from Order o join fetch o.lines")</code> with a <code>Pageable</code> cannot apply <code>fetch first</code> in SQL — the join multiplies rows per order — so Hibernate loads <em>everything</em> and pages the list, logging <code>HHH90003004: firstResult/maxResults specified with collection fetch; applying in memory</code>. Page the parent ids first, then fetch the collections for that page (§6).</li>
+        <li><strong>Offset pages drift under writes.</strong> If a row is inserted before page 3 while a user reads page 2, page 3 repeats a row and the one after it is skipped. Keyset positions are stable because they remember a key, not a count.</li>
+        <li><strong>An unstable sort makes keyset wrong and offset random.</strong> Sorting by a non-unique column only (price) means equal rows have no defined order between queries. Spring Data appends <code>id</code> to keyset sorts (F shows it); for offset paging, add the tiebreaker yourself.</li>
+        <li><strong>The count query is the slow one.</strong> On a large table with a filter the <code>count(*)</code> is a full scan the page query avoided through its index. If the UI only needs "next", return a <code>Slice</code>; if it needs totals, cache or estimate them.</li>
+        <li><strong>Do not return <code>Page&lt;Entity&gt;</code> from an API.</strong> Serialising a page of entities walks lazy associations and ships internal fields; <code>Page.map</code> to a DTO, then (Spring Data 3.3+) wrap in <code>PagedModel</code> for a stable JSON shape. <code>spring.data.web.pageable.*</code> properties (default size, max size, one-indexed pages) configure the web binding — the web starter is not on this class path, so they are only mentioned.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-paging-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A method returns <code>Page&lt;Product&gt;</code> for <code>PageRequest.of(2, 20, Sort.by("sku"))</code> on a 1,000-row table. How many SQL statements run, and what do they do?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-paging-1"><span>One: <code>select … order by sku offset 40 fetch first 20</code>; the total comes from the result size <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-paging-1"><span>Two: the offset/fetch select, then <code>select count(*)</code> so the page can report 1,000 elements and 50 pages <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-paging-1"><span>Three: a count, the select, and a check for the next page <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-paging-1"><span>One: Spring Data fetches 21 rows and infers the total from <code>hasNext</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Phase A, exactly: a <code>Page</code> promises totals, and totals need a count. The count is skipped only when the returned rows settle it (a short last page, or a first page smaller than its size — phase B).</p>
+        <p class="mb-0"><strong>A</strong> cannot know the total from 20 rows. <strong>C</strong> adds a statement nothing issues; <code>hasNext</code> is computed from the total. <strong>D</strong> is the <code>Slice</code> technique, which does not produce a total at all.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-paging-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>An infinite-scroll feed shows 50,000 events newest-first and users routinely scroll a thousand items deep. Which repository method shape is right?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-paging-2"><span><code>Page&lt;Event&gt; findAll(Pageable)</code> — pages are what feeds are made of <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-paging-2"><span><code>Slice&lt;Event&gt; findAllByOrderByCreatedAtDesc(Pageable)</code> — no count, so it scales <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-paging-2"><span><code>Window&lt;Event&gt; findFirst20ByOrderByCreatedAtDescIdDesc(ScrollPosition)</code> with a keyset position — each window seeks to the last key instead of skipping rows, and new events cannot shift the pages a user already saw <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-paging-2"><span><code>List&lt;Event&gt; findAll(Sort)</code> and page in the controller <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Deep offset is the problem: item 1,000 means <code>offset 1000</code>, which reads and discards a thousand rows per request, and an insert at the top shifts every later page by one. A keyset window on <code>(createdAt, id)</code> uses the index and is immune to inserts above the cursor.</p>
+        <p class="mb-0"><strong>A</strong> pays a count of 50,000 rows on every scroll and still has the offset cost. <strong>B</strong> drops the count — better — but keeps offset, so it still degrades with depth and drifts under inserts. <strong>D</strong> loads 50,000 entities per request.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-paging-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about this method are true? <em>Select all that apply.</em></span><pre data-code data-lang="java" data-nobar>
+@Query("select o from Order o join fetch o.lines where o.status = :s")
+Page&lt;Order&gt; open(@Param("s") Status s, Pageable pageable);
+      </pre></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Spring Data cannot derive a count query from a fetch join, so without a <code>countQuery</code> the first call fails <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>With a <code>countQuery</code> added it pages efficiently, because <code>fetch first</code> applies to the joined rows <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Even with a <code>countQuery</code>, Hibernate loads every matching order with its lines and pages the list in memory, warning <code>HHH90003004</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Changing <code>Page</code> to <code>Slice</code> removes the in-memory paging <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Two separate problems. The count: Spring Data rewrites simple queries into counts but refuses a fetch join, so you supply <code>countQuery = "select count(o) from Order o where o.status = :s"</code>. The paging: a fetch join returns one row per <em>line</em>, so <code>fetch first 20 rows</code> would cut an order's lines in half; Hibernate therefore fetches all rows and pages the entities in memory, logging the warning. The fix is two queries — page the order ids, then fetch lines for those ids.</p>
+        <p class="mb-0"><strong>B</strong> is the misconception the warning exists for. <strong>D</strong>: a <code>Slice</code> still uses <code>fetch first</code> with a fetch join, so the same in-memory fallback applies.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="paging"> Mark this section complete
+  </label>
+</section>

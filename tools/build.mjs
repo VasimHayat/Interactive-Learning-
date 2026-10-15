@@ -26,6 +26,7 @@ import { readFile, writeFile, mkdir, rm, readdir, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ensureDeps } from './fetch-deps.mjs';
 
 const exec = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -180,7 +181,7 @@ function collectBlocks(html) {
 }
 
 // ── java verification ───────────────────────────────────────────────────────
-async function verifyJava(blocks, slug) {
+async function verifyJava(blocks, slug, libJars = []) {
   /* Pairing is explicit, never positional: <pre data-code data-verify="Cls">
      binds to <pre data-output data-for="Cls">. An earlier positional version
      silently skipped the diff whenever any block sat between the two. */
@@ -206,11 +207,22 @@ async function verifyJava(blocks, slug) {
       throw new Error(`data-verify="${cls}" has no <pre data-output data-for="${cls}"> to diff against ` +
                       `(add one, or declare data-verify-throws="…" if the program is meant to fail)`);
     }
-    jobs.push({ cls, code: b.code, expected, throws, file: b.attrs['data-file'] || '' });
+    /* data-package="com.acme.x" puts the program in its own package: the
+       source still lands in <cls>.java (javac only cares that the file is
+       named after the public class) but it runs as com.acme.x.<cls>. Needed
+       by anything that component-scans — every program shares one classes
+       directory, so an unpackaged Spring app would scan its neighbours. */
+    jobs.push({ cls, code: b.code, expected, throws, file: b.attrs['data-file'] || '', pkg: b.attrs['data-package'] || '' });
   }
 
   for (const id of outputs.keys()) {
     if (!seen.has(id)) warn(`<pre data-output data-for="${id}"> matches no verified program — typo?`);
+  }
+  for (const j of jobs) {
+    const decl = (j.code.match(/^\s*package\s+([\w.]+)\s*;/m) || [])[1] || '';
+    if (decl !== j.pkg) {
+      throw new Error(`data-verify="${j.cls}": data-package="${j.pkg}" but the source declares package "${decl || '(none)'}"`);
+    }
   }
   if (!jobs.length) return { ran: 0, ok: 0, failures: [] };
   if (SKIP_VERIFY) { warn(`skipping verification of ${jobs.length} Java programs (--skip-verify)`); return { ran: 0, ok: 0, failures: [], skipped: jobs.length }; }
@@ -221,10 +233,14 @@ async function verifyJava(blocks, slug) {
 
   for (const j of jobs) await writeFile(path.join(dir, j.cls + '.java'), j.code, 'utf8');
 
+  const cp = ['classes', ...libJars].join(path.delimiter);
   try {
     // pin the encoding — javac otherwise uses the platform charset, which on
     // Windows mangles any non-ASCII character in a source file
-    await exec('javac', ['-nowarn', '-encoding', 'UTF-8', '-d', 'classes',
+    /* A module may declare pinned jars (meta.deps → tools/deps/<name>.json);
+       they go on the class path for both javac and java, so a program can use
+       Hibernate or a JDBC driver exactly as a reader with those jars would. */
+    await exec('javac', ['-nowarn', '-encoding', 'UTF-8', '-d', 'classes', '-cp', cp,
                          ...jobs.map(j => j.cls + '.java')],
                { cwd: dir, maxBuffer: 1 << 24 });
   } catch (e) {
@@ -233,34 +249,49 @@ async function verifyJava(blocks, slug) {
 
   const failures = [];
   let ok = 0;
-  for (const j of jobs) {
+  /* Programs are independent processes (each with its own in-memory DB when a
+     module uses one), so they run a few at a time. Results are collected in
+     job order so failure reports stay stable. */
+  const CONCURRENCY = Math.max(1, Math.min(4, parseInt(process.env.LM_VERIFY_JOBS || '4', 10) || 4));
+  const results = new Array(jobs.length);
+  let next = 0;
+  async function worker() {
+    while (next < jobs.length) {
+      const idx = next++;
+      results[idx] = await runOne(jobs[idx]);
+    }
+  }
+  async function runOne(j) {
     let stdout = '', stderr = '', threw = false;
     try {
-      const r = await exec('java', ['-cp', 'classes', j.cls], { cwd: dir, maxBuffer: 1 << 24 });
+      // a concurrent program that deadlocks must fail the build, not hang it
+      const main = j.pkg ? j.pkg + '.' + j.cls : j.cls;
+      const r = await exec('java', ['-cp', cp, ...(libJars.length ? ['-Djava.util.logging.config.file=' + p('tools/deps/logging.properties')] : []), main],
+                           { cwd: dir, maxBuffer: 1 << 24, timeout: 90_000, killSignal: 'SIGKILL' });
       stdout = r.stdout; stderr = r.stderr;
     } catch (e) {
       threw = true; stdout = e.stdout || ''; stderr = e.stderr || '';
+      if (e.killed) stderr = 'TIMEOUT: the program did not finish within 90 s (deadlock or unbounded wait?)\n' + stderr;
     }
     const norm = s => s.replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '').replace(/\s+$/, '');
 
     if (j.throws) {
       if (!threw || !norm(stderr).includes(j.throws)) {
-        failures.push({ cls: j.cls, detail: `expected a throw containing "${j.throws}"\n  actual stderr: ${norm(stderr).split('\n')[0] || '(none)'}` });
-        continue;
+        return { cls: j.cls, detail: `expected a throw containing "${j.throws}"\n  actual stderr: ${norm(stderr).split('\n')[0] || '(none)'}` };
       }
     } else if (threw) {
-      failures.push({ cls: j.cls, detail: `unexpected exception:\n${norm(stderr).split('\n').slice(0, 4).join('\n')}` });
-      continue;
+      return { cls: j.cls, detail: `unexpected exception:\n${norm(stderr).split('\n').slice(0, 4).join('\n')}` };
     }
 
     if (j.expected !== null) {
       if (norm(stdout) !== norm(j.expected)) {
-        failures.push({ cls: j.cls, detail: `stdout mismatch\n  --- expected ---\n${norm(j.expected)}\n  --- actual ---\n${norm(stdout)}` });
-        continue;
+        return { cls: j.cls, detail: `stdout mismatch\n  --- expected ---\n${norm(j.expected)}\n  --- actual ---\n${norm(stdout)}` };
       }
     }
-    ok++;
+    return null;
   }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));
+  for (const r of results) { if (r) failures.push(r); else ok++; }
   return { ran: jobs.length, ok, failures };
 }
 
@@ -447,7 +478,13 @@ async function buildTopic(slug, css) {
   lint(sections, slug);
 
   const blocks = collectBlocks(sections);
-  const v = await verifyJava(blocks, slug);
+  let libJars = [];
+  if (meta.deps && !SKIP_VERIFY) {
+    const d = await ensureDeps(meta.deps, { log });
+    libJars = d.jars;
+    log(`  ${d.jars.length} dependency jars (${meta.deps})${d.fetched ? ', ' + d.fetched + ' downloaded' : ''}`);
+  }
+  const v = await verifyJava(blocks, slug, libJars);
 
   if (v.failures.length) {
     console.error(`\n  BUILD FAILED — ${v.failures.length} verification failure(s) in ${slug}\n`);
@@ -463,12 +500,14 @@ async function buildTopic(slug, css) {
   let html = await readFile(p('src/templates/module.html'), 'utf8');
   const vars = {
     SLUG: slug,
-    TITLE: meta.title,
-    SUBTITLE: meta.subtitle || '',
-    LEVEL: meta.level,
-    TECH: meta.tech,
-    TIME: meta.time,
-    UPDATED: meta.updated,
+    // meta text lands in element content and attributes, so it is escaped here
+    // (a title such as "JPA & Hibernate" would otherwise ship a raw ampersand)
+    TITLE: H.esc(meta.title),
+    SUBTITLE: H.esc(meta.subtitle || ''),
+    LEVEL: H.esc(meta.level),
+    TECH: H.esc(meta.tech),
+    TIME: H.esc(meta.time),
+    UPDATED: H.esc(meta.updated),
     ACCENT: meta.accent || 'amber',
     NEXT: meta.next || '',
     TOC: toc.html,
@@ -558,7 +597,7 @@ for (const t of buildable) {
   try {
     const r = await buildTopic(t, css);
     const kb = (r.bytes / 1024).toFixed(1);
-    const over = r.bytes > 1024 * 1024 ? '  ** OVER 1 MB BUDGET **' : '';
+    const over = r.bytes > 1.5 * 1024 * 1024 ? '  ** OVER 1.5 MB BUDGET **' : '';
     log(`  ${path.relative(ROOT, r.out)}  ${kb} kB  ·  ${r.sections} sections  ·  ` +
         `java verified ${r.verify.ok}/${r.verify.ran}${r.verify.skipped ? ' (skipped)' : ''}${over}`);
   } catch (e) {

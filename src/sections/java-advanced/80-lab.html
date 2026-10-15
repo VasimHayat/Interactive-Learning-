@@ -1,0 +1,359 @@
+<section class="lm-section" id="lab" data-title="Hands-on lab" data-num="L">
+  <p class="lm-eyebrow">Put it together</p>
+  <h2 class="mb-4">Hands-on lab: a concurrent reservation service</h2>
+
+  <p>Six steps that turn the single-threaded <code>InventoryService</code> from Fundamentals into one that many pickers can hit at once without ever selling stock it does not have. Each step uses one tool from this module, and each has a trap that the single-threaded version never had to think about. Write every step before opening its solution, and run yours several times: a concurrency bug that shows up one run in twenty is still a bug.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Starter</div>
+      <pre data-code data-lang="bash" data-nobar>
+mkdir reservation-lab && cd reservation-lab
+# one file, ReservationLab.java, grown step by step
+javac ReservationLab.java && for i in 1 2 3 4 5; do java ReservationLab | md5sum; done
+# five identical hashes = the output does not depend on scheduling
+      </pre>
+      <p class="mb-0 text-sm">JDK 21 is required for virtual threads (step 5) and for <code>ExecutorService</code> being <code>AutoCloseable</code>, which every <code>try (ExecutorService …)</code> below relies on. Print only facts and sorted data; if your output ever differs between runs, that difference <em>is</em> the bug to find.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Step 1 — stock that can never go negative <span class="lm-badge">§1, §4</span></h3>
+  <p>Store stock levels in a <code>ConcurrentHashMap&lt;String, AtomicInteger&gt;</code>. Write <code>reserve(sku, qty)</code> so that it returns <code>false</code> when there is not enough, and so that two threads reserving the last unit can never <em>both</em> succeed. No <code>synchronized</code>, no locks: a compare-and-swap loop. Count successes and refusals in two more atomics, and keep an <code>AtomicBoolean</code> that would record a negative level if one ever happened.</p>
+  <details class="lm-reveal"><summary>Solution — step 1</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+boolean reserve(String sku, int qty) {
+    AtomicInteger level = stock.get(sku);
+    if (level == null) { refused.incrementAndGet(); return false; }
+    while (true) {
+        int current = level.get();                               // read
+        if (current &lt; qty) { refused.incrementAndGet(); return false; }
+        if (level.compareAndSet(current, current - qty)) {       // write only if nobody moved it
+            reserved.incrementAndGet();
+            return true;
+        }
+        // another thread won the race: loop, re-read, decide again
+    }
+}
+    </pre>
+    <p class="mb-0 text-sm"><code>level.get() &gt;= qty</code> followed by <code>level.addAndGet(-qty)</code> is the check-then-act race: both threads pass the check, both subtract, stock goes negative. CAS makes the subtraction conditional on the value still being what was checked. <code>getOrDefault(sku, new AtomicInteger())</code> would be a subtler bug: it hands out a <em>fresh</em> counter not in the map, so reservations against it vanish.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 2 — moving stock between two SKUs without deadlock <span class="lm-badge">§3</span></h3>
+  <p>Add <code>transfer(from, to, qty)</code> that must see a consistent pair: nobody may observe the stock after it left <code>from</code> and before it arrived at <code>to</code>. Use one <code>ReentrantLock</code> per SKU. Then call <code>transfer("BOLT-7", "NUT-3", 1)</code> and <code>transfer("NUT-3", "BOLT-7", 1)</code> from two threads at the same time, forever. Make it impossible for that to hang.</p>
+  <details class="lm-reveal"><summary>Solution — step 2</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+boolean transfer(String from, String to, int qty) throws InterruptedException {
+    String lo = from.compareTo(to) &lt; 0 ? from : to;         // a global order: always lock the
+    String hi = lo.equals(from) ? to : from;                 // alphabetically smaller SKU first
+    ReentrantLock first  = locks.computeIfAbsent(lo, k -&gt; new ReentrantLock());
+    ReentrantLock second = locks.computeIfAbsent(hi, k -&gt; new ReentrantLock());
+    if (!first.tryLock(2, TimeUnit.SECONDS)) return false;   // bounded: a bug degrades, never hangs
+    try {
+        if (!second.tryLock(2, TimeUnit.SECONDS)) return false;
+        try {
+            AtomicInteger src = stock.get(from);
+            if (src == null || src.get() &lt; qty) return false;
+            src.addAndGet(-qty);
+            stock.computeIfAbsent(to, k -&gt; new AtomicInteger()).addAndGet(qty);
+            return true;
+        } finally { second.unlock(); }
+    } finally { first.unlock(); }
+}
+    </pre>
+    <p class="mb-0 text-sm">Deadlock needs a cycle: thread A holds BOLT and wants NUT while B holds NUT and wants BOLT. Taking locks in a fixed global order makes a cycle impossible, because every thread that wants both takes BOLT first. <code>tryLock</code> with a timeout is the belt to that pair of braces: if someone adds a third lock in the wrong order one day, the symptom is a refused transfer rather than a frozen service. Note the two <code>finally</code> blocks: a lock acquired must be released on every path, including the early <code>return false</code>.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 3 — producers, a bounded queue, and a pool of consumers <span class="lm-badge">§4, §5</span></h3>
+  <p>Four producer threads each generate 100 orders into an <code>ArrayBlockingQueue&lt;Order&gt;</code> of capacity 32. Four consumer tasks on a fixed pool drain it, calling <code>reserve</code> for each. The hard part: how do the consumers know they are finished, and how does <code>main</code> know they all stopped? Count the processed orders and prove the total is 400.</p>
+  <details class="lm-reveal"><summary>Solution — step 3</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+static final Order POISON = new Order(-1, "", 0);
+
+for (int c = 0; c &lt; consumerCount; c++) {
+    handled.add(consumers.submit(() -&gt; {
+        int n = 0;
+        while (true) {
+            Order o = queue.poll(5, TimeUnit.SECONDS);      // bounded wait, not take()
+            if (o == null || o == POISON) break;
+            inv.reserve(o.sku(), o.qty());
+            n++;
+        }
+        return n;
+    }));
+}
+try (ExecutorService producerPool = Executors.newFixedThreadPool(producers)) {
+    /* submit the producers, each counting down a CountDownLatch when done */
+    produced.await(10, TimeUnit.SECONDS);
+    for (int c = 0; c &lt; consumerCount; c++) queue.put(POISON);   // one pill per consumer
+}
+int total = 0;
+for (Future&lt;Integer&gt; f : handled) total += f.get(10, TimeUnit.SECONDS);
+    </pre>
+    <p class="mb-0 text-sm">A bounded queue is back-pressure: when consumers fall behind, <code>put</code> blocks the producers instead of growing the heap. The poison pill is the classic shutdown protocol: one sentinel per consumer, enqueued only after every producer has finished, so no real order can follow it. Each consumer returns its count through a <code>Future</code>, and <code>main</code> blocks on <code>get</code> with a timeout: if a consumer is stuck, the lab fails loudly in ten seconds instead of hanging.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 4 — a quote that combines two lookups and degrades gracefully <span class="lm-badge">§6</span></h3>
+  <p>A quote needs the price (from a pricing service that is down for <code>GIRD-1</code>) and the current stock. Fetch both asynchronously, combine them into one string, and make the failure case produce <code>"GIRD-1: quote unavailable"</code> rather than an exception. Request all four SKUs, wait for all of them with a timeout, and print the quotes <em>sorted</em>.</p>
+  <details class="lm-reveal"><summary>Solution — step 4</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+static CompletableFuture&lt;String&gt; quote(InventoryService inv, String sku, Executor pool) {
+    CompletableFuture&lt;Long&gt; price = CompletableFuture.supplyAsync(() -&gt; {
+        if (sku.equals("GIRD-1")) throw new IllegalStateException("pricing service down");
+        return switch (sku) { case "BOLT-7" -&gt; 80L; case "NUT-3" -&gt; 25L; default -&gt; 2_300L; };
+    }, pool);
+    CompletableFuture&lt;Integer&gt; onHand = CompletableFuture.supplyAsync(() -&gt; inv.onHand(sku), pool);
+    return price.thenCombine(onHand, (p, h) -&gt; sku + ": " + p + "c, " + h + " on hand")
+                .exceptionally(ex -&gt; sku + ": quote unavailable")
+                .orTimeout(5, TimeUnit.SECONDS);
+}
+
+CompletableFuture.allOf(quotes.toArray(new CompletableFuture&lt;?&gt;[0])).get(10, TimeUnit.SECONDS);
+    </pre>
+    <p class="mb-0 text-sm"><code>thenCombine</code> waits for both inputs; <code>exceptionally</code> turns a failed stage into a value, placed <em>after</em> the combine so a failure in either lookup is caught. The quotes complete in whatever order the pool runs them, so printing them as they complete would make the output depend on scheduling; collect, sort, then print. <code>allOf</code> plus <code>get(timeout)</code> is the bounded wait.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 5 — the same workload on virtual threads <span class="lm-badge">§7</span></h3>
+  <p>Run step 3 again against a fresh service, but with <code>Executors.newVirtualThreadPerTaskExecutor()</code> as the consumer pool. Nothing else changes. Prove that the final stock levels and the reservation count are identical to the platform-thread run.</p>
+  <details class="lm-reveal"><summary>Solution — step 5</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+InventoryService inv2 = new InventoryService();
+for (String s : SKUS) inv2.stock(s, 300);
+try (ExecutorService vpool = Executors.newVirtualThreadPerTaskExecutor()) {
+    runPickers(inv2, vpool, 4);
+}
+System.out.println("platform == virtual totals  = " + (inv.reserved.get() == inv2.reserved.get()
+        &amp;&amp; inv2.snapshot().equals(afterPlatform)));
+    </pre>
+    <p class="mb-0 text-sm">The code that was correct on platform threads is correct on virtual threads, because correctness came from the CAS loop and the queue protocol, not from the thread type. What changes is cost: the consumer that blocks in <code>queue.poll</code> parks a virtual thread, which costs a few hundred bytes of heap, rather than parking a carrier. With four consumers it does not matter; with four thousand it is the difference between a working service and one that cannot start.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 6 — a consistent report while writers keep going <span class="lm-badge">§3, §4</span></h3>
+  <p>Add <code>snapshot()</code> returning an unmodifiable, sorted map of stock levels. Reads should not block each other, and the report must never contain a level that is mid-transfer. Decide what lock, if any, you need, and what <code>snapshot</code> must return to be safe to hand to another thread.</p>
+  <details class="lm-reveal"><summary>Solution — step 6</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+private final ReadWriteLock rw = new ReentrantReadWriteLock();
+
+Map&lt;String, Integer&gt; snapshot() {
+    rw.readLock().lock();                       // many readers at once; writers wait
+    try {
+        TreeMap&lt;String, Integer&gt; copy = new TreeMap&lt;&gt;();
+        stock.forEach((k, v) -&gt; copy.put(k, v.get()));
+        return Collections.unmodifiableMap(copy);   // a snapshot: later changes do not leak in
+    } finally { rw.readLock().unlock(); }
+}
+    </pre>
+    <p class="mb-0 text-sm">Returning the live <code>ConcurrentHashMap</code> would be safe to <em>read</em> but would not be a snapshot: the report would change while being printed. The copy is the consistency mechanism; the read lock only matters if writers take the write lock for multi-SKU operations, which is the extension to attempt below. <code>TreeMap</code> makes the output order deterministic, which is what lets five runs produce the same bytes.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">The finished thing</h3>
+
+  <p>All six steps assembled. This program is compiled and run during the build of this page, on real threads, and the output below is what it printed, byte for byte, which is only possible because every line is a fact that scheduling cannot change.</p>
+
+  <pre data-code data-lang="java" data-file="ReservationLab.java" data-verify="ReservationLab" data-hi="24,25,26,27,38,39,40,41,42,87,88,89,146,147">
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+public class ReservationLab {
+
+    record Order(int id, String sku, int qty) {}
+    static final Order POISON = new Order(-1, "", 0);
+
+    /* Step 1 — lock-free stock with a CAS loop that can never go negative */
+    static final class InventoryService {
+        private final ConcurrentHashMap<String, AtomicInteger> stock = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
+        final AtomicInteger reserved = new AtomicInteger();
+        final AtomicInteger refused = new AtomicInteger();
+        final AtomicBoolean wentNegative = new AtomicBoolean(false);
+
+        void stock(String sku, int qty) { stock.computeIfAbsent(sku, k -> new AtomicInteger()).addAndGet(qty); }
+        int onHand(String sku) { AtomicInteger a = stock.get(sku); return a == null ? 0 : a.get(); }
+
+        boolean reserve(String sku, int qty) {
+            AtomicInteger level = stock.get(sku);
+            if (level == null) { refused.incrementAndGet(); return false; }
+            while (true) {
+                int current = level.get();
+                if (current < qty) { refused.incrementAndGet(); return false; }
+                if (level.compareAndSet(current, current - qty)) {
+                    if (current - qty < 0) wentNegative.set(true);
+                    reserved.incrementAndGet();
+                    return true;
+                }
+                // another thread won the race: re-read and try again
+            }
+        }
+
+        /* Step 2 — two locks, always taken in SKU order, with a bounded wait */
+        boolean transfer(String from, String to, int qty) throws InterruptedException {
+            String lo = from.compareTo(to) < 0 ? from : to;
+            String hi = lo.equals(from) ? to : from;
+            ReentrantLock first = locks.computeIfAbsent(lo, k -> new ReentrantLock());
+            ReentrantLock second = locks.computeIfAbsent(hi, k -> new ReentrantLock());
+            if (!first.tryLock(2, TimeUnit.SECONDS)) return false;
+            try {
+                if (!second.tryLock(2, TimeUnit.SECONDS)) return false;
+                try {
+                    AtomicInteger src = stock.get(from);
+                    if (src == null || src.get() < qty) return false;
+                    src.addAndGet(-qty);
+                    stock.computeIfAbsent(to, k -> new AtomicInteger()).addAndGet(qty);
+                    return true;
+                } finally { second.unlock(); }
+            } finally { first.unlock(); }
+        }
+
+        /* Step 6 — a consistent snapshot while writers keep going */
+        private final ReadWriteLock rw = new ReentrantReadWriteLock();
+        Map<String, Integer> snapshot() {
+            rw.readLock().lock();
+            try {
+                TreeMap<String, Integer> copy = new TreeMap<>();
+                stock.forEach((k, v) -> copy.put(k, v.get()));
+                return Collections.unmodifiableMap(copy);
+            } finally { rw.readLock().unlock(); }
+        }
+    }
+
+    static final String[] SKUS = { "BOLT-7", "NUT-3", "CAM-9", "GIRD-1" };
+
+    /* Step 3 — producers feed a bounded queue, a fixed pool of consumers drains it */
+    static void runPickers(InventoryService inv, ExecutorService consumers, int consumerCount) throws Exception {
+        BlockingQueue<Order> queue = new ArrayBlockingQueue<>(32);
+        int producers = 4, ordersPerProducer = 100;
+        CountDownLatch produced = new CountDownLatch(producers);
+        List<Future<Integer>> handled = new ArrayList<>();
+
+        for (int c = 0; c < consumerCount; c++) {
+            handled.add(consumers.submit(() -> {
+                int n = 0;
+                while (true) {
+                    Order o = queue.poll(5, TimeUnit.SECONDS);
+                    if (o == null || o == POISON) break;
+                    inv.reserve(o.sku(), o.qty());
+                    n++;
+                }
+                return n;
+            }));
+        }
+        try (ExecutorService producerPool = Executors.newFixedThreadPool(producers)) {
+            for (int p = 0; p < producers; p++) {
+                final int base = p * ordersPerProducer;
+                producerPool.submit(() -> {
+                    try {
+                        for (int i = 0; i < ordersPerProducer; i++) {
+                            queue.put(new Order(base + i, SKUS[i % SKUS.length], 1 + (i % 3)));
+                        }
+                    } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    finally { produced.countDown(); }
+                });
+            }
+            produced.await(10, TimeUnit.SECONDS);
+            for (int c = 0; c < consumerCount; c++) queue.put(POISON);   // one pill per consumer
+        }
+        int total = 0;
+        for (Future<Integer> f : handled) total += f.get(10, TimeUnit.SECONDS);
+        System.out.println("orders processed            = " + total);
+    }
+
+    /* Step 4 — a quote that combines two async lookups and degrades gracefully */
+    static CompletableFuture<String> quote(InventoryService inv, String sku, Executor pool) {
+        CompletableFuture<Long> price = CompletableFuture.supplyAsync(() -> {
+            if (sku.equals("GIRD-1")) throw new IllegalStateException("pricing service down");
+            return switch (sku) { case "BOLT-7" -> 80L; case "NUT-3" -> 25L; default -> 2_300L; };
+        }, pool);
+        CompletableFuture<Integer> onHand = CompletableFuture.supplyAsync(() -> inv.onHand(sku), pool);
+        return price.thenCombine(onHand, (p, h) -> sku + ": " + p + "c, " + h + " on hand")
+                    .exceptionally(ex -> sku + ": quote unavailable")
+                    .orTimeout(5, TimeUnit.SECONDS);
+    }
+
+    public static void main(String[] args) throws Exception {
+        InventoryService inv = new InventoryService();
+        for (String s : SKUS) inv.stock(s, 300);   // demand is 199 per SKU, so nothing is refused
+
+        // Step 3 on a platform-thread pool
+        try (ExecutorService pool = Executors.newFixedThreadPool(4)) { runPickers(inv, pool, 4); }
+        Map<String, Integer> afterPlatform = inv.snapshot();
+        int stockAfterPicking = afterPlatform.values().stream().mapToInt(Integer::intValue).sum();
+
+        // Step 2 — move stock between SKUs under ordered locks, from several threads at once
+        try (ExecutorService pool = Executors.newFixedThreadPool(4)) {
+            List<Future<Boolean>> moves = new ArrayList<>();
+            for (int i = 0; i < 40; i++) {
+                String a = SKUS[i % 4], b = SKUS[(i + 1) % 4];
+                moves.add(pool.submit(() -> inv.transfer(a, b, 1)));
+            }
+            int done = 0;
+            for (Future<Boolean> m : moves) if (m.get(10, TimeUnit.SECONDS)) done++;
+            System.out.println("transfers completed         = " + done + " of 40");
+        }
+
+        // Step 5 — the same workload on virtual threads, fresh stock, identical totals expected
+        InventoryService inv2 = new InventoryService();
+        for (String s : SKUS) inv2.stock(s, 300);
+        try (ExecutorService vpool = Executors.newVirtualThreadPerTaskExecutor()) { runPickers(inv2, vpool, 4); }
+
+        // Step 4
+        try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+            List<CompletableFuture<String>> quotes = new ArrayList<>();
+            for (String s : SKUS) quotes.add(quote(inv2, s, pool));
+            CompletableFuture.allOf(quotes.toArray(new CompletableFuture<?>[0])).get(10, TimeUnit.SECONDS);
+            List<String> lines = new ArrayList<>();
+            for (CompletableFuture<String> q : quotes) lines.add(q.join());
+            Collections.sort(lines);
+            lines.forEach(l -> System.out.println("quote                       = " + l));
+        }
+
+        boolean refusedBig = !inv.reserve("BOLT-7", 1_000);          // more than exists: must refuse, never go negative
+        System.out.println("oversized order refused     = " + refusedBig);
+
+        // Step 6 — facts only
+        int stockAfterTransfers = inv.snapshot().values().stream().mapToInt(Integer::intValue).sum();
+        System.out.println("stock never negative        = " + !inv.wentNegative.get());
+        System.out.println("reserved + refused == 401   = " + (inv.reserved.get() + inv.refused.get() == 401));
+        System.out.println("stock conserved by transfer = " + (stockAfterTransfers == stockAfterPicking));
+        System.out.println("platform == virtual totals  = " + (inv.reserved.get() == inv2.reserved.get()
+                && inv2.snapshot().equals(afterPlatform)));
+        System.out.println("final stock (virtual run)   = " + inv2.snapshot());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ReservationLab">
+orders processed            = 400
+transfers completed         = 40 of 40
+orders processed            = 400
+quote                       = BOLT-7: 80c, 104 on hand
+quote                       = CAM-9: 2300c, 96 on hand
+quote                       = GIRD-1: quote unavailable
+quote                       = NUT-3: 25c, 100 on hand
+oversized order refused     = true
+stock never negative        = true
+reserved + refused == 401   = true
+stock conserved by transfer = true
+platform == virtual totals  = true
+final stock (virtual run)   = {BOLT-7=104, CAM-9=96, GIRD-1=104, NUT-3=100}
+  </pre>
+
+  <p>Why the numbers are what they are: each producer's 100 orders cycle through the four SKUs with quantities 1, 2, 3, so every SKU is asked for about 199 units per run, out of 300. Nothing is refused until the deliberate 1,000-unit order at the end, which is why <code>reserved + refused</code> is 401, and the forty one-unit transfers move ten units around each edge of a cycle and net to zero per SKU, which is why the stock is conserved and the platform and virtual runs agree.</p>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Extensions worth attempting</div>
+      <ul class="mb-0">
+        <li><strong>Make <code>transfer</code> and <code>snapshot</code> truly consistent.</strong> Right now a snapshot can observe the moment between the subtract and the add. Take the write lock in <code>transfer</code> and the read lock in <code>snapshot</code>, then prove with a counter that the sum of all levels in every snapshot taken during 10,000 concurrent transfers is always 1,200. Then measure what the write lock costs the pickers.</li>
+        <li><strong>Reduce stock to 100 per SKU</strong> so that refusals happen during the concurrent run. The reservation count now varies between runs. Which facts can you still print deterministically, and how would you test that the service is correct when its output is not?</li>
+        <li><strong>Replace the poison pills with structured concurrency.</strong> Run the producers and consumers under a <code>StructuredTaskScope.ShutdownOnFailure</code> (preview in 21, so <code>--enable-preview</code>) and make a producer throw. What happens to the consumers, and how does that compare to what happens today if a producer dies?</li>
+      </ul>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lab"> Mark this section complete
+  </label>
+</section>

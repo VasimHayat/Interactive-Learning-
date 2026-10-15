@@ -1,0 +1,29 @@
+<section class="lm-section" id="objectives" data-title="Learning objectives" data-num="iii">
+  <p class="lm-eyebrow">The contract</p>
+  <h2 class="mb-4">Learning objectives</h2>
+
+  <p>By the end of this module you will be able to do each of the following without reaching for a reference. The final quiz tests exactly these twelve.</p>
+
+  <ol class="max-w-prose">
+    <li><strong>Explain</strong> what <code>spring-boot-starter-data-jpa</code> auto-configures, in what order, and how the default property set (naming strategy, <code>ddl-auto</code>, <code>open-in-view</code>) differs from plain Hibernate.</li>
+    <li><strong>Choose</strong> the right repository interface and predict what <code>save</code> does for a new versus an existing entity, including the role of <code>@Version</code> and <code>Persistable</code>.</li>
+    <li><strong>Derive</strong> a query from a method name using the keyword grammar, predict its SQL, and know when a derived name has become unreadable.</li>
+    <li><strong>Declare</strong> queries with <code>@Query</code> (JPQL and native), write <code>@Modifying</code> updates safely, and choose between interface, class and dynamic projections.</li>
+    <li><strong>Draw</strong> the transaction boundary of a request through the <code>@Transactional</code> proxy, name each propagation level's effect, explain the self-invocation trap and the checked-exception rollback rule.</li>
+    <li><strong>Diagnose</strong> N+1 in a Spring service from statement counts and fix it with <code>@EntityGraph</code> or a fetch query, with <code>open-in-view</code> off.</li>
+    <li><strong>Paginate</strong> with <code>Pageable</code>/<code>Page</code>/<code>Slice</code>, explain the count query, and choose keyset scrolling for deep pages.</li>
+    <li><strong>Audit</strong> entities with <code>@CreatedDate</code>/<code>@LastModifiedDate</code>/<code>@CreatedBy</code> and publish domain events that fire after commit.</li>
+    <li><strong>Compose</strong> dynamic filters with <code>Specification</code> and Query by Example, and say where each stops being the right tool.</li>
+    <li><strong>Validate</strong> entities and service inputs with Bean Validation and map Spring's translated <code>DataAccessException</code> hierarchy to causes.</li>
+    <li><strong>Test</strong> the data layer with <code>@DataJpaTest</code>, <code>TestEntityManager</code>, <code>@Sql</code> and Testcontainers, and explain why test transactions roll back.</li>
+    <li><strong>Configure</strong> profiles, <code>@ConfigurationProperties</code>, the Hikari pool and production-safe JPA settings.</li>
+  </ol>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Deliberately out of scope</div>
+      <p class="mb-0"><strong>Spring MVC and REST controllers</strong> get one paragraph on DTOs at the boundary; the programs here have no web layer at all. <strong>Spring Security</strong>, <strong>Spring Data REST</strong>, the reactive stack and <strong>R2DBC</strong> are not covered. <strong>Spring Data JDBC</strong> gets a comparison paragraph in §1, <strong>Querydsl</strong> a mention in §9, and Hibernate <strong>Envers</strong> a mention in §8. Everything that <em>is</em> covered runs in the programs on this page.</p>
+    </div>
+  </div>
+</section>

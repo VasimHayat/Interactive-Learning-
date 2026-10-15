@@ -1,0 +1,206 @@
+<section class="lm-section" id="quiz" data-title="Self-assessment quiz" data-num="Q">
+  <p class="lm-eyebrow">Assessment</p>
+  <h2 class="mb-4">Self-assessment quiz</h2>
+  <p>Sixteen questions covering all twelve learning objectives. Answer every one, then submit — nothing is marked until you do, and the explanations stay hidden until then. Your answers are saved locally, so you can leave and come back. Each question about runtime behaviour was checked against this module's verified programs on Hibernate 7.4 and H2.</p>
+
+  <div class="lm-quiz" data-quiz>
+
+    <!-- objective 1: persist and the SQL it produces -->
+    <div class="lm-q" data-q id="qz-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>An entity uses <code>GenerationType.SEQUENCE</code> with the default allocation size. Inside a transaction you call <code>em.persist(product)</code> and stop there. Which SQL has executed so far?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-1"><span>The <code>insert</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-1"><span>Only <code>select next value for product_SEQ</code>; the insert is queued for the flush <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-1"><span>Nothing until <code>commit()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-1"><span>The sequence call and then the insert, back to back <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The identity map needs a key, so the sequence is consulted at <code>persist</code> (once per block of fifty); the insert waits for the flush. <code>FirstEntity</code> printed two sequence calls, then two inserts at commit. <strong>A</strong> and <strong>D</strong> describe <code>IDENTITY</code>, where the row must be inserted to obtain the key. <strong>C</strong> is contradicted by the id being printable before commit.</p></div>
+    </div>
+
+    <!-- objective 2: what IDENTITY costs -->
+    <div class="lm-q" data-q id="qz-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>Product</code> has <code>SEQUENCE</code> ids, <code>Warehouse</code> has <code>IDENTITY</code> ids. In one transaction the code persists a product, then a warehouse, then prints a line, then commits. Which inserts have run when the line is printed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-2"><span>Neither; both wait for commit <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-2"><span>Only the warehouse insert <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-2"><span>Both: the IDENTITY insert cannot be deferred, and the queued product insert is flushed ahead of it to preserve order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-2"><span>Only the product insert <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> The <code>Mapping</code> program's output shows the product insert, then <code>insert into warehouse … values (?,default)</code>, and only then the printed line. <strong>A</strong> ignores that an identity column is assigned by the database during the insert. <strong>B</strong> misses the ordering rule: Hibernate does not let a later insert overtake an earlier queued one. <strong>D</strong> has the forced insert on the wrong entity.</p></div>
+    </div>
+
+    <!-- objective 3: flush ordering -->
+    <div class="lm-q" data-q id="qz-3" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>sku</code> has a unique constraint. One transaction calls <code>em.remove(oldBolt)</code>, then persists a new product with the same SKU, then commits. Result?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-3"><span>Success; statements run in call order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-3"><span>A constraint violation at flush, because inserts are executed before deletes whatever the call order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-3"><span><code>EntityExistsException</code> from <code>persist</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-3"><span>Hibernate rewrites the pair as one <code>update</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The action queue is sorted at flush: inserts, updates, collection changes, deletes. An explicit <code>flush()</code> between the two calls fixes it. <strong>A</strong> is the assumption behind the bug. <strong>C</strong> concerns a duplicate <em>id</em> in the context; the new entity has a fresh one. <strong>D</strong>: two different entities are never folded into one statement.</p></div>
+    </div>
+
+    <!-- objective 4: owning side, cascade, orphan removal -->
+    <div class="lm-q" data-q id="qz-4" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span><code>Order.lines</code> is <code>@OneToMany(mappedBy = "order", cascade = ALL, orphanRemoval = true)</code> and <code>OrderLine.order</code> is the <code>@ManyToOne</code> with the <code>@JoinColumn</code>. Which are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Adding a line to <code>order.getLines()</code> without setting <code>line.order</code> stores the line with a null <code>order_id</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>Order</code> is the owning side because it declares the collection <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Removing a line from the collection and committing deletes that row <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Removing the order leaves its lines behind with dangling foreign keys <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A and C.</strong> Both were printed by the <code>Relationships</code> program: a line with <code>order_id</code> null in block 1, and a <code>delete from order_line</code> after <code>removeLine</code> in block 3. <strong>B</strong> is reversed — the side holding the foreign key owns the association, and <code>mappedBy</code> marks <code>Order.lines</code> as inverse. <strong>D</strong>: <code>cascade = ALL</code> includes <code>REMOVE</code>, so the lines are deleted before the order.</p></div>
+    </div>
+
+    <!-- objective 5: statement arithmetic -->
+    <div class="lm-q" data-q id="qz-5" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">5.</span><span>Fifty orders with a lazy <code>lines</code> collection are loaded with <code>select o from Order o</code>, and a loop reads <code>getLines().size()</code> on each. Statement count with the default mapping, and with <code>@BatchSize(size = 25)</code> on the collection?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-5"><span>1 and 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-5"><span>50 and 2 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-5"><span>51 and 3 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-5"><span>51 and 26 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> One query for the orders plus one per collection: 51. Batch fetching groups the collection loads into <code>in (…)</code> chunks: 1 + ⌈50 / 25⌉ = 3, the same arithmetic as phase D of <code>NPlusOne</code>. <strong>A</strong> would need <code>join fetch</code> or an entity graph. <strong>B</strong> drops the orders query. <strong>D</strong> halves the loads instead of chunking them.</p></div>
+    </div>
+
+    <!-- objective 5: lazy loading outside the context -->
+    <div class="lm-q" data-q id="qz-6" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">6.</span><span>A template reads <code>order.getLines()</code> after the service's <code>EntityManager</code> closed and gets <code>LazyInitializationException</code>. Which fix removes both the exception and the hidden extra queries?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-6"><span>Keep the <code>EntityManager</code> open until the response is rendered <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-6"><span>Change the mapping to <code>fetch = EAGER</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-6"><span>Catch the exception in the template and show an empty list <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-6"><span>Fetch the lines in the service query (<code>join fetch</code> or an entity graph) or return a DTO that already contains them <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>D.</strong> The exception means the entity outlived its context; deciding what the view needs inside the service fixes the cause in one statement. <strong>A</strong> is open-session-in-view: the lazy loads now succeed from the template, one query each, with a connection held for the whole request. <strong>B</strong> changes every load forever and, for JPQL, still issues the extra selects. <strong>C</strong> renders wrong data.</p></div>
+    </div>
+
+    <!-- objective 6: JPQL translation -->
+    <div class="lm-q" data-q id="qz-7" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">7.</span><span>What SQL shape does <code>select o.customer from PurchaseOrder o where o.lines is empty</code> become?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-7"><span>A <code>left join</code> to <code>order_line</code> with <code>where order_line.id is null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-7"><span><code>where not exists (select 1 from order_line l where po.id = l.order_id)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-7"><span>Two queries: the orders, then a count per order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-7"><span>It is rejected: collections cannot appear in a <code>where</code> clause <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> The <code>Queries</code> program printed exactly that <code>not exists</code> subquery; <code>size(o.lines) = 2</code> likewise became a correlated <code>count(*)</code> subquery. <strong>A</strong> is a valid hand-written alternative but not what Hibernate emits. <strong>C</strong> describes lazy loading, which a predicate never triggers. <strong>D</strong>: collection predicates are part of JPQL.</p></div>
+    </div>
+
+    <!-- objective 6: bulk statements bypass the context -->
+    <div class="lm-q" data-q id="qz-8" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">8.</span><span><code>bolt</code> is a managed <code>Product</code> at 80 cents. The same transaction runs the bulk statement <code>update Product p set p.priceInCents = p.priceInCents + 5 where p.category = :c</code>, which affects that row. What does <code>bolt.priceInCents()</code> return right after <code>executeUpdate()</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-8"><span>85 — the context re-reads affected entities <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-8"><span>85 — the bulk update is applied to managed instances first <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-8"><span>80 — a bulk JPQL statement bypasses the persistence context; <code>refresh(bolt)</code> gives 85 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-8"><span>An <code>OptimisticLockException</code>, because the row changed under a managed entity <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> The output reads <code>managed copy still says 80c</code> and then <code>after refresh 85c</code>. Bulk statements go straight to the database; managed copies keep their snapshot, and a later flush could even overwrite the bulk change with stale values. <strong>A</strong> and <strong>B</strong> invent synchronisation that does not exist. <strong>D</strong>: versions are checked when <em>this</em> context writes, not when it reads.</p></div>
+    </div>
+
+    <!-- objective 7: flush modes -->
+    <div class="lm-q" data-q id="qz-9" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">9.</span><span>In an empty table, inside one transaction, the code persists a product and then runs <code>select count(p) from Product p</code>. What is the count with the default flush mode, and with <code>FlushModeType.COMMIT</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-9"><span>1, then 0 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-9"><span>0, then 0 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-9"><span>1, then 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-9"><span>0, then 1 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A.</strong> <code>FlushModeType.AUTO</code> flushes the pending insert before a query that could see it, so the count is 1; <code>COMMIT</code> defers the insert to commit and the query counts 0. Both numbers are printed by <code>Flushing</code>. <strong>B</strong> and <strong>C</strong> deny that the mode changes anything. <strong>D</strong> has the two modes swapped.</p></div>
+    </div>
+
+    <!-- objective 7: optimistic locking and rollback-only -->
+    <div class="lm-q" data-q id="qz-10" data-answer="b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">10.</span><span>Which statements about committing are true on Hibernate 7.4 with default settings? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A stale <code>@Version</code> at commit raises <code>OptimisticLockException</code> directly from <code>commit()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A stale <code>@Version</code> at commit raises <code>RollbackException</code> whose cause is <code>OptimisticLockException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>After <code>setRollbackOnly()</code>, <code>commit()</code> throws <code>RollbackException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>After <code>setRollbackOnly()</code>, <code>commit()</code> returns normally and the transaction has been rolled back <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B and D.</strong> <code>OptimisticLock</code> printed <code>RollbackException caused by OptimisticLockException</code>; <code>Flushing</code> printed that <code>commit()</code> returned normally after <code>setRollbackOnly()</code> and no row was written. <strong>A</strong> forgets the wrapping at commit time. <strong>C</strong> is the JPA-specified behaviour, which Hibernate adopts only with <code>hibernate.jpa.compliance.transaction=true</code>.</p></div>
+    </div>
+
+    <!-- objective 8: inheritance strategies -->
+    <div class="lm-q" data-q id="qz-11" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">11.</span><span><code>CardPayment extends Payment</code> must store <code>last4</code> as <code>NOT NULL</code>, and <code>Payment</code> ids come from an identity column. Which strategy satisfies both?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-11"><span><code>SINGLE_TABLE</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-11"><span><code>JOINED</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-11"><span><code>TABLE_PER_CLASS</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-11"><span><code>@MappedSuperclass</code> on <code>Payment</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> A subclass table of its own can carry <code>last4 varchar(4) not null</code>, as the <code>InheritanceMapping</code> DDL showed, and identity ids are fine because the parent row is inserted first. <strong>A</strong> forces subclass columns to be nullable. <strong>C</strong> cannot use identity ids — keys must be unique across tables, so a sequence is required. <strong>D</strong> makes <code>Payment</code> unqueryable and gives no polymorphism.</p></div>
+    </div>
+
+    <!-- objective 9: batching numbers -->
+    <div class="lm-q" data-q id="qz-12" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">12.</span><span>A loop persists 100 products with <code>hibernate.jdbc.batch_size=20</code> and <code>order_inserts=true</code>. Prepared-statement count with <code>IDENTITY</code> ids, and with <code>SEQUENCE</code> ids (default allocation) plus <code>flush()</code>/<code>clear()</code> every 20?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-12"><span>5 and 5 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-12"><span>100 and 100 — batching only affects updates <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-12"><span>100 and 8 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-12"><span>20 and 8 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> These are the numbers <code>Batching</code> measured: every IDENTITY insert is its own statement, while SEQUENCE lets the inserts queue and batch — five batches of twenty plus the sequence round trips. <strong>A</strong> gives IDENTITY a batching ability it does not have. <strong>B</strong> is false; inserts batch when deferred. <strong>D</strong>: an identity insert cannot be grouped at all.</p></div>
+    </div>
+
+    <!-- objective 10: schema settings -->
+    <div class="lm-q" data-q id="qz-13" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">13.</span><span>Production configuration sets <code>jakarta.persistence.schema-generation.database.action=none</code> and <code>hibernate.hbm2ddl.auto=validate</code>. A migration was forgotten and a mapped column is missing. What happens at startup?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-13"><span><code>SchemaManagementException</code>; the application refuses to start <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-13"><span>Hibernate adds the missing column <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-13"><span>It starts: the JPA property takes precedence and switches validation off, so the mismatch surfaces later as a SQL error <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-13"><span>A warning is logged and the column is treated as transient <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> The §10 worked example hit this: with the JPA key set, <code>validate</code> is ignored. Set only <code>hibernate.hbm2ddl.auto=validate</code> to get <strong>A</strong>, which is the behaviour you want. <strong>B</strong> is what <code>update</code> would do, and why <code>update</code> is not a deployment strategy. <strong>D</strong> is invented; Hibernate never silently drops a mapped column.</p></div>
+    </div>
+
+    <!-- objective 11: equality -->
+    <div class="lm-q" data-q id="qz-14" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">14.</span><span>An entity's <code>equals</code> and <code>hashCode</code> use its generated id. The code adds a new instance to a <code>HashSet</code>, persists it, then calls <code>set.contains(instance)</code>. Result?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-14"><span><code>true</code> — it is the same object <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-14"><span><code>false</code> — the hash changed when the id was assigned, so the lookup probes the wrong bucket <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-14"><span>A <code>ConcurrentModificationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-14"><span><code>true</code>, but only if <code>flush()</code> was called <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>B.</strong> <code>EntityDesign</code> printed <code>id-based hashCode : id=1, set.contains = false</code>; a business-key hash or a constant hash with an id-based <code>equals</code> printed <code>true</code>. <strong>A</strong> confuses identity with hashing — <code>HashSet</code> finds the bucket first. <strong>C</strong> needs iteration during modification, which did not happen. <strong>D</strong>: flushing writes the row; it does not move the object between buckets.</p></div>
+    </div>
+
+    <!-- objective 11 + 12: soft delete visibility -->
+    <div class="lm-q" data-q id="qz-15" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">15.</span><span>An entity carries <code>@SQLDelete(sql = "update soft_product set deleted = true where id = ?")</code> and <code>@SQLRestriction("deleted = false")</code>. After <code>em.remove(p)</code> and commit, what do <code>select count(p) from SoftProduct p</code> (JPQL) and <code>select count(*) from soft_product</code> (native) return for a table that held only that row?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="qz-15"><span>0 and 0 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="qz-15"><span>1 and 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="qz-15"><span>0 and 1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="qz-15"><span>1 and 0 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>C.</strong> <code>remove</code> became an <code>update … set deleted = true</code>, the restriction hides the row from JPQL and <code>find</code>, and native SQL still sees it — <code>JPQL count = 0, native count = 1</code> in the worked example. <strong>A</strong> would need a real delete. <strong>B</strong> ignores the restriction. <strong>D</strong> reverses which API sees the filter.</p></div>
+    </div>
+
+    <!-- objectives 4, 5, 9, 12: facts specific to the pinned stack -->
+    <div class="lm-q" data-q id="qz-16" data-answer="a,b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">16.</span><span>Which of these were demonstrated by this module's verified programs? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>show_sql</code> prints one line per logical insert, so it cannot tell you whether JDBC batching happened; <code>Statistics</code> can <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>The inverse side of a <code>@OneToOne(mappedBy = …)</code> is loaded eagerly even when declared <code>LAZY</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>fetch = EAGER</code> on a collection makes a JPQL query return parents and children in one statement <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A <code>select new</code> projection into a nested record must name it by its binary name, such as <code>Queries$SkuRevenue</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <div class="lm-explain" hidden data-explain><p class="mb-0"><strong>A, B and D.</strong> <strong>A</strong> is why <code>Batching</code> switched the echo off and counted with statistics. <strong>B</strong> was visible in <code>Relationships</code> block 4: <code>find(Product)</code> also selected <code>product_details</code>, because Hibernate cannot proxy a field that may be null. <strong>D</strong> is the JPQL in <code>Queries</code>. <strong>C</strong> is false: for JPQL an eager collection is loaded by secondary selects after the query — the statement count does not drop, which is one more reason to keep every mapping lazy.</p></div>
+    </div>
+
+    <div class="flex flex-wrap gap-2 mt-6" data-print="hide">
+      <button type="button" class="lm-btn lm-btn--primary" data-quiz-submit>Submit all 16 answers</button>
+      <button type="button" class="lm-btn" data-quiz-review hidden>Review wrong answers</button>
+    </div>
+    <div class="lm-score" data-quiz-score hidden></div>
+  </div>
+</section>

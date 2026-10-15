@@ -1,6 +1,6 @@
 # Learning modules — interactive Java course
 
-A three-module Java course, Basic → Intermediate → Advanced, shipped as one self-contained
+A five-module Java course, Basic → Intermediate → Advanced → JPA & Hibernate → Spring Data JPA, shipped as one self-contained
 HTML file per module plus a landing page. No framework, no network requests, works offline,
 prints cleanly. Every Java program shown in a module is **compiled and executed against the
 local JDK during the build** and its real stdout is diffed against the output printed on the
@@ -10,7 +10,9 @@ page; a mismatch fails the build.
 |---|---|---|---|
 | Java Fundamentals | `java-basics` | Basic | complete — 23 sections |
 | Java Intermediate | `java-intermediate` | Intermediate | complete — 22 sections, 19 verified programs, 7 sandboxes, 6 steppers |
-| Java Advanced | `java-advanced` | Advanced | planned — outline in `docs/outline-java-advanced.md` |
+| Java Advanced | `java-advanced` | Advanced | complete — 23 sections, 19 verified programs, 10 sandboxes, 8 steppers |
+| JPA & Hibernate | `java-jpa` | Applied | complete — 21 sections, 16 verified programs (Hibernate 7.4 + H2, pinned in `tools/deps/java-jpa.json`), 6 sandboxes, 5 steppers |
+| Spring Data JPA | `java-spring-data` | Applied | in progress — outline in `docs/outline-java-spring-data.md`; Spring Boot 4.1.1 BOM resolved by Maven via `tools/deps/java-spring-data.json` |
 
 ## Build
 
@@ -53,6 +55,25 @@ tools/build.mjs               the whole pipeline (css → js → lint → verify
 docs/                         module outlines and authoring contracts
 ```
 
+## Module dependencies (jars)
+
+A module whose programs need libraries declares `"deps": "<name>"` in its meta file. The pinned jar list
+lives in `tools/deps/<name>.json` (plain `group:artifact:version` coordinates, no transitive resolution — every
+jar is listed by hand). `tools/fetch-deps.mjs` copies each jar from the local Maven cache (`~/.m2`) or downloads it
+from Maven Central into `build/lib/<name>/`; the build does this automatically and then puts the jars on the
+class path of `javac` and `java` for that module's verified programs. The JVM also gets
+`tools/deps/logging.properties` so library INFO logging stays off stderr. Bumping a version is an edit to the
+JSON followed by a build, which re-verifies every program against the new jars.
+
+A list may instead declare a Maven block (`"maven": { "bom": "g:a:v", "dependencies": ["g:a", …] }`); the fetcher then
+generates a pom and runs `mvn dependency:copy-dependencies` so the full transitive, BOM-managed graph is resolved — the only
+workable option for Spring Boot. Maven is found on PATH, in `MAVEN_HOME`, or in the Maven Wrapper cache under `~/.m2/wrapper`.
+A program that must live in its own package (anything Spring component-scans) declares `data-package="com.acme.x"` on its
+`<pre data-code>` and starts with the matching `package` line; the build runs it by its qualified name.
+
+Verified programs run four at a time (`LM_VERIFY_JOBS=1` to serialise). Each is an independent process,
+so a module using an in-memory database gets a fresh database per program.
+
 ## Authoring a section
 
 See `docs/outline-java-intermediate.md` for the full contract. The short version:
@@ -88,5 +109,5 @@ a sandbox with no handler, an ordering widget with no solution, a section withou
   changes, and every per-module accent is defined for both schemes.
 - Everything is keyboard-operable and announced through `aria-live` regions; the steppers
   take `←`/`→`, the matching widget works by click as well as drag.
-- Budget: a module stays under 1 MB; the build warns past it.
+- Budget: a module stays under 1.5 MB; the build warns past it.
 "# Interactive-Learning-" 

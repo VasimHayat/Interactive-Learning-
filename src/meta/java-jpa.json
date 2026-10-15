@@ -1,0 +1,12 @@
+{
+  "title": "JPA & Hibernate",
+  "subtitle": "Persistence done properly — entity mapping, the persistence context, relationships and fetching, JPQL and the Criteria API, transactions and locking, inheritance, batching and caching, schema management — with the warehouse's products, orders and stock finally stored in a real database, and every SQL statement on the page emitted by Hibernate itself at build time.",
+  "level": "Applied",
+  "tech": "Java 21 · Hibernate 7.4 · JPA 3.2 · H2",
+  "time": "9–11 hours",
+  "updated": "October 2026",
+  "accent": "emerald",
+  "order": 4,
+  "prev": "Java Advanced",
+  "deps": "java-jpa"
+}

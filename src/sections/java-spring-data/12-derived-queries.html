@@ -1,0 +1,450 @@
+<section class="lm-section" id="derived-queries" data-title="Derived queries: method names that become SQL" data-num="3">
+  <p class="lm-eyebrow">Section 3</p>
+  <h2 class="mb-4">Derived queries: method names that become SQL</h2>
+
+  <p>A repository interface in §2 had no implementation and still worked, because Spring Data generated a proxy for it. This section is about the part of that proxy that reads your mind: declare <code>List&lt;Product&gt; findByCategoryAndPriceInCentsLessThan(Category c, int max)</code> with no body and no annotation, and at startup Spring Data <em>parses the method name</em> into a predicate tree, checks every property against the entity's metamodel, builds a JPQL query from it, and from then on every call runs that query. The name is the specification. Get it wrong and the application refuses to start, which is the best place to be wrong.</p>
+
+  <p>The grammar is small. A <strong>subject</strong> (<code>find…By</code>, <code>count…By</code>, <code>exists…By</code>, <code>delete…By</code>, with optional <code>Distinct</code>, <code>First</code>/<code>Top</code> and a limit), then a <strong>predicate</strong> made of property names, comparison keywords and <code>And</code>/<code>Or</code>, then an optional <strong><code>OrderBy</code></strong> with properties and directions. Parameters are bound to the predicate's placeholders <em>by position</em>, left to right, so the parameter order must follow the name. Everything else — the SQL, the parameter escaping, the <code>fetch first</code> clause, the <code>upper()</code> for a case-insensitive match — is derived.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>One repository with eighteen derived methods, exercised over seven products. Two of them have no name on purpose (<code>findByNameIsNull</code>), two are inactive, and the SKUs are chosen so that each string keyword matches something different. Read the <code>Hibernate:</code> line above each result: it is the SQL the name became.</p>
+
+  <pre data-code data-lang="java" data-file="DerivedQueries.java" data-verify="DerivedQueries" data-package="lm.derived">
+package lm.derived;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Stream;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class DerivedQueries {
+
+    public enum Category { FASTENER, STRUCTURAL, MOTION }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        String name;                                        // nullable on purpose: see findByNameIsNull
+        @Enumerated(EnumType.STRING) @Column(nullable = false, length = 16) Category category;
+        int priceInCents;
+        boolean active;
+        protected Product() {}
+        Product(String sku, String name, Category category, int priceInCents, boolean active) {
+            this.sku = sku; this.name = name; this.category = category; this.priceInCents = priceInCents; this.active = active;
+        }
+        @Override public String toString() { return sku; }
+    }
+
+    // Every method below is implemented by Spring Data from its NAME alone.
+    public interface ProductRepository extends JpaRepository<Product, Long> {
+        List<Product> findByCategoryOrderBySkuAsc(Category category);
+        List<Product> findByCategoryAndPriceInCentsLessThanOrderBySku(Category category, int max);
+        List<Product> findByPriceInCentsBetweenOrderByPriceInCents(int low, int high);
+        List<Product> findBySkuStartingWithOrderBySku(String prefix);
+        List<Product> findBySkuContainingOrderBySku(String part);
+        List<Product> findBySkuEndingWithOrderBySku(String suffix);
+        Optional<Product> findByNameIgnoreCase(String name);
+        List<Product> findBySkuInOrderBySku(Collection<String> skus);
+        List<Product> findByActiveTrueOrderBySku();
+        List<Product> findByNameIsNullOrderBySku();
+        List<Product> findFirst3ByOrderByPriceInCentsDesc();
+        Optional<Product> findTopByCategoryOrderByPriceInCentsAsc(Category category);
+        long countByCategory(Category category);
+        boolean existsBySku(String sku);
+        long countByActiveFalse();
+        long deleteBySku(String sku);                        // derived delete: needs a transaction
+        List<Product> findByCategory(Category category, Sort sort);
+        Stream<Product> findByPriceInCentsGreaterThanOrderBySku(int min);   // needs an open transaction
+    }
+
+    @Bean TransactionTemplate tx(PlatformTransactionManager manager) { return new TransactionTemplate(manager); }
+
+    @Bean CommandLineRunner demo(ProductRepository repo, TransactionTemplate tx) {
+        return args -> {
+            repo.saveAll(List.of(
+                new Product("BOLT-7", "Hex bolt M8", Category.FASTENER, 80, true),
+                new Product("NUT-3", "Hex nut M8", Category.FASTENER, 25, true),
+                new Product("PIN-2", null, Category.FASTENER, 15, false),
+                new Product("GIRD-1", "Steel girder 6m", Category.STRUCTURAL, 120_000, true),
+                new Product("ROD-4", "Threaded rod 1m", Category.STRUCTURAL, 4_500, true),
+                new Product("CAM-9", "Cam follower", Category.MOTION, 2_300, true),
+                new Product("HUB-8", null, Category.MOTION, 7_900, false)));
+
+            System.out.println("-- equality, comparison, range --");
+            System.out.println("fasteners         = " + repo.findByCategoryOrderBySkuAsc(Category.FASTENER));
+            System.out.println("cheap fasteners   = " + repo.findByCategoryAndPriceInCentsLessThanOrderBySku(Category.FASTENER, 50));
+            System.out.println("2000..8000        = " + repo.findByPriceInCentsBetweenOrderByPriceInCents(2_000, 8_000));
+
+            System.out.println("-- string matching --");
+            System.out.println("starts BOLT       = " + repo.findBySkuStartingWithOrderBySku("BOLT"));
+            System.out.println("contains -        = " + repo.findBySkuContainingOrderBySku("D-"));
+            System.out.println("ends 9            = " + repo.findBySkuEndingWithOrderBySku("9"));
+            System.out.println("name ignore case  = " + repo.findByNameIgnoreCase("hex BOLT m8").map(p -> p.sku).orElse("none"));
+
+            System.out.println("-- collections, booleans, nulls --");
+            System.out.println("in list           = " + repo.findBySkuInOrderBySku(List.of("NUT-3", "CAM-9", "NOPE")));
+            System.out.println("active            = " + repo.findByActiveTrueOrderBySku());
+            System.out.println("unnamed           = " + repo.findByNameIsNullOrderBySku());
+
+            System.out.println("-- limiting and ordering --");
+            System.out.println("top 3 by price    = " + repo.findFirst3ByOrderByPriceInCentsDesc());
+            System.out.println("cheapest motion   = " + repo.findTopByCategoryOrderByPriceInCentsAsc(Category.MOTION).map(p -> p.sku).orElse("none"));
+            System.out.println("sorted by param   = " + repo.findByCategory(Category.STRUCTURAL, Sort.by(Sort.Direction.DESC, "priceInCents")));
+
+            System.out.println("-- counts and existence --");
+            System.out.println("count structural  = " + repo.countByCategory(Category.STRUCTURAL));
+            System.out.println("exists ROD-4      = " + repo.existsBySku("ROD-4"));
+            System.out.println("inactive          = " + repo.countByActiveFalse());
+
+            System.out.println("-- streaming and deleting need a transaction --");
+            tx.executeWithoutResult(status -> {
+                try (Stream<Product> s = repo.findByPriceInCentsGreaterThanOrderBySku(1_000)) {
+                    System.out.println("streamed          = " + s.map(p -> p.sku).toList());
+                }
+                System.out.println("deleted           = " + repo.deleteBySku("PIN-2"));
+            });
+            System.out.println("remaining         = " + repo.count());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(DerivedQueries.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:derived;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="DerivedQueries">
+Hibernate: create global temporary table HTE_product(active boolean, priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), name varchar(255), category enum ('FASTENER','MOTION','STRUCTURAL'), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (active boolean not null, price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, name varchar(255), category enum ('FASTENER','MOTION','STRUCTURAL') not null, primary key (id))
+Hibernate: select next value for product_seq
+Hibernate: select next value for product_seq
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+Hibernate: insert into product (active,category,name,price_in_cents,sku,id) values (?,?,?,?,?,?)
+-- equality, comparison, range --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.sku
+fasteners         = [BOLT-7, NUT-3, PIN-2]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? and p1_0.price_in_cents<? order by p1_0.sku
+cheap fasteners   = [NUT-3, PIN-2]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.price_in_cents between ? and ? order by p1_0.price_in_cents
+2000..8000        = [CAM-9, ROD-4, HUB-8]
+-- string matching --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku like ? escape '\' order by p1_0.sku
+starts BOLT       = [BOLT-7]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku like ? escape '\' order by p1_0.sku
+contains -        = [GIRD-1, ROD-4]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku like ? escape '\' order by p1_0.sku
+ends 9            = [CAM-9]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where upper(p1_0.name)=upper(?)
+name ignore case  = BOLT-7
+-- collections, booleans, nulls --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku in (?,?,?) order by p1_0.sku
+in list           = [CAM-9, NUT-3]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.active=true order by p1_0.sku
+active            = [BOLT-7, CAM-9, GIRD-1, NUT-3, ROD-4]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.name is null order by p1_0.sku
+unnamed           = [HUB-8, PIN-2]
+-- limiting and ordering --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 order by p1_0.price_in_cents desc fetch first ? rows only
+top 3 by price    = [GIRD-1, HUB-8, ROD-4]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.price_in_cents fetch first ? rows only
+cheapest motion   = CAM-9
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.category=? order by p1_0.price_in_cents desc
+sorted by param   = [GIRD-1, ROD-4]
+-- counts and existence --
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.category=?
+count structural  = 2
+Hibernate: select p1_0.id from product p1_0 where p1_0.sku=? fetch first ? rows only
+exists ROD-4      = true
+Hibernate: select count(p1_0.id) from product p1_0 where p1_0.active=false
+inactive          = 2
+-- streaming and deleting need a transaction --
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.price_in_cents>? order by p1_0.sku
+streamed          = [CAM-9, GIRD-1, HUB-8, ROD-4]
+Hibernate: select p1_0.id,p1_0.active,p1_0.category,p1_0.name,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku=?
+deleted           = 1
+Hibernate: delete from product where id=?
+Hibernate: select count(*) from product p1_0
+remaining         = 6
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>Six things in that output are worth reading twice:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>like ? escape '\'</code>.</strong> <code>StartingWith</code>, <code>Containing</code> and <code>EndingWith</code> all become <code>like</code>, but Spring Data builds the pattern itself (<code>BOLT%</code>, <code>%D-%</code>, <code>%9</code>) and <em>escapes</em> any <code>%</code> or <code>_</code> in your argument first. A user searching for <code>50%</code> finds SKUs containing "50%", not everything starting with 50. §4 shows the declared-query version, which does not escape for you.</li>
+    <li><strong><code>in (?,?,?)</code>.</strong> <code>In</code> with a three-element collection expands to three placeholders. A different collection size is a different SQL string, which matters for statement caching and for the database's bind limit (Oracle stops at 1,000).</li>
+    <li><strong><code>fetch first ? rows only</code>.</strong> <code>First3</code> and <code>Top</code> become the dialect's limit clause. H2 and PostgreSQL say <code>fetch first</code>; MySQL would say <code>limit</code>. You wrote neither.</li>
+    <li><strong><code>upper(p1_0.name)=upper(?)</code>.</strong> <code>IgnoreCase</code> wraps both sides in <code>upper()</code>, which also means the index on <code>name</code> is useless for that query unless it is a functional index. Think before adding <code>IgnoreCase</code> to a hot path.</li>
+    <li><strong><code>exists</code> is a <code>select p1_0.id … fetch first ? rows only</code>,</strong> not a <code>count</code>. It stops at the first match.</li>
+    <li><strong>The derived <code>deleteBySku</code> ran a <code>select</code> before its <code>delete</code>.</strong> A derived delete loads the entities and removes them one by one through the persistence context, so cascades and lifecycle callbacks fire. A <code>@Modifying @Query("delete …")</code> (§4) is one statement and fires nothing.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Build a method name and watch it parse</h3>
+
+  <div class="lm-card" data-sandbox="method-name-parser">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+      From method name to SQL
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Subject</span>
+        <select data-sb-subject>
+          <option value="find" selected>find…By</option>
+          <option value="findFirst3">findFirst3…By</option>
+          <option value="findDistinct">findDistinct…By</option>
+          <option value="count">count…By</option>
+          <option value="exists">exists…By</option>
+          <option value="delete">delete…By</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Property A</span>
+        <select data-sb-propa>
+          <option value="sku" selected>sku</option>
+          <option value="name">name</option>
+          <option value="category">category</option>
+          <option value="priceInCents">priceInCents</option>
+          <option value="active">active</option>
+          <option value="supplier.name">supplier.name (nested)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Operator A</span>
+        <select data-sb-opa>
+          <option value="Is" selected>(none) / Is</option>
+          <option value="LessThan">LessThan</option>
+          <option value="GreaterThanEqual">GreaterThanEqual</option>
+          <option value="Between">Between</option>
+          <option value="StartingWith">StartingWith</option>
+          <option value="Containing">Containing</option>
+          <option value="In">In</option>
+          <option value="IsNull">IsNull</option>
+          <option value="True">True</option>
+          <option value="IgnoreCase">IgnoreCase</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Connector</span>
+        <select data-sb-conn>
+          <option value="" selected>(none)</option>
+          <option value="And">And</option>
+          <option value="Or">Or</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Property B</span>
+        <select data-sb-propb>
+          <option value="priceInCents" selected>priceInCents</option>
+          <option value="category">category</option>
+          <option value="active">active</option>
+          <option value="name">name</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Operator B</span>
+        <select data-sb-opb>
+          <option value="LessThan" selected>LessThan</option>
+          <option value="Is">(none) / Is</option>
+          <option value="Between">Between</option>
+          <option value="True">True</option>
+          <option value="IsNull">IsNull</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>OrderBy</span>
+        <select data-sb-order>
+          <option value="" selected>(none)</option>
+          <option value="SkuAsc">SkuAsc</option>
+          <option value="PriceInCentsDesc">PriceInCentsDesc</option>
+          <option value="CategoryAscSkuAsc">CategoryAscSkuAsc</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The keyword table</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Derived-query keywords and the JPQL they produce</caption>
+      <thead><tr><th scope="col">Keyword</th><th scope="col">Example</th><th scope="col">JPQL fragment</th></tr></thead>
+      <tbody>
+        <tr><td><code>Is</code>, <code>Equals</code>, or nothing</td><td><code>findBySku</code></td><td><code>p.sku = ?1</code></td></tr>
+        <tr><td><code>Not</code></td><td><code>findByCategoryNot</code></td><td><code>p.category &lt;&gt; ?1</code></td></tr>
+        <tr><td><code>LessThan</code>, <code>LessThanEqual</code>, <code>GreaterThan</code>, <code>GreaterThanEqual</code></td><td><code>findByPriceInCentsLessThan</code></td><td><code>p.priceInCents &lt; ?1</code></td></tr>
+        <tr><td><code>Between</code></td><td><code>findByPriceInCentsBetween</code></td><td><code>p.priceInCents between ?1 and ?2</code> (two parameters, inclusive)</td></tr>
+        <tr><td><code>After</code>, <code>Before</code></td><td><code>findByPlacedAfter</code></td><td><code>p.placed &gt; ?1</code> — comparison keywords for dates</td></tr>
+        <tr><td><code>IsNull</code>, <code>IsNotNull</code></td><td><code>findByNameIsNull</code></td><td><code>p.name is null</code> (no parameter)</td></tr>
+        <tr><td><code>Like</code>, <code>NotLike</code></td><td><code>findBySkuLike</code></td><td><code>p.sku like ?1</code> — <em>you</em> supply the <code>%</code></td></tr>
+        <tr><td><code>StartingWith</code>, <code>EndingWith</code>, <code>Containing</code></td><td><code>findBySkuContaining</code></td><td><code>p.sku like %?1%</code> with the argument escaped</td></tr>
+        <tr><td><code>In</code>, <code>NotIn</code></td><td><code>findBySkuIn(Collection)</code></td><td><code>p.sku in ?1</code></td></tr>
+        <tr><td><code>True</code>, <code>False</code></td><td><code>findByActiveTrue</code></td><td><code>p.active = true</code> (no parameter)</td></tr>
+        <tr><td><code>IgnoreCase</code>, <code>AllIgnoreCase</code></td><td><code>findByNameIgnoreCase</code></td><td><code>upper(p.name) = upper(?1)</code></td></tr>
+        <tr><td><code>OrderBy…Asc</code>/<code>Desc</code></td><td><code>findByCategoryOrderBySkuAsc</code></td><td><code>order by p.sku asc</code></td></tr>
+        <tr><td><code>Distinct</code></td><td><code>findDistinctByCategory</code></td><td><code>select distinct p</code></td></tr>
+        <tr><td><code>First</code>/<code>Top</code> + number</td><td><code>findFirst3ByOrderByPriceInCentsDesc</code></td><td>dialect limit clause, 1 if no number</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Parsing rules you will hit</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Derived query parsing rules">
+      <button type="button" class="lm-tab" role="tab" id="tab-derived-queries-traverse" aria-controls="panel-derived-queries-traverse" aria-selected="true" tabindex="0">Property traversal</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-derived-queries-andor" aria-controls="panel-derived-queries-andor" aria-selected="false" tabindex="-1">And, Or and precedence</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-derived-queries-return" aria-controls="panel-derived-queries-return" aria-selected="false" tabindex="-1">Return types</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-derived-queries-startup" aria-controls="panel-derived-queries-startup" aria-selected="false" tabindex="-1">Startup validation</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-derived-queries-traverse" aria-labelledby="tab-derived-queries-traverse" tabindex="0">
+      <p><code>findByOrderCustomerName(String name)</code> is resolved greedily: Spring Data first looks for a property called <code>orderCustomerName</code>, then splits from the right — <code>orderCustomer.name</code>, then <code>order.customerName</code>, then <code>order.customer.name</code> — until a path through the metamodel matches. Each association in the path becomes a <em>join</em> in the SQL.</p>
+      <pre data-code data-lang="java" data-nobar>
+List&lt;OrderLine&gt; findByOrderCustomerName(String name);     // order.customer.name — two joins
+List&lt;OrderLine&gt; findByOrder_Customer_Name(String name);   // the same, written unambiguously
+      </pre>
+      <p class="mb-0">The underscore is the disambiguator for when the greedy split would pick the wrong path — an entity with both an <code>address</code> association and a <code>addressZip</code> field, for example. Use it whenever the name has more than one plausible reading, and never rely on the reader guessing the same way the parser did.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-derived-queries-andor" aria-labelledby="tab-derived-queries-andor" tabindex="0" hidden>
+      <p><code>Or</code> splits the name first, then <code>And</code> inside each part: <code>findByCategoryAndActiveTrueOrPriceInCentsLessThan</code> means <code>(category = ?1 and active = true) or priceInCents &lt; ?2</code>. There are no parentheses in a method name, so you cannot express <code>category = ?1 and (active = true or priceInCents &lt; ?2)</code> at all — that is a <code>@Query</code>.</p>
+      <p class="mb-0">Parameters bind by position to the predicate parts that take one: <code>Category</code> for part one, nothing for <code>ActiveTrue</code>, <code>int</code> for part three. Put the parameters in a different order and the application starts, the types coerce, and the query is silently wrong — the only keyword-grammar mistake that is not caught at boot.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-derived-queries-return" aria-labelledby="tab-derived-queries-return" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Return types of derived queries</caption>
+          <thead><tr><th scope="col">Declared return type</th><th scope="col">What you get</th></tr></thead>
+          <tbody>
+            <tr><td><code>Product</code></td><td>the one result, <code>null</code> if none, <code>IncorrectResultSizeDataAccessException</code> if several</td></tr>
+            <tr><td><code>Optional&lt;Product&gt;</code></td><td>the same, with an empty <code>Optional</code> for none — prefer this</td></tr>
+            <tr><td><code>List</code>, <code>Set</code>, <code>Collection</code>, <code>Streamable</code></td><td>all results, loaded</td></tr>
+            <tr><td><code>Stream&lt;Product&gt;</code></td><td>results pulled from an open cursor — <strong>needs a surrounding transaction and try-with-resources</strong>, as the worked example shows</td></tr>
+            <tr><td><code>Page</code>, <code>Slice</code>, <code>Window</code></td><td>one page of results plus metadata, driven by a <code>Pageable</code> or <code>ScrollPosition</code> parameter — §7</td></tr>
+            <tr><td>an interface, record or class that is not the entity</td><td>a projection — §4</td></tr>
+            <tr><td><code>long</code>, <code>int</code></td><td>for <code>count…By</code> and <code>delete…By</code> (rows affected)</td></tr>
+            <tr><td><code>boolean</code></td><td>for <code>exists…By</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mb-0">A derived method may also take a trailing <code>Sort</code>, <code>Pageable</code> or <code>Limit</code> parameter; it is applied after the name's own <code>OrderBy</code>. Combining <code>OrderBy</code> in the name with a <code>Sort</code> parameter sorts by both, name first.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-derived-queries-startup" aria-labelledby="tab-derived-queries-startup" tabindex="0" hidden>
+      <p>Every method name is parsed when the repository bean is created. A property that does not exist stops the application before it serves a request, with a message that names the type and the property:</p>
+      <pre data-output data-label="Startup failure (illustrative)" data-variant="error">
+Caused by: org.springframework.data.mapping.PropertyReferenceException:
+  No property 'pricelnCents' found for type 'Product'
+  Did you mean 'priceInCents'?
+  at org.springframework.data.mapping.PropertyPath.&lt;init&gt;(PropertyPath.java:91)
+  at org.springframework.data.repository.query.parser.Part.&lt;init&gt;(Part.java:81)
+  at org.springframework.data.repository.query.parser.PartTree$Predicate.buildTree(…)
+      </pre>
+      <p class="mb-0">The "did you mean" is computed by edit distance against the entity's properties. This fail-fast check is a large part of the value of derived queries: a renamed field breaks the build of every query that used it, which a string inside <code>@Query</code> only does if query validation at startup is on (it is, by default — §4).</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">When a derived name is the wrong tool</div>
+      <ul class="mb-0">
+        <li><strong>It no longer reads as a sentence.</strong> <code>findByCategoryAndActiveTrueAndPriceInCentsBetweenAndSupplierCountryInOrderByPriceInCentsDescSkuAsc</code> is a 90-character specification nobody will review. Past roughly forty characters, or past two <code>And</code>s, write a <code>@Query</code> and give the method a name that says what it is <em>for</em>.</li>
+        <li><strong>It needs an aggregate, a group, a join on a non-association, or a projection with expressions.</strong> The grammar has none of these. <code>sum</code>, <code>group by</code>, <code>case</code>, <code>coalesce</code> are <code>@Query</code> territory.</li>
+        <li><strong>It needs a fetch join.</strong> A derived method can declare <code>@EntityGraph</code> (§6), but a JPQL <code>join fetch</code> cannot be derived.</li>
+        <li><strong>It hides a scan.</strong> <code>findByNameContaining</code> is a leading-wildcard <code>like</code>: no B-tree index helps it. The name looks innocent; the plan is a full table scan.</li>
+        <li><strong>It is a derived <code>delete</code> over many rows.</strong> It loads each entity first. Use a <code>@Modifying</code> delete, or a batch job, past a few hundred rows.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-derived-queries-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>List&lt;Product&gt; findBySkuContaining(String part)</code> is called with <code>"50%"</code>. Which rows match?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-derived-queries-1"><span>Every SKU starting with <code>50</code>, because <code>%</code> is a wildcard <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-derived-queries-1"><span>Nothing — <code>%</code> is rejected as an invalid parameter <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-derived-queries-1"><span>Only SKUs that literally contain the three characters <code>50%</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-derived-queries-1"><span>Every SKU containing <code>50</code> followed by at least one character <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The worked example's SQL says <code>like ? escape '\'</code>: Spring Data wraps the argument in <code>%…%</code> and escapes any <code>%</code> or <code>_</code> inside it, so the user's percent sign is matched literally.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>D</strong> would be true of a <code>@Query("… like ?1")</code> where you pass the pattern yourself — §4 shows that version emits <code>escape ''</code>, no escaping. <strong>B</strong> invents a validation that does not exist; any string is a valid argument.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-derived-queries-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A repository declares <code>findByCategoryAndActiveTrueOrPriceInCentsLessThan(Category c, int max)</code>. Which predicate does it run?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-derived-queries-2"><span><code>category = ?1 and (active = true or priceInCents &lt; ?2)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-derived-queries-2"><span><code>(category = ?1 and active = true) or priceInCents &lt; ?2</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-derived-queries-2"><span>It fails at startup: <code>And</code> and <code>Or</code> cannot be mixed in one name <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-derived-queries-2"><span>It fails at startup: <code>ActiveTrue</code> needs a <code>boolean</code> parameter that is missing <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The parser splits on <code>Or</code> first, then on <code>And</code> within each part — the only precedence a method name can express.</p>
+        <p class="mb-0"><strong>A</strong> needs parentheses, which the grammar has no syntax for; that query must be a <code>@Query</code>. <strong>C</strong> is wrong: mixing is allowed, with exactly this precedence. <strong>D</strong> is wrong because <code>True</code>/<code>False</code>/<code>IsNull</code> are the keywords that take <em>no</em> parameter; the two parameters bind to <code>Category</code> and <code>LessThan</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-derived-queries-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these would be caught when the application starts, before any request? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>findByPricelnCents(int)</code> — a typo in the property name <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>findByCategoryAndPriceInCentsLessThan(int max, Category c)</code> — parameters in the wrong order <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>findByNameContaining(String)</code> on a table with ten million rows — a full scan <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>findBySupplierRegionCode(String)</code> where neither <code>supplierRegionCode</code> nor any split of it is a path through the entity <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Both are <code>PropertyReferenceException</code>s: the name is parsed against the metamodel when the repository bean is built, and a property or path that does not exist fails there.</p>
+        <p class="mb-0"><strong>B</strong> starts fine — parameters bind by position and the types are checked only loosely — and returns wrong results, which is why the positional rule deserves care. <strong>C</strong> is a performance problem the parser cannot see; the query is valid, the plan is the issue.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="derived-queries"> Mark this section complete
+  </label>
+</section>

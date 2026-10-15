@@ -1,0 +1,317 @@
+<section class="lm-section" id="executors" data-title="Executors, thread pools and Future" data-num="5">
+  <p class="lm-eyebrow">Section 5</p>
+  <h2 class="mb-4">Executors, thread pools and Future</h2>
+
+  <p>Creating a platform thread costs a system call, a megabyte or so of reserved stack, and a scheduler entry; and a server that creates one per request will, under load, create ten thousand of them and fall over. A <strong>thread pool</strong> separates the two decisions that <code>new Thread(task).start()</code> fuses together: <em>what</em> work to run, and <em>how many</em> threads should run it. You submit tasks; a fixed set of worker threads pulls them from a queue. The number of threads is a resource budget you set once, and the queue is where the overflow waits.</p>
+
+  <p>The abstraction is <code>ExecutorService</code>: <code>submit</code> a <code>Runnable</code> (no result) or a <code>Callable&lt;T&gt;</code> (a result, and it may throw), and get back a <strong><code>Future&lt;T&gt;</code></strong> — a handle to a result that does not exist yet. <code>get()</code> blocks until it does; <code>get(timeout)</code> gives up; <code>cancel</code> interrupts; and an exception thrown by the task is stored and re-thrown from <code>get</code>, wrapped in <code>ExecutionException</code>.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: a pool's whole life</h3>
+
+  <p>One program, five lessons: a fixed pool running twenty <code>Callable</code>s through <code>invokeAll</code>; a task that throws; an orderly shutdown; a scheduled task; and then a deliberately tiny pool that is handed more work than it can hold, twice — once with the default <em>abort</em> policy and once with <em>caller-runs</em>.</p>
+
+  <pre data-code data-lang="java" data-file="PoolExecutors.java" data-verify="PoolExecutors" data-hi="31,53,54,71">
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class PoolExecutors {
+
+    record Reservation(String sku, int qty) { }
+
+    static final String[] SKUS = { "BOLT-7", "NUT-3", "CAM-9", "GIRD-1", "ROD-4" };
+
+    public static void main(String[] args) throws Exception {
+        // ── a fixed pool runs 20 Callables; invokeAll waits for every one ───
+        ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(4, named("picker"));
+        List<Callable<Reservation>> tasks = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            final int n = i;
+            tasks.add(() -> new Reservation(SKUS[n % SKUS.length], n + 1));
+        }
+        List<Future<Reservation>> futures = pool.invokeAll(tasks);
+
+        int totalQty = 0;
+        List<String> skus = new ArrayList<>();
+        for (Future<Reservation> f : futures) {
+            Reservation r = f.get();                       // already complete after invokeAll
+            totalQty += r.qty();
+            if (!skus.contains(r.sku())) skus.add(r.sku());
+        }
+        System.out.println("tasks completed    = " + futures.stream().allMatch(Future::isDone));
+        System.out.println("total qty          = " + totalQty + " (1+2+...+20)");
+        System.out.println("skus (sorted)      = " + skus.stream().sorted().toList());
+
+        // ── a task that throws: the exception travels inside the Future ─────
+        Future<Integer> bad = pool.submit(() -> { throw new IllegalStateException("BOLT-7 out of stock"); });
+        try {
+            bad.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            System.out.println("wrapped cause      = " + e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage());
+        }
+
+        // ── orderly shutdown: no new tasks, finish queued ones, then wait ───
+        pool.shutdown();
+        System.out.println("terminated         = " + pool.awaitTermination(10, TimeUnit.SECONDS));
+
+        // ── scheduling: run once after a delay ──────────────────────────────
+        ScheduledExecutorService scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(named("repricer"));
+        ScheduledFuture<String> reprice = scheduler.schedule(() -> "reprice done", 20, TimeUnit.MILLISECONDS);
+        System.out.println("scheduled result   = " + reprice.get(5, TimeUnit.SECONDS));
+        scheduler.shutdown();
+
+        // ── rejection: 1 thread, a queue of 1, 3 tasks that block ───────────
+        CountDownLatch gate = new CountDownLatch(1);
+        ThreadPoolExecutor tiny = new ThreadPoolExecutor(
+            1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(1), named("tiny"),
+            new ThreadPoolExecutor.AbortPolicy());                    // the default handler
+        Runnable blocker = () -> { try { gate.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { } };
+        tiny.execute(blocker);                                          // taken by the one thread
+        tiny.execute(blocker);                                          // sits in the queue
+        try {
+            tiny.execute(blocker);                                      // nowhere to go
+            System.out.println("third task         = accepted");
+        } catch (RejectedExecutionException e) {
+            System.out.println("third task         = rejected (RejectedExecutionException)");
+        }
+        gate.countDown();
+        tiny.shutdown();
+        System.out.println("tiny terminated    = " + tiny.awaitTermination(10, TimeUnit.SECONDS));
+
+        // ── CallerRunsPolicy: the submitting thread does the work itself ────
+        CountDownLatch gate2 = new CountDownLatch(1);
+        ThreadPoolExecutor polite = new ThreadPoolExecutor(
+            1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(1), named("polite"),
+            new ThreadPoolExecutor.CallerRunsPolicy());
+        AtomicInteger ranOnMain = new AtomicInteger();
+        Runnable blocker2 = () -> { try { gate2.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { } };
+        polite.execute(blocker2);
+        polite.execute(blocker2);
+        polite.execute(() -> { if (Thread.currentThread().getName().equals("main")) ranOnMain.incrementAndGet(); });
+        System.out.println("overflow ran on    = " + (ranOnMain.get() == 1 ? "the caller (main)" : "a pool thread"));
+        gate2.countDown();
+        polite.shutdown();
+        System.out.println("polite terminated  = " + polite.awaitTermination(10, TimeUnit.SECONDS));
+    }
+
+    // name your threads: a dump full of "pool-3-thread-7" is useless at 3 a.m.
+    static ThreadFactory named(String prefix) {
+        AtomicInteger n = new AtomicInteger();
+        return r -> new Thread(r, prefix + "-" + n.incrementAndGet());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="PoolExecutors">
+tasks completed    = true
+total qty          = 210 (1+2+...+20)
+skus (sorted)      = [BOLT-7, CAM-9, GIRD-1, NUT-3, ROD-4]
+wrapped cause      = IllegalStateException: BOLT-7 out of stock
+terminated         = true
+scheduled result   = reprice done
+third task         = rejected (RejectedExecutionException)
+tiny terminated    = true
+overflow ran on    = the caller (main)
+polite terminated  = true
+  </pre>
+
+  <p>Two details carry most of the weight. First, <code>shutdown()</code> is polite: it stops accepting work and lets queued tasks finish, and the pool is only <em>terminated</em> once the last one has — which is what <code>awaitTermination</code> waits for. <code>shutdownNow()</code> instead interrupts every worker and returns the tasks that never started; it is the emergency stop, and it only works on tasks that honour interruption. Forget to shut a pool down and its non-daemon workers keep the JVM alive after <code>main</code> returns — the classic "my program never exits". Second, the tiny pool: one worker takes the first task directly, the second sits in the one-slot queue, and the third has nowhere to go. What happens next is the <strong>rejection policy</strong> — the default throws, and <code>CallerRunsPolicy</code> makes the submitting thread do the work itself, which is a crude but effective form of back-pressure: a producer that is busy running a task is not producing more.</p>
+
+  <h3 class="mt-8 mb-3">Watch a pool fill up</h3>
+
+  <p>A <code>ThreadPoolExecutor</code> has a <em>core</em> size, a <em>maximum</em> size and a queue, and the order in which it uses them surprises almost everyone. It does <strong>not</strong> grow to the maximum when the core threads are busy. It queues. Only when the queue is <em>full</em> does it add threads beyond the core, and only when both the queue and the maximum are exhausted does it reject.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a thread pool accepting tasks">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">core 2, max 4, queue capacity 2</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="work-queue"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Pool state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Queue</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="work-queue">
+    {
+      "lang": "java",
+      "code": "var pool = new ThreadPoolExecutor(\n    2, 4, 30, TimeUnit.SECONDS,          // core, max, keep-alive\n    new ArrayBlockingQueue<>(2));        // bounded queue\n\npool.execute(t1);\npool.execute(t2);\npool.execute(t3);\npool.execute(t4);\npool.execute(t5);\npool.execute(t6);\npool.execute(t7);   // all seven tasks are long-running",
+      "steps": [
+        { "line": [1, 2, 3], "vars": { "threads": "0", "active": "0", "queued": "0 / 2" }, "out": "[]",
+          "note": "A pool starts with no threads at all. Core threads are created lazily, as the first tasks arrive (prestartAllCoreThreads() changes that)." },
+        { "line": 5, "vars": { "threads": "1", "active": "1", "queued": "0 / 2" }, "out": "[]",
+          "note": "Below core size: a new thread is created and handed t1 directly. The queue is not consulted." },
+        { "line": 6, "vars": { "threads": "2", "active": "2", "queued": "0 / 2" }, "out": "[]",
+          "note": "Still below core size: a second thread for t2. The pool is now at its core size, and both workers are busy." },
+        { "line": 7, "vars": { "threads": "2", "active": "2", "queued": "1 / 2" }, "out": "[t3]",
+          "note": "At core size, the pool does NOT create a third thread even though max is 4. It offers t3 to the queue, which accepts it." },
+        { "line": 8, "vars": { "threads": "2", "active": "2", "queued": "2 / 2" }, "out": "[t3, t4]",
+          "note": "t4 is queued too. The queue is now full. With an UNBOUNDED queue (LinkedBlockingQueue, as newFixedThreadPool uses) this step never ends: the pool would stay at 2 threads and queue forever." },
+        { "line": 9, "vars": { "threads": "3", "active": "3", "queued": "2 / 2" }, "out": "[t3, t4]",
+          "note": "The queue refused t5, so NOW the pool grows: a third thread is created and runs t5 directly — ahead of t3 and t4, which are still waiting. Growth happens only on queue overflow." },
+        { "line": 10, "vars": { "threads": "4", "active": "4", "queued": "2 / 2" }, "out": "[t3, t4]",
+          "note": "t6 overflows the queue again; a fourth thread is created. The pool is at its maximum." },
+        { "line": 11, "vars": { "threads": "4", "active": "4", "queued": "2 / 2", "t7": "REJECTED" }, "out": "[t3, t4]",
+          "note": "Queue full, pool at max: t7 goes to the RejectedExecutionHandler. AbortPolicy (the default) throws RejectedExecutionException at the caller; CallerRunsPolicy runs t7 on the submitting thread; DiscardPolicy drops it silently." },
+        { "line": 11, "vars": { "threads": "2", "active": "0", "queued": "0 / 2" }, "out": "[]",
+          "note": "Later, when the work drains: threads 3 and 4 idle past the 30-second keep-alive and exit. Core threads stay forever unless allowCoreThreadTimeOut(true) is set." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">The factory methods, and what each one hides</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Executors factory methods and their configuration</caption>
+      <thead><tr><th scope="col">Factory</th><th scope="col">core / max</th><th scope="col">Queue</th><th scope="col">The risk</th></tr></thead>
+      <tbody>
+        <tr><td><code>newFixedThreadPool(n)</code></td><td>n / n</td><td><code>LinkedBlockingQueue</code>, unbounded</td><td>the queue grows without limit — a slow consumer means an <code>OutOfMemoryError</code> hours later</td></tr>
+        <tr><td><code>newCachedThreadPool()</code></td><td>0 / <code>Integer.MAX_VALUE</code></td><td><code>SynchronousQueue</code> (no buffering)</td><td>one thread per concurrent task, unbounded — a burst creates thousands of threads</td></tr>
+        <tr><td><code>newSingleThreadExecutor()</code></td><td>1 / 1</td><td>unbounded</td><td>serial execution guaranteed; same unbounded queue</td></tr>
+        <tr><td><code>newScheduledThreadPool(n)</code></td><td>n / <code>MAX_VALUE</code></td><td><code>DelayedWorkQueue</code></td><td>a task that throws is silently cancelled from its schedule</td></tr>
+        <tr><td><code>newWorkStealingPool()</code></td><td>parallelism = cores</td><td>per-worker deques</td><td>a <code>ForkJoinPool</code>; daemon threads, so it does not keep the JVM alive</td></tr>
+        <tr><td><code>newVirtualThreadPerTaskExecutor()</code></td><td>one virtual thread per task</td><td>none</td><td>no pooling, no bound — see §7 for when that is right</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The factories are convenient and every one of them hides an unbounded something. For a service that must survive a burst, construct <code>ThreadPoolExecutor</code> yourself with a bounded queue and a rejection policy you chose on purpose. The <em>work-stealing</em> pool is the <code>ForkJoinPool</code>, and the one you get from <code>ForkJoinPool.commonPool()</code> is shared with every <strong>parallel stream</strong> in the JVM: a blocking task submitted there starves every <code>parallelStream()</code> in the process.</p>
+
+  <h3 class="mt-8 mb-3">How many threads?</h3>
+
+  <div class="lm-card" data-sandbox="pool-sizer">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Size a pool from what the tasks do
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>CPU cores <span class="lm-readout" data-sb-coresout>8</span></span>
+        <input type="range" data-sb-cores min="2" max="32" value="8" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Task type</span>
+        <select data-sb-kind><option value="cpu" selected>CPU-bound (pricing, hashing, parsing)</option><option value="io">I/O-bound (database, HTTP, disk)</option></select>
+      </label>
+      <label class="lm-field grow">
+        <span>Time waiting ÷ time computing <span class="lm-readout" data-sb-ratioout>5</span></span>
+        <input type="range" data-sb-ratio min="0" max="50" value="5" step="1">
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Scheduling, and the exception that kills it</h3>
+
+  <pre data-code data-lang="java" data-nobar>
+var scheduler = Executors.newScheduledThreadPool(1, named("repricer"));
+
+// fixed RATE: starts every 60 s regardless of how long the last run took (runs may pile up)
+scheduler.scheduleAtFixedRate(repricer::run, 0, 60, TimeUnit.SECONDS);
+
+// fixed DELAY: waits 60 s after the previous run FINISHES — the safer default for most jobs
+scheduler.scheduleWithFixedDelay(repricer::run, 0, 60, TimeUnit.SECONDS);
+  </pre>
+
+  <p>If a scheduled task throws, the scheduler does not log it, does not retry it, and does not run it again: the exception is captured in the <code>ScheduledFuture</code> nobody is reading, and the job silently stops forever. Every periodic task should catch <code>Throwable</code> at its top level, log, and return — or be wrapped by a utility that does.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Executor gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A task that throws into <code>execute()</code></strong> kills its worker thread and the exception goes to the thread's <code>UncaughtExceptionHandler</code> — usually stderr, usually unnoticed. A task submitted with <code>submit()</code> stores the exception in its <code>Future</code> instead, and if nobody calls <code>get()</code>, it is lost entirely. Either way: catch inside the task.</li>
+        <li><strong>Blocking inside a pool on a result from the same pool</strong> — task A submits task B and calls <code>get()</code> — deadlocks the moment all workers are doing the same thing. Nobody is free to run B. The fix is <code>CompletableFuture</code> (§6), or two pools.</li>
+        <li><strong>No shutdown, no exit.</strong> Pool threads are non-daemon by default; a forgotten <code>shutdown()</code> keeps the JVM running after <code>main</code>. Java 19+ <code>ExecutorService</code> is <code>AutoCloseable</code>: <code>try (var pool = …)</code> shuts down and waits.</li>
+        <li><strong>Default thread names</strong> make a thread dump unreadable. Pass a <code>ThreadFactory</code> that names threads after the pool's purpose.</li>
+        <li><strong><code>Future.cancel(true)</code> only interrupts.</strong> A task that never checks <code>isInterrupted()</code> or calls a blocking method keeps running to completion, holding its thread.</li>
+        <li><strong><code>ThreadLocal</code> values survive between tasks</strong> on a pooled thread. Clear them in <code>finally</code>, or the next task inherits the previous request's user.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-executors-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A <code>ThreadPoolExecutor</code> has core 4, max 16, and an unbounded <code>LinkedBlockingQueue</code>. Under sustained load, how many threads will it run?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-executors-1"><span>16 — it grows to max when the core threads are busy <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-executors-1"><span>Between 4 and 16, depending on queue length <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-executors-1"><span>4 — the queue never fills, so the pool never grows beyond core <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-executors-1"><span>It throws <code>RejectedExecutionException</code> once 16 tasks are waiting <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Growth beyond core happens only when the queue <em>rejects</em> an offer. An unbounded queue never rejects, so <code>maximumPoolSize</code> is dead configuration: the pool runs 4 threads and the queue grows until memory runs out. This is the single most common thread-pool misconfiguration.</p>
+        <p class="mb-0"><strong>A</strong> is what everyone assumes and what the executor does not do. <strong>B</strong> would require the executor to watch queue length, which it does not; it only reacts to an <code>offer</code> failing. <strong>D</strong> — rejection needs a full queue and a full pool; this queue is never full.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-executors-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A task submitted with <code>submit()</code> throws a <code>NullPointerException</code>, and the caller never calls <code>get()</code> on the returned <code>Future</code>. Where does the exception go?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-executors-2"><span>To the thread's uncaught-exception handler, which prints it to stderr <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-executors-2"><span>Into the <code>Future</code>, where it waits for a <code>get()</code> that never comes — it is silently lost <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-executors-2"><span>It propagates out of <code>submit()</code> in the calling thread <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-executors-2"><span>The pool shuts down <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>submit</code> wraps the task in a <code>FutureTask</code>, which catches everything and stores it for <code>get()</code> to re-throw as <code>ExecutionException</code>. No <code>get()</code>, no report — the worker thread quietly moves on to the next task.</p>
+        <p class="mb-0"><strong>A</strong> is what happens with <code>execute()</code>, which does not wrap the task; the exception then kills the worker and the pool replaces it. <strong>C</strong> — the task has not even run when <code>submit</code> returns. <strong>D</strong> — nothing an individual task does shuts a pool down.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-executors-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Your program finishes <code>main</code> but the process never exits. Which are plausible causes? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A <code>newFixedThreadPool</code> that was never shut down <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A <code>newWorkStealingPool</code> that was never shut down <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A <code>ScheduledExecutorService</code> with a periodic task still scheduled <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A <code>Future</code> whose <code>get()</code> was never called <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Both create non-daemon threads, and the JVM exits only when every non-daemon thread has ended. The fixed pool's idle core threads live forever; the scheduler's thread is waiting for the next run.</p>
+        <p class="mb-0"><strong>B</strong> — <code>ForkJoinPool</code> workers are daemon threads, so they never hold the JVM open (which is also why work left in the common pool at exit is simply abandoned). <strong>D</strong> — an unread <code>Future</code> is an object, not a thread; it holds nothing open.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="executors"> Mark this section complete
+  </label>
+</section>

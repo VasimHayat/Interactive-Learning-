@@ -1,0 +1,277 @@
+<section class="lm-section" id="modules" data-title="The module system" data-num="12">
+  <p class="lm-eyebrow">Section 12</p>
+  <h2 class="mb-4">The module system</h2>
+
+  <p>Everything before this section ran on the <strong>class path</strong>: a flat list of directories and JARs in which every public class is visible to every other class, duplicate packages silently shadow each other, and a missing dependency is discovered the first time a class is touched, as a <code>NoClassDefFoundError</code> in production. The Java Platform Module System (JPMS, Java 9) exists because the JDK itself suffered from exactly those problems. It adds a second mechanism, the <strong>module path</strong>, in which each JAR declares what it <em>needs</em> and what it <em>exposes</em>, and the JVM checks both at startup.</p>
+
+  <p>Two guarantees follow. <strong>Reliable configuration:</strong> if a module you require is missing, the JVM refuses to start, with a message naming the module, rather than failing later at an arbitrary call site. <strong>Strong encapsulation:</strong> a package that a module does not export is invisible to other modules at compile time <em>and</em> at run time, even to reflection. That second guarantee is why, since Java 16, code that pokes at <code>sun.misc</code> or <code>java.lang</code> internals fails with <code>InaccessibleObjectException</code> unless the JVM was started with an explicit <code>--add-opens</code>.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: what the running JVM knows</h3>
+
+  <p>This program is not itself a module — it is compiled and run on the class path, like every other program in this course — yet it still runs inside a module graph. Every class belongs to <em>some</em> module, and the facts below are the ones worth knowing by heart.</p>
+
+  <pre data-code data-lang="java" data-file="ModuleFacts.java" data-verify="ModuleFacts" data-hi="9,12,13">
+import java.lang.module.ModuleDescriptor;
+
+public class ModuleFacts {
+    public static void main(String[] args) throws Exception {
+        Module base = Object.class.getModule();
+        Module mine = ModuleFacts.class.getModule();
+
+        System.out.println("java.lang.Object lives in     = " + base.getName());
+        System.out.println("this class's module is named  = " + mine.isNamed());
+        System.out.println("java.sql.Driver lives in      = " + Class.forName("java.sql.Driver").getModule().getName());
+        System.out.println("boot layer has java.base      = " + ModuleLayer.boot().findModule("java.base").isPresent());
+        System.out.println("java.base exports java.lang   = " + base.isExported("java.lang"));
+        System.out.println("java.base exports jdk.internal.misc = " + base.isExported("jdk.internal.misc"));
+        System.out.println("unnamed module reads java.base = " + mine.canRead(base));
+
+        ModuleDescriptor d = base.getDescriptor();
+        System.out.println("java.base requires anything   = " + !d.requires().isEmpty());
+        System.out.println("java.base is open             = " + d.isOpen());
+    }
+}
+  </pre>
+
+  <pre data-output data-for="ModuleFacts">
+java.lang.Object lives in     = java.base
+this class's module is named  = false
+java.sql.Driver lives in      = java.sql
+boot layer has java.base      = true
+java.base exports java.lang   = true
+java.base exports jdk.internal.misc = false
+unnamed module reads java.base = true
+java.base requires anything   = false
+java.base is open             = false
+  </pre>
+
+  <ul class="max-w-prose">
+    <li>Code on the class path lives in the <strong>unnamed module</strong>, which is why <code>isNamed()</code> is <code>false</code>. The unnamed module reads every other module and exports everything, so class-path code keeps working exactly as before Java 9.</li>
+    <li><code>java.base</code> is the one module every other module implicitly requires, and the only one that requires nothing. <code>jdk.internal.misc</code> is in it but not exported: that is strong encapsulation, observable from your own code.</li>
+    <li>The JDK is itself about seventy modules (<code>java.sql</code>, <code>java.net.http</code>, <code>java.desktop</code>…). <code>jlink</code>, below, builds a runtime containing only the ones you need.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">A two-module application</h3>
+
+  <p>A module is a JAR, or a directory, with a <code>module-info.java</code> at its root. Here the warehouse is split into an API module that other teams compile against and an application module that depends on it. The example is complete; it is not compiled during the build of this page because a <code>module-info.java</code> would turn every other program on this page into part of the same module.</p>
+
+  <pre data-code data-lang="bash" data-nobar>
+inventory/
+├── com.acme.inventory.api/
+│   ├── module-info.java
+│   └── com/acme/inventory/api/
+│       ├── Product.java
+│       └── StockSource.java          # a service interface
+└── com.acme.inventory.app/
+    ├── module-info.java
+    └── com/acme/inventory/app/
+        ├── Main.java
+        └── internal/MemoryStock.java # implements StockSource; NOT exported
+  </pre>
+
+  <pre data-code data-lang="java" data-file="com.acme.inventory.api/module-info.java" data-nobar>
+module com.acme.inventory.api {
+    exports com.acme.inventory.api;          // the public surface: Product, StockSource
+    // nothing else — no "internal" package is visible outside this module
+}
+  </pre>
+
+  <pre data-code data-lang="java" data-file="com.acme.inventory.app/module-info.java" data-nobar>
+module com.acme.inventory.app {
+    requires com.acme.inventory.api;         // compile error if missing; JVM refuses to start if absent
+    requires java.net.http;                  // a JDK module beyond java.base must be named
+    requires static java.compiler;           // needed at compile time only, optional at run time
+
+    provides com.acme.inventory.api.StockSource
+        with com.acme.inventory.app.internal.MemoryStock;   // a service implementation, found via ServiceLoader
+
+    opens com.acme.inventory.app.config to com.fasterxml.jackson.databind;  // reflection for ONE consumer
+}
+  </pre>
+
+  <pre data-code data-lang="bash" data-nobar>
+# compile both modules in one go; --module-source-path maps module names to directories
+javac -d out --module-source-path . $(find . -name "*.java")
+
+# run: -m names the module and its main class
+java --module-path out -m com.acme.inventory.app/com.acme.inventory.app.Main
+
+# package each module as a modular JAR (the module-info.class goes in the root)
+jar --create --file mods/api.jar -C out/com.acme.inventory.api .
+jar --create --file mods/app.jar --main-class com.acme.inventory.app.Main -C out/com.acme.inventory.app .
+
+# what does this JAR actually depend on?
+jdeps --module-path mods -s mods/app.jar
+
+# a trimmed runtime image: only the modules reachable from the app, ~40 MB instead of ~300 MB
+jlink --module-path mods:$JAVA_HOME/jmods --add-modules com.acme.inventory.app \
+      --launcher inventory=com.acme.inventory.app --output inventory-runtime
+./inventory-runtime/bin/inventory
+  </pre>
+
+  <h3 class="mt-8 mb-3">The directives</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Module declaration directives and their meaning</caption>
+      <thead><tr><th scope="col">Directive</th><th scope="col">Meaning</th><th scope="col">Reach for it when</th></tr></thead>
+      <tbody>
+        <tr><td><code>requires M</code></td><td>This module <em>reads</em> M: its exported packages are accessible here.</td><td>Always, for every dependency; the compiler will not let you forget.</td></tr>
+        <tr><td><code>requires transitive M</code></td><td>Anyone who requires <em>this</em> module also reads M.</td><td>M's types appear in your public API (a method returns an M type).</td></tr>
+        <tr><td><code>requires static M</code></td><td>Needed to compile, optional at run time.</td><td>Annotation processors, compile-time-only annotations, optional integrations.</td></tr>
+        <tr><td><code>exports P</code></td><td>Public types in package P are accessible to every module that reads this one.</td><td>Your API packages, and nothing else.</td></tr>
+        <tr><td><code>exports P to M1, M2</code></td><td>Qualified export: only M1 and M2 may access P.</td><td>A "friend" API shared between your own modules.</td></tr>
+        <tr><td><code>opens P</code></td><td>P is accessible to deep reflection (<code>setAccessible</code>) at run time, but not at compile time.</td><td>Frameworks that need to reflect into your entities (ORMs, JSON binders, DI).</td></tr>
+        <tr><td><code>opens P to M</code></td><td>Qualified open.</td><td>The same, limited to the one framework that needs it.</td></tr>
+        <tr><td><code>uses S</code></td><td>This module looks up implementations of service interface S with <code>ServiceLoader</code>.</td><td>Plug-in points.</td></tr>
+        <tr><td><code>provides S with C</code></td><td>C is an implementation of S that <code>ServiceLoader</code> may hand out.</td><td>Plug-in implementations; C may live in a non-exported package.</td></tr>
+        <tr><td><code>open module M { … }</code></td><td>Every package is opened for reflection, none is exported unless stated.</td><td>A module of plain data classes consumed by reflective frameworks.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Readability, accessibility, and what breaks</h3>
+
+  <p>Two separate checks gate every cross-module reference. <strong>Readability</strong> is a relation between modules: A reads B if A <code>requires</code> B (or B is required transitively, or A is the unnamed module). <strong>Accessibility</strong> is a relation between a class and a package: a type in B is accessible to A only if A reads B, B exports the package, <em>and</em> the type is <code>public</code>. Reflection adds a third level: deep reflection into non-public members needs the package to be <code>open</code> to A as well. Try the combinations:</p>
+
+  <div class="lm-card" data-sandbox="module-graph">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 11l10-4M7 13l10 4"/></svg>
+      Can <code>app</code> use what is in <code>api</code>?
+    </div>
+    <div class="lm-controls">
+      <fieldset class="lm-field"><legend class="text-sm font-semibold mb-1">Declarations</legend>
+        <label class="lm-check"><input type="checkbox" data-sb-requires checked> <code>app</code> requires <code>api</code></label>
+        <label class="lm-check"><input type="checkbox" data-sb-exports checked> <code>api</code> exports <code>com.acme.inventory.api</code></label>
+        <label class="lm-check"><input type="checkbox" data-sb-transitive> <code>api</code> requires <em>transitive</em> <code>json</code> (its API returns a <code>JsonNode</code>)</label>
+        <label class="lm-check"><input type="checkbox" data-sb-opens> <code>api</code> opens <code>com.acme.inventory.api</code> to <code>app</code></label>
+      </fieldset>
+      <fieldset class="lm-field"><legend class="text-sm font-semibold mb-1">What <code>app</code> tries to do</legend>
+        <label class="lm-check"><input type="radio" name="sb-module-use" value="call" data-sb-use checked> Call <code>new Product("BOLT-7", 80)</code> and <code>product.toJson()</code></label>
+        <label class="lm-check"><input type="radio" name="sb-module-use" value="internal" data-sb-use> Import <code>com.acme.inventory.api.internal.Pricing</code></label>
+        <label class="lm-check"><input type="radio" name="sb-module-use" value="reflect" data-sb-use> Reflect: <code>Product.class.getDeclaredField("sku").setAccessible(true)</code></label>
+      </fieldset>
+    </div>
+    <div data-sb-src class="mb-3"></div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The class path did not go away</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="How non-modular code fits in">
+      <button type="button" class="lm-tab" role="tab" id="tab-modules-unnamed" aria-controls="panel-modules-unnamed" aria-selected="true" tabindex="0">Unnamed module</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-modules-auto" aria-controls="panel-modules-auto" aria-selected="false" tabindex="-1">Automatic modules</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-modules-flags" aria-controls="panel-modules-flags" aria-selected="false" tabindex="-1">Escape hatches</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-modules-services" aria-controls="panel-modules-services" aria-selected="false" tabindex="-1">Services</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-modules-unnamed" aria-labelledby="tab-modules-unnamed" tabindex="0">
+      <p>Everything on the class path is lumped into one <strong>unnamed module</strong>. It reads every named module, exports all its packages, and opens them all. That is why a 2015 application runs on Java 21 unchanged. The price: a named module cannot <code>requires</code> the unnamed module, so modular code cannot depend on class-path code. Migration therefore proceeds bottom-up, from the leaves of the dependency graph.</p>
+      <p class="mb-0">Most applications still run this way, deliberately. A module graph pays off for libraries (a clear API surface, no accidental dependency on internals), for the JDK itself, and for anything shipped with <code>jlink</code>. For a service deployed in a container with a fixed dependency list, the gains are smaller and the migration cost of every reflective framework is real.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-modules-auto" aria-labelledby="tab-modules-auto" tabindex="0" hidden>
+      <p>A plain JAR placed on the <em>module path</em> becomes an <strong>automatic module</strong>: its name is derived from the file name (<code>jackson-databind-2.17.0.jar</code> → <code>jackson.databind</code>) unless the manifest sets <code>Automatic-Module-Name</code>, it exports every package, and it reads every other module including the unnamed one. That last point is the bridge that lets a modular application use a not-yet-modular library.</p>
+      <p class="mb-0"><strong>Split packages</strong> are the migration bug you will hit: two JARs containing classes in the same package (common with <code>javax.*</code> and old API-plus-implementation pairs) are legal on the class path and forbidden on the module path, because a package must belong to exactly one module. <code>jdeps</code> reports them before the JVM does.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-modules-flags" aria-labelledby="tab-modules-flags" tabindex="0" hidden>
+      <pre data-code data-lang="bash" data-nobar>
+# make an unexported package accessible at compile/run time
+--add-exports java.base/jdk.internal.misc=ALL-UNNAMED
+
+# allow deep reflection into a package (what most framework warnings ask for)
+--add-opens java.base/java.lang=ALL-UNNAMED
+
+# resolve a module that nothing requires (e.g. a JDK tool module, or jdk.incubator.vector)
+--add-modules jdk.incubator.vector
+
+# resolve a module and pretend module M reads it
+--add-reads com.acme.inventory.app=ALL-UNNAMED
+      </pre>
+      <p class="mb-0">These flags go on the <code>java</code> command line or into a <code>JDK_JAVA_OPTIONS</code> environment variable; they cannot be set from inside the program, by design. Treat each one as technical debt with a name: it records precisely which encapsulation boundary you are crossing and for whom.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-modules-services" aria-labelledby="tab-modules-services" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// in the api module
+public interface StockSource { int onHand(String sku); }
+
+// in the app module's module-info: provides StockSource with MemoryStock;
+// in any consumer's module-info:   uses StockSource;
+
+ServiceLoader&lt;StockSource&gt; sources = ServiceLoader.load(StockSource.class);
+StockSource first = sources.findFirst()
+        .orElseThrow(() -> new IllegalStateException("no StockSource on the module path"));
+      </pre>
+      <p class="mb-0">Services are how a module uses an implementation it cannot see: <code>MemoryStock</code> sits in a non-exported package, the consumer names only the interface, and the module system wires them together. It predates JPMS (the file <code>META-INF/services/…</code> does the same on the class path) but <code>provides … with</code> makes it checked and explicit. JDBC drivers, charsets and <code>HttpClient</code> implementations are all found this way.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Module gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>exports</code> is not <code>opens</code>.</strong> An exported package lets other modules call public members. It does <em>not</em> let a JSON library set a private field. Frameworks need <code>opens</code>; give them a qualified one.</li>
+        <li><strong><code>requires</code> is not transitive by default.</strong> If your API returns a type from module M, callers cannot even name that type unless you write <code>requires transitive M</code>. The symptom is a baffling "cannot access class" error in <em>their</em> build.</li>
+        <li><strong>The module name is not the package name.</strong> They usually coincide by convention (<code>com.acme.inventory.api</code> contains package <code>com.acme.inventory.api</code>), but the module declaration lists packages explicitly; a new package added to the API module is private until you export it. That is the point.</li>
+        <li><strong>Reflection across modules fails late.</strong> <code>setAccessible(true)</code> on a member in a non-open package throws <code>InaccessibleObjectException</code> at run time, not at compile time, typically the first time a framework touches the class. Test the modular build, not just the class-path one.</li>
+        <li><strong><code>Class.forName</code> still works, access does not.</strong> You can load any class by name; you cannot instantiate or call it unless its package is exported to you. Loading and accessing are different checks.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-modules-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Module <code>app</code> requires <code>api</code>, and <code>api</code> exports <code>com.acme.inventory.api</code>. Jackson, running in its own module, tries to set the private field <code>sku</code> of <code>Product</code> via reflection. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-modules-1"><span>It works: the package is exported <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-modules-1"><span>Compile error in <code>app</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-modules-1"><span><code>InaccessibleObjectException</code> at run time, until <code>api</code> opens the package to Jackson's module <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-modules-1"><span>It works because Jackson is an automatic module and reads everything <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>exports</code> grants access to <em>public</em> members at compile and run time. Deep reflection into a private member additionally requires the package to be <code>open</code> to the caller, and the failure is a run-time exception at the <code>setAccessible</code> call.</p>
+        <p class="mb-0"><strong>A</strong> confuses exporting with opening. <strong>B</strong> is wrong because nothing in <code>app</code> references the private field; the compiler has no reason to complain. <strong>D</strong> gets the direction wrong: an automatic module <em>reads</em> everything, but reading <code>api</code> does not make <code>api</code>'s private members accessible; accessibility is decided by the <em>target</em> module's declaration.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-modules-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span><code>api</code> has a public method <code>JsonNode toJson()</code> where <code>JsonNode</code> comes from module <code>json</code>, and <code>api</code> declares <code>requires json;</code>. Module <code>app</code> declares only <code>requires api;</code> and calls <code>product.toJson().size()</code>. Result?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-modules-2"><span>Compiles and runs: <code>app</code> reads <code>json</code> through <code>api</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-modules-2"><span>Compile error in <code>app</code>: <code>JsonNode</code> is not accessible; fixed by <code>requires transitive json</code> in <code>api</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-modules-2"><span>Runs, but <code>size()</code> throws <code>IllegalAccessError</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-modules-2"><span>The JVM refuses to start: <code>json</code> is not resolved <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Readability is not transitive unless declared so. <code>app</code> does not read <code>json</code>, so it cannot use <code>JsonNode</code> even though a method it <em>can</em> call returns one. The API module should say <code>requires transitive json</code>, which is the rule of thumb: anything in your public signatures must be <code>transitive</code>.</p>
+        <p class="mb-0"><strong>A</strong> describes what <code>transitive</code> would give you. <strong>C</strong> is impossible here because javac catches it first. <strong>D</strong> is wrong because <code>json</code> <em>is</em> resolved (<code>api</code> requires it); resolution and readability are different things.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-modules-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which statements about the <em>unnamed</em> module are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Everything loaded from the class path belongs to it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A named module can declare <code>requires</code> on it to use class-path code <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>It cannot access <code>java.sql</code> without <code>--add-modules</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>It reads every named module in the boot layer <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Class-path code is one unnamed module that reads all resolved modules and exports and opens all of its packages, which is what keeps old applications working.</p>
+        <p class="mb-0"><strong>B</strong> is the migration constraint: named modules cannot depend on the unnamed module, so you modularise from the bottom of the dependency graph up (automatic modules are the bridge). <strong>C</strong> is false for <code>java.sql</code>, which is in the default root set for the class path; <code>--add-modules</code> is needed only for modules outside that set, such as incubator modules.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="modules"> Mark this section complete
+  </label>
+</section>

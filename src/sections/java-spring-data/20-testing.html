@@ -1,0 +1,423 @@
+<section class="lm-section" id="testing" data-title="Testing the data layer" data-num="11">
+  <p class="lm-eyebrow">Section 11</p>
+  <h2 class="mb-4">Testing the data layer</h2>
+
+  <p>Repository code fails in ways unit tests with mocks cannot see: a derived query whose name parses differently from what you meant, a mapping that produces the wrong SQL, an N+1 that only appears with real associations, a constraint the database enforces and your Java does not. So data-layer tests run against a real database, inside a real persistence context, through real repository proxies. Spring Boot's answer is the <strong>test slice</strong> <code>@DataJpaTest</code>: a cut-down application context with only the JPA machinery, an embedded database, and — the part that surprises people — <strong>every test method wrapped in a transaction that is rolled back at the end</strong>.</p>
+
+  <p>Rollback is what makes these tests fast and independent: no cleanup scripts, no ordering between tests, no leftover rows. It is also the source of the classic data-layer test bug, because a transaction that never commits may never flush, and a statement that is never sent cannot fail. JUnit cannot run inside this page's build, so the worked example reproduces what the test framework does, step by step, with a <code>TransactionTemplate</code> in a plain Spring Boot application. The real test classes follow it, unverified, as reference.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: what a test transaction actually does</h3>
+
+  <p>Five experiments. Each is a "test body" run inside a transaction that ends in a rollback, exactly as <code>@DataJpaTest</code> would end it — except experiment 2, which commits for contrast.</p>
+
+  <pre data-code data-lang="java" data-file="RollbackHarness.java" data-verify="RollbackHarness" data-package="lm.testing" data-hi="50,73,85,96,113">
+package lm.testing;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class RollbackHarness {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int priceInCents;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @Override public String toString() { return sku + "=" + priceInCents + "c"; }
+    }
+
+    public interface ProductRepository extends JpaRepository&lt;Product, Long&gt; {}
+
+    @PersistenceContext EntityManager em;
+
+    @Bean CommandLineRunner demo(ProductRepository repo, PlatformTransactionManager txm, DataSource ds) {
+        JdbcTemplate jdbc = new JdbcTemplate(ds);
+        TransactionTemplate tx = new TransactionTemplate(txm);
+        return args -&gt; {
+            System.out.println("-- 1. what a test transaction does: run, assert, roll back --");
+            tx.executeWithoutResult(status -&gt; {
+                repo.save(new Product("BOLT-7", 80));
+                repo.save(new Product("NUT-3", 25));
+                em.flush();
+                System.out.println("inside the transaction, count = " + repo.count());
+                status.setRollbackOnly();                       // what @DataJpaTest does for you at the end
+            });
+            System.out.println("after rollback, rows = " + jdbc.queryForObject("select count(*) from product", Long.class));
+
+            System.out.println("-- 2. the same body, committed --");
+            tx.executeWithoutResult(status -&gt; {
+                repo.save(new Product("BOLT-7", 80));
+                repo.save(new Product("NUT-3", 25));
+            });
+            System.out.println("after commit, rows = " + jdbc.queryForObject("select count(*) from product", Long.class));
+
+            System.out.println("-- 3. the flush trap: an assertion that cannot fail --");
+            boolean detected = false;
+            try {
+                tx.executeWithoutResult(status -&gt; {
+                    repo.save(new Product("BOLT-7", 1));          // duplicate sku — but nothing is flushed
+                    status.setRollbackOnly();                     // ...and the rollback discards it unflushed
+                });
+            } catch (DataAccessException e) { detected = true; }
+            System.out.println("duplicate detected without flush: " + detected);
+            String caught = "nothing";
+            try {
+                tx.executeWithoutResult(status -&gt; {
+                    repo.saveAndFlush(new Product("BOLT-7", 1)); // flush through the repository proxy
+                    status.setRollbackOnly();
+                });
+            } catch (DataAccessException e) { detected = true; caught = e.getClass().getSimpleName(); }
+            System.out.println("duplicate detected with flush: " + detected + " (" + caught + ")");
+
+            System.out.println("-- 4. the first-level cache hides the database --");
+            tx.executeWithoutResult(status -&gt; {
+                Product p = repo.save(new Product("CAM-9", 2300));
+                em.flush();
+                Product again = repo.findById(p.id).orElseThrow();
+                System.out.println("same instance without clear(): " + (p == again));
+                em.clear();                                       // TestEntityManager.clear()
+                Product fresh = repo.findById(p.id).orElseThrow();
+                System.out.println("same instance after clear(): " + (p == fresh));
+                status.setRollbackOnly();
+            });
+
+            System.out.println("-- 5. what @Sql does: a script before the body --");
+            String script = """
+                insert into product (id, sku, price_in_cents) values (1001, 'SEED-1', 10);
+                insert into product (id, sku, price_in_cents) values (1002, 'SEED-2', 20);
+                """;
+            new ResourceDatabasePopulator(new ByteArrayResource(script.getBytes(StandardCharsets.UTF_8))).execute(ds);
+            System.out.println("rows after script = " + repo.count());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(RollbackHarness.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:testing;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false",
+            "logging.level.org.hibernate.orm.jdbc.error", "OFF"));   // H2 names its constraints; keep them out of stdout
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="RollbackHarness">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+-- 1. what a test transaction does: run, assert, roll back --
+Hibernate: select next value for product_seq
+Hibernate: select next value for product_seq
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: select count(*) from product p1_0
+inside the transaction, count = 2
+after rollback, rows = 0
+-- 2. the same body, committed --
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+after commit, rows = 2
+-- 3. the flush trap: an assertion that cannot fail --
+duplicate detected without flush: false
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+duplicate detected with flush: true (DataIntegrityViolationException)
+-- 4. the first-level cache hides the database --
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+same instance without clear(): true
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.id=?
+same instance after clear(): false
+-- 5. what @Sql does: a script before the body --
+Hibernate: select count(*) from product p1_0
+rows after script = 4
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <ol class="max-w-prose">
+    <li><strong>Run, assert, roll back.</strong> Inside the transaction two inserts were flushed and <code>count()</code> saw them. After <code>setRollbackOnly()</code> the template rolled back instead of committing, and a JDBC count — outside any transaction — found zero rows. That is the whole contract of a test transaction: the database ends every test exactly as it started.</li>
+    <li><strong>Committed, the rows stay.</strong> The same body without the rollback flag leaves two rows. A test annotated <code>@Commit</code> behaves like this, and every test after it then runs against those rows.</li>
+    <li><strong>The flush trap.</strong> The SKU <code>BOLT-7</code> now exists, so saving another must fail — yet the first attempt printed <code>detected without flush: false</code> and <em>no insert appeared in the SQL</em>. The insert was queued, the transaction rolled back, and the queue was discarded unsent. A test asserting "saving a duplicate throws" would pass for the wrong reason, or a test asserting "this save works" would pass when production fails. With <code>saveAndFlush</code> the insert is sent inside the test, H2 rejects it, and the failure arrives — translated, because it came through the repository proxy — as <code>DataIntegrityViolationException</code>.</li>
+    <li><strong>The first-level cache.</strong> Within one persistence context, <code>findById</code> returned the very instance just saved, without touching the database (there is no <code>select</code> before the first fact). A test that saves, then loads, then asserts is checking the Java object it already had, not what the mapping wrote and reads back. After <code>clear()</code> the load is a real <code>select</code> and a new instance. This is what <code>TestEntityManager.flush()</code> plus <code>clear()</code> is for.</li>
+    <li><strong>Seeding with a script.</strong> <code>ResourceDatabasePopulator</code> ran two plain SQL inserts — the mechanism behind <code>@Sql</code> — and the count went from 2 to 4. Note the script wrote columns by their database names, <code>price_in_cents</code>: scripts see the schema, not the entity.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Step through a test method</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a @DataJpaTest test method's transaction">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Inside <code>@DataJpaTest</code></span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Test source</div>
+        <div data-stepper-code data-for="test-tx"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">State</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL sent</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="test-tx">
+    {
+      "lang": "java",
+      "code": "@DataJpaTest\nclass ProductRepositoryTest {\n    @Autowired TestEntityManager tem;\n    @Autowired ProductRepository repo;\n\n    @Test\n    void findsBySkuPrefix() {\n        tem.persist(new Product(\"BOLT-7\", 80));\n        tem.persist(new Product(\"NUT-3\", 25));\n        tem.flush();\n        tem.clear();\n        var hits = repo.findBySkuStartingWithOrderBySku(\"BOLT\");\n        assertThat(hits).extracting(Product::sku).containsExactly(\"BOLT-7\");\n    }\n}",
+      "steps": [
+        { "line": 1, "vars": { "context": "JPA slice only", "database": "embedded H2, empty", "transaction": "none" }, "out": "",
+          "note": "@DataJpaTest builds a context with the DataSource, Hibernate, repositories and TestEntityManager — no web layer, no services. An embedded database replaces any configured one unless you say otherwise." },
+        { "line": 7, "vars": { "transaction": "BEGIN (test-managed)", "persistence context": "empty", "rows in DB": "0" }, "out": "",
+          "note": "Before the method runs, the test framework opens a transaction. The test body and every repository call in it join that one transaction." },
+        { "line": 8, "vars": { "transaction": "active", "persistence context": "BOLT-7 (managed)", "action queue": "insert BOLT-7", "rows in DB": "0" }, "out": "select next value for product_seq",
+          "note": "persist assigns an id (one sequence round trip, block of 50) and queues the insert. Nothing is written yet." },
+        { "line": 9, "vars": { "transaction": "active", "persistence context": "BOLT-7, NUT-3", "action queue": "insert BOLT-7, insert NUT-3", "rows in DB": "0" }, "out": "select next value for product_seq",
+          "note": "Still queued. If the test ended here, both inserts would be discarded at rollback, never having met a constraint." },
+        { "line": 10, "vars": { "transaction": "active", "persistence context": "BOLT-7, NUT-3", "action queue": "empty", "rows in DB": "2 (uncommitted)" }, "out": "insert into product …\ninsert into product …",
+          "note": "flush sends the inserts. Constraints, column lengths and not-null rules are now checked by the database — this is the line that turns a silent test into an honest one." },
+        { "line": 11, "vars": { "transaction": "active", "persistence context": "empty", "rows in DB": "2 (uncommitted)" }, "out": "",
+          "note": "clear detaches everything. The next read cannot be served from the first-level cache, so it must go to the database and through the mapping." },
+        { "line": 12, "vars": { "transaction": "active", "persistence context": "BOLT-7 (fresh instance)", "rows in DB": "2 (uncommitted)" }, "out": "select … from product p1_0 where p1_0.sku like ? escape '\\' order by p1_0.sku",
+          "note": "The derived query runs for real: name parsing, SQL generation and result mapping are all exercised." },
+        { "line": 13, "vars": { "transaction": "active", "assertion": "passes", "rows in DB": "2 (uncommitted)" }, "out": "",
+          "note": "The assertion checks objects that were read back from rows — what production would see." },
+        { "line": 14, "vars": { "transaction": "ROLLBACK (test-managed)", "persistence context": "closed", "rows in DB": "0" }, "out": "",
+          "note": "After the method, the framework rolls back. The next test starts from an empty table. Annotate the method @Commit (or call TestTransaction.flagForCommit()) to keep its rows instead." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">The real test classes</h3>
+
+  <p>These are JUnit 5 test sources. They are not compiled or run by this page's build; run them with <code>spring-boot-starter-test</code> (and <code>spring-boot-testcontainers</code> plus a Docker daemon for the last one) on the test class path.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Data-layer test examples">
+      <button type="button" class="lm-tab" role="tab" id="tab-testing-slice" aria-controls="panel-testing-slice" aria-selected="true" tabindex="0">@DataJpaTest</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-testing-sql" aria-controls="panel-testing-sql" aria-selected="false" tabindex="-1">@Sql and statistics</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-testing-containers" aria-controls="panel-testing-containers" aria-selected="false" tabindex="-1">Testcontainers</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-testing-service" aria-controls="panel-testing-service" aria-selected="false" tabindex="-1">Services</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-testing-slice" aria-labelledby="tab-testing-slice" tabindex="0">
+      <p class="text-sm text-ink-muted">Test source — run with JUnit, not verified by this build.</p>
+      <pre data-code data-lang="java" data-file="ProductRepositoryTest.java">
+@DataJpaTest
+class ProductRepositoryTest {
+
+    @Autowired TestEntityManager tem;
+    @Autowired ProductRepository repo;
+
+    @Test
+    void rejectsDuplicateSku() {
+        tem.persistAndFlush(new Product("BOLT-7", 80));
+
+        assertThatThrownBy(() -> repo.saveAndFlush(new Product("BOLT-7", 90)))
+            .isInstanceOf(DataIntegrityViolationException.class);   // flushed, so it really ran
+    }
+
+    @Test
+    void roundTripsThroughTheMapping() {
+        Long id = tem.persistAndGetId(new Product("CAM-9", 2300), Long.class);
+        tem.clear();                                               // defeat the first-level cache
+
+        assertThat(repo.findById(id)).get()
+            .extracting(Product::priceInCents).isEqualTo(2300);
+    }
+}
+      </pre>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-testing-sql" aria-labelledby="tab-testing-sql" tabindex="0" hidden>
+      <p class="text-sm text-ink-muted">Test source — run with JUnit, not verified by this build.</p>
+      <pre data-code data-lang="java" data-file="OrderQueriesTest.java">
+@DataJpaTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
+@Sql("/orders-with-lines.sql")                       // runs before each test, inside its transaction
+class OrderQueriesTest {
+
+    @Autowired OrderRepository orders;
+    @Autowired EntityManagerFactory emf;
+    @Autowired TestEntityManager tem;
+
+    @Test
+    void listingIsOneStatementNotNPlusOne() {
+        Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+        tem.clear();
+        stats.clear();
+
+        orders.findAllWithLines().forEach(o -> o.getLines().size());
+
+        assertThat(stats.getPrepareStatementCount()).isEqualTo(1);   // a regression guard for §6
+    }
+}
+      </pre>
+      <p class="mb-0">A statement-count assertion is the cheapest N+1 regression test there is: someone removing the <code>@EntityGraph</code> turns it red immediately, long before a slow page is noticed in production.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-testing-containers" aria-labelledby="tab-testing-containers" tabindex="0" hidden>
+      <p class="text-sm text-ink-muted">Test source — needs Docker; not verified by this build.</p>
+      <pre data-code data-lang="java" data-file="PostgresRepositoryTest.java">
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)   // keep the real DataSource
+@Testcontainers
+class PostgresRepositoryTest {
+
+    @Container
+    @ServiceConnection                                  // Boot wires the container's URL, user and password
+    static PostgreSQLContainer&lt;?&gt; postgres = new PostgreSQLContainer&lt;&gt;("postgres:17-alpine");
+
+    @Autowired ProductRepository repo;
+
+    @Test
+    void pessimisticLockUsesForUpdate() {
+        // H2 and PostgreSQL disagree on locking, sequences, case sensitivity and
+        // JSON types; this test runs against the database production uses.
+    }
+}
+      </pre>
+      <p class="mb-0"><code>@ServiceConnection</code> replaces the older <code>@DynamicPropertySource</code> boilerplate. A <code>static</code> container is started once per test class; with Boot's context caching and a shared base class, it is started once per test run.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-testing-service" aria-labelledby="tab-testing-service" tabindex="0" hidden>
+      <p class="text-sm text-ink-muted">Test source — run with JUnit, not verified by this build.</p>
+      <pre data-code data-lang="java" data-file="InventoryServiceIT.java">
+@SpringBootTest
+@Transactional                                       // same rollback-per-test behaviour as the slice
+class InventoryServiceIT {
+
+    @Autowired InventoryService inventory;
+    @Autowired StockLevelRepository stock;
+
+    @Test
+    void reserveDecrementsAndCommits() {
+        inventory.reserve("BOLT-7", 3);
+        TestTransaction.flagForCommit();            // this test wants its effect to persist
+        TestTransaction.end();                      // commit now, then assert in a new transaction
+        TestTransaction.start();
+        assertThat(stock.findBySku("BOLT-7").orElseThrow().onHand()).isEqualTo(7);
+    }
+}
+      </pre>
+      <p class="mb-0">Mock collaborators of a service with <code>@MockitoBean</code>; do not mock repositories in a data-layer test, because the repository is the thing under test. A test that mocks the repository is a test of Mockito.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">What the slice gives you</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">What @DataJpaTest configures, replaces and leaves out</caption>
+      <thead><tr><th scope="col">Configured</th><th scope="col">Replaced by default</th><th scope="col">Left out</th></tr></thead>
+      <tbody>
+        <tr><td><code>DataSource</code>, Hibernate, <code>JpaTransactionManager</code>, repositories, <code>TestEntityManager</code>, Flyway/Liquibase if present</td><td>Your configured database, by an embedded one (H2, HSQLDB or Derby on the class path) — unless <code>replace = NONE</code></td><td><code>@Service</code>, <code>@Controller</code> and other <code>@Component</code> beans; web; security</td></tr>
+        <tr><td>SQL logging on (<code>showSql</code> attribute, default <code>true</code>)</td><td>Every test method's transaction, rolled back</td><td>Your <code>CommandLineRunner</code>s</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Testing gotchas</div>
+      <ul class="mb-0">
+        <li><strong>No flush, no failure.</strong> A test that saves and never flushes never sends SQL, so constraint, length and mapping errors cannot happen. Use <code>saveAndFlush</code> or <code>tem.flush()</code> before asserting on anything the database decides.</li>
+        <li><strong>No clear, no round trip.</strong> Loading what you just saved returns the same Java object. Clear the persistence context so the test exercises the mapping.</li>
+        <li><strong>H2 is not your production database.</strong> It accepts syntax PostgreSQL rejects, locks differently, and has its own sequence and identity behaviour. Keep a Testcontainers suite against the real engine for queries, locking and migrations.</li>
+        <li><strong>Rollback hides commit-time behaviour.</strong> <code>@TransactionalEventListener(AFTER_COMMIT)</code> listeners (§8), deferred constraints and commit-time validation never run in a rolled-back test. Test those with <code>@Commit</code> or <code>TestTransaction.end()</code>, and clean up after.</li>
+        <li><strong>Each distinct test configuration is a new context.</strong> Spring caches contexts between test classes with identical configuration; every different <code>properties</code>, <code>@MockitoBean</code> or profile builds another, and a suite of fast tests becomes a slow one.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-testing-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In a <code>@DataJpaTest</code>, a test does <code>repo.save(new Product("BOLT-7", 1))</code> when <code>BOLT-7</code> already exists, then <code>assertThat(repo.count()).isEqualTo(1)</code>. The SKU column is unique. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-testing-1"><span><code>save</code> throws <code>DataIntegrityViolationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-testing-1"><span><code>count()</code> triggers an auto-flush, the insert fails there, and the test errors on the count line <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-testing-1"><span>The test passes; the duplicate is never sent <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-testing-1"><span>The test fails because <code>count()</code> returns 2 <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>count()</code> is a JPQL query on <code>Product</code>, and with flush mode <code>AUTO</code> Hibernate flushes pending changes to that entity first so the query sees them (JPA §7). The insert is sent then, the database rejects it, and the exception appears on a line that looks innocent. Had the test asserted nothing that queried <code>Product</code>, it would have passed — the worked example's step 3.</p>
+        <p class="mb-0"><strong>A</strong>: with <code>SEQUENCE</code> ids, <code>save</code> only queues the insert. <strong>C</strong> is what happens with no query before the rollback. <strong>D</strong> would require the database to accept a duplicate under a unique index.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-testing-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A test saves a <code>Product</code> with a 20-character SKU into a <code>length = 16</code> column, then loads it with <code>findById</code> and asserts the SKU matches. It passes on H2. Why is it worthless?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-testing-2"><span>H2 silently truncates long strings <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-testing-2"><span><code>findById</code> is not transactional in a test <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-testing-2"><span>Nothing was flushed and the load came from the first-level cache, so the database was never involved <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-testing-2"><span>Column lengths are only enforced in production mode <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>findById</code> by primary key checks the persistence context first and returned the object the test had just saved (step 4 of the worked example). The too-long value never met the column. <code>saveAndFlush</code> plus <code>clear()</code> would have produced a <code>DataIntegrityViolationException</code>.</p>
+        <p class="mb-0"><strong>A</strong>: H2 rejects values too long for a <code>varchar(16)</code>; it was simply never asked. <strong>B</strong>: it runs in the test's transaction, which is precisely why it shares the cache. <strong>D</strong> invents a mode that does not exist.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-testing-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these will a default, rolled-back <code>@DataJpaTest</code> fail to exercise? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>An <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>A derived query's generated SQL <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>A unique constraint, when the test uses <code>saveAndFlush</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>A <code>@Service</code> method's <code>@Transactional(propagation = REQUIRES_NEW)</code> behaviour <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> An after-commit listener needs a commit, which a rolled-back test never performs. And the slice does not load <code>@Service</code> beans at all, so the service and its transactional proxy are absent — use <code>@SpringBootTest</code> for that.</p>
+        <p class="mb-0"><strong>B</strong> is exactly what the slice is good at: the query runs for real. <strong>C</strong>: with a flush, the statement reaches the database inside the test, so the constraint fires.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="testing"> Mark this section complete
+  </label>
+</section>

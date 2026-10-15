@@ -1,0 +1,456 @@
+<section class="lm-section" id="configuration" data-title="Configuration, profiles and production settings" data-num="12">
+  <p class="lm-eyebrow">Section 12</p>
+  <h2 class="mb-4">Configuration, profiles and production settings</h2>
+
+  <p>Every program in this module has passed the same dozen properties to <code>setDefaultProperties</code>, and so far that has been treated as boilerplate. It is not. A Spring Boot application is shaped by its configuration more than by its code: the same jar behaves as a laptop sandbox, a CI fixture or a production service depending on which properties reach it, from where, and which one wins when two sources disagree. Most production incidents in the data layer trace back to a property — a pool too big for the database, <code>ddl-auto</code> left at <code>update</code>, <code>show-sql</code> logging every statement under load, a password in a properties file.</p>
+
+  <p>This section covers the machinery: the <strong>property sources</strong> and their precedence, <strong>profiles</strong> that switch beans and settings, <strong>type-safe binding</strong> with <code>@ConfigurationProperties</code>, how <code>spring.jpa.*</code> reaches Hibernate, how the <strong>Hikari pool</strong> should be sized, and how SQL initialisation interleaves with Hibernate's schema generation. It ends with the property set each environment should actually run with.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: one application, every configuration path</h3>
+
+  <p>The program writes a three-line seed script, sets one JVM system property, then starts with the <code>dev</code> profile active. The runner prints what each mechanism resolved to.</p>
+
+  <pre data-code data-lang="java" data-file="Profiles.java" data-verify="Profiles" data-package="lm.config" data-hi="46,50,56,64,95,104,112,113,114,115">
+package lm.config;
+
+import com.zaxxer.hikari.HikariDataSource;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.stereotype.Component;
+import org.springframework.validation.annotation.Validated;
+
+import javax.sql.DataSource;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+@EnableConfigurationProperties(Profiles.WarehouseProps.class)
+public class Profiles {
+
+    // ── a tiny entity so the data source and the seed script have something to hit ──
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int priceInCents;
+        protected Product() {}
+    }
+    public interface ProductRepository extends JpaRepository&lt;Product, Long&gt; {}
+
+    // ── one interface, two implementations, one of them active per profile ──
+    public interface PricingPolicy { String describe(); }
+
+    @Component @Profile("dev")
+    public static class ListPricePolicy implements PricingPolicy {
+        public String describe() { return "list price, no rounding (dev)"; }
+    }
+    @Component @Profile("prod")
+    public static class ContractPricePolicy implements PricingPolicy {
+        public String describe() { return "contract price with psychological rounding (prod)"; }
+    }
+
+    // ── type-safe, validated configuration ──
+    @ConfigurationProperties(prefix = "warehouse")
+    @Validated
+    public record WarehouseProps(@NotBlank String region,
+                                 @Min(1) int reorderThreshold,
+                                 List&lt;String&gt; prioritySkus) {}
+
+    @Bean CommandLineRunner show(Environment env, PricingPolicy pricing, WarehouseProps props,
+                                 DataSource dataSource, EntityManagerFactory emf, ProductRepository products,
+                                 @Value("${warehouse.currency:EUR}") String currency) {
+        return args -&gt; {
+            System.out.println("active profiles = " + String.join(",", env.getActiveProfiles()));
+            System.out.println("pricing policy  = " + pricing.describe());
+            System.out.println("props           = " + props);
+            System.out.println("currency        = " + currency + "   (not set anywhere: the @Value default)");
+
+            HikariDataSource hikari = (HikariDataSource) dataSource;
+            System.out.println("pool            = " + hikari.getPoolName() + ", max " + hikari.getMaximumPoolSize()
+                    + ", min idle " + hikari.getMinimumIdle());
+            System.out.println("batch_size      = " + emf.getProperties().get("hibernate.jdbc.batch_size")
+                    + "   (reached Hibernate through spring.jpa.properties.*)");
+
+            System.out.println("seeded rows     = " + products.count() + "   (inserted by the spring.sql.init script, not by Hibernate)");
+
+            System.out.println("warehouse.site  = " + env.getProperty("warehouse.site")
+                    + "   (default properties said 'default-properties')");
+            System.out.println("warehouse.region= " + env.getProperty("warehouse.region")
+                    + "   (only the default properties define it)");
+        };
+    }
+
+    public static void main(String[] args) throws Exception {
+        // a seed script Spring Boot will run after Hibernate has created the schema
+        Path seed = Path.of("warehouse-seed.sql");
+        Files.writeString(seed, """
+            insert into product (id, sku, price_in_cents) values (1, 'BOLT-7', 80);
+            insert into product (id, sku, price_in_cents) values (2, 'NUT-3', 25);
+            insert into product (id, sku, price_in_cents) values (3, 'CAM-9', 2300);
+            """);
+        // a system property outranks the application's default properties
+        System.setProperty("warehouse.site", "system-property");
+        try {
+            SpringApplication app = new SpringApplication(Profiles.class);
+            app.setDefaultProperties(Map.ofEntries(
+                Map.entry("spring.main.web-application-type", "none"),
+                Map.entry("spring.main.banner-mode", "off"),
+                Map.entry("spring.main.log-startup-info", "false"),
+                Map.entry("logging.level.root", "WARN"),
+                Map.entry("logging.pattern.console", "%level %logger{0}: %msg%n"),
+                Map.entry("spring.profiles.active", "dev"),
+                Map.entry("spring.datasource.url", "jdbc:h2:mem:config;DB_CLOSE_DELAY=-1"),
+                Map.entry("spring.datasource.hikari.pool-name", "warehouse-pool"),
+                Map.entry("spring.datasource.hikari.maximum-pool-size", "4"),
+                Map.entry("spring.datasource.hikari.minimum-idle", "1"),
+                Map.entry("spring.jpa.hibernate.ddl-auto", "create-drop"),
+                Map.entry("spring.jpa.show-sql", "true"),
+                Map.entry("spring.jpa.open-in-view", "false"),
+                Map.entry("spring.jpa.properties.hibernate.jdbc.batch_size", "20"),
+                Map.entry("spring.jpa.defer-datasource-initialization", "true"),
+                Map.entry("spring.sql.init.mode", "always"),
+                Map.entry("spring.sql.init.data-locations", "file:warehouse-seed.sql"),
+                Map.entry("warehouse.region", "eu-west"),
+                Map.entry("warehouse.reorder-threshold", "25"),
+                Map.entry("warehouse.priority-skus", "BOLT-7,GIRD-1"),
+                Map.entry("warehouse.site", "default-properties")));
+            app.run(args).close();
+        } finally {
+            Files.deleteIfExists(seed);
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Profiles">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade 
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+active profiles = dev
+pricing policy  = list price, no rounding (dev)
+props           = WarehouseProps[region=eu-west, reorderThreshold=25, prioritySkus=[BOLT-7, GIRD-1]]
+currency        = EUR   (not set anywhere: the @Value default)
+pool            = warehouse-pool, max 4, min idle 1
+batch_size      = 20   (reached Hibernate through spring.jpa.properties.*)
+Hibernate: select count(*) from product p1_0
+seeded rows     = 3   (inserted by the spring.sql.init script, not by Hibernate)
+warehouse.site  = system-property   (default properties said 'default-properties')
+warehouse.region= eu-west   (only the default properties define it)
+Hibernate: drop table if exists product cascade 
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>Read it top to bottom against the configuration that produced it:</p>
+  <ul class="max-w-prose">
+    <li><strong>The DDL, then nothing.</strong> Hibernate creates the table, and the three seed rows appear without a single <code>insert</code> in the log. They were executed by Spring's <code>spring.sql.init</code> machinery straight through JDBC, so Hibernate's <code>show_sql</code> never saw them. If your seed data seems to load "silently", that is why.</li>
+    <li><strong><code>active profiles = dev</code></strong> and <strong><code>pricing policy = list price…</code></strong>: two <code>@Component</code> classes implement <code>PricingPolicy</code>, and the runner asks for exactly one. That works only because <code>@Profile("prod")</code> kept the other one out of the context. Start with <code>prod</code> and you get the other bean; start with neither and the injection fails with <code>NoSuchBeanDefinitionException</code>, which is the right behaviour — no environment should run with an implicit pricing rule.</li>
+    <li><strong><code>props = WarehouseProps[…]</code></strong>: three properties bound into an immutable, validated record. Note <code>warehouse.reorder-threshold</code> (kebab-case in the source) landed in <code>reorderThreshold</code>, and the comma-separated string became a <code>List</code>. Breaking <code>@Min(1)</code> fails startup, not the first request.</li>
+    <li><strong><code>currency = EUR</code></strong>: no source defines <code>warehouse.currency</code>, so <code>@Value("${warehouse.currency:EUR}")</code> fell back to its default. Without the <code>:EUR</code> the context would refuse to start.</li>
+    <li><strong><code>pool = warehouse-pool, max 4, min idle 1</code></strong>: the <code>spring.datasource.hikari.*</code> keys bind directly onto the <code>HikariDataSource</code> Spring Boot created.</li>
+    <li><strong><code>batch_size = 20</code></strong>: <code>spring.jpa.properties.hibernate.jdbc.batch_size</code> was stripped of its <code>spring.jpa.properties.</code> prefix and handed to Hibernate verbatim — it is visible in the <code>EntityManagerFactory</code>'s own property map.</li>
+    <li><strong><code>warehouse.site = system-property</code></strong>: the default properties said <code>default-properties</code>, but <code>System.setProperty</code> outranks them. <code>warehouse.region</code>, defined only in the defaults, shows the defaults still apply wherever nothing overrides them.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Where a property comes from, and who wins</h3>
+
+  <p>Spring Boot assembles one <code>Environment</code> from an ordered list of property sources and, for each key, takes the first match from the top. The list below runs from <strong>highest to lowest</strong> priority, abridged to the sources a data application actually uses:</p>
+
+  <ol class="max-w-prose">
+    <li>Test overrides: <code>@DynamicPropertySource</code>, <code>@TestPropertySource</code>, <code>@SpringBootTest(properties = …)</code> (§11).</li>
+    <li>Command-line arguments: <code>--spring.jpa.show-sql=true</code>.</li>
+    <li><code>SPRING_APPLICATION_JSON</code> — a whole JSON document in one environment variable or system property.</li>
+    <li>JVM system properties: <code>-Dwarehouse.site=…</code> or <code>System.setProperty</code>.</li>
+    <li>OS environment variables: <code>SPRING_DATASOURCE_URL=…</code>.</li>
+    <li>Config files, where profile-specific beats plain and outside-the-jar beats inside: <code>application-prod.properties</code> next to the jar, then <code>application.properties</code> next to the jar, then the same two packaged inside it.</li>
+    <li><code>@PropertySource</code> on a configuration class.</li>
+    <li>Default properties — <code>SpringApplication.setDefaultProperties</code>, which is all the programs in this module use.</li>
+  </ol>
+
+  <p>The rule of thumb behind the order: the closer a source is to the person deploying, the more it wins. The jar's packaged <code>application.properties</code> holds sensible defaults, the deployment overrides them with environment variables or an external file, and a command-line flag overrides everything for one run. YAML (<code>application.yml</code>) is interchangeable with <code>.properties</code>; if both exist at the same location, <code>.properties</code> wins.</p>
+
+  <p>The property-precedence sandbox in §1 lets you tick sources on and off and watch which one wins; it is worth a second visit with this list beside it.</p>
+
+  <h4 class="mt-6 mb-2">Relaxed binding and environment variables</h4>
+  <p>Property names are matched loosely: <code>warehouse.reorder-threshold</code>, <code>warehouse.reorderThreshold</code> and <code>warehouse.reorder_threshold</code> all bind to the same field. Environment variables cannot contain dots or dashes, so they follow a fixed recipe — replace dots with underscores, drop the dashes, upper-case the lot:</p>
+  <pre data-code data-lang="bash" data-nobar>
+SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/warehouse
+SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE=8        # spring.datasource.hikari.maximum-pool-size
+SPRING_JPA_OPENINVIEW=false                       # spring.jpa.open-in-view
+WAREHOUSE_REORDERTHRESHOLD=25                     # warehouse.reorder-threshold
+WAREHOUSE_PRIORITYSKUS=BOLT-7,GIRD-1              # a list, comma-separated
+  </pre>
+  <p>The recipe only works for keys bound to a <code>@ConfigurationProperties</code> class; a plain <code>@Value("${warehouse.reorder-threshold}")</code> looks up the canonical name, which still resolves from an environment variable, but uncommon forms are easy to get wrong. That is one of several reasons to prefer type-safe binding.</p>
+
+  <h3 class="mt-8 mb-3">Profiles</h3>
+
+  <p>A profile is a named switch. It does two jobs: it selects which <strong>beans</strong> exist (<code>@Profile("dev")</code> on a component or <code>@Bean</code> method, with negation <code>@Profile("!prod")</code> and expressions <code>@Profile("dev &amp; local")</code>), and it selects which <strong>config files</strong> load (<code>application-dev.properties</code> layered over <code>application.properties</code>). Activate profiles with <code>spring.profiles.active=prod</code> — as an environment variable <code>SPRING_PROFILES_ACTIVE=prod</code> in a real deployment.</p>
+  <ul class="max-w-prose">
+    <li><strong>Groups</strong> name a set: <code>spring.profiles.group.prod=prod-db,prod-cache</code> lets you activate <code>prod</code> and get both, so the deployment does not have to know the decomposition.</li>
+    <li><strong><code>spring.profiles.include</code></strong> unconditionally adds profiles from inside a config file; groups are usually clearer.</li>
+    <li><strong>Profiles are for environments, not features.</strong> A profile per customer or per feature flag multiplies combinations nobody tests. Use a <code>@ConfigurationProperties</code> flag for a feature, and keep profiles to <code>dev</code>, <code>test</code>, <code>prod</code> and the occasional <code>local</code>.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3"><code>@ConfigurationProperties</code> versus <code>@Value</code></h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Comparison of ConfigurationProperties and Value injection</caption>
+      <thead><tr><th scope="col"></th><th scope="col"><code>@ConfigurationProperties</code></th><th scope="col"><code>@Value</code></th></tr></thead>
+      <tbody>
+        <tr><td>Granularity</td><td>A group of related keys under one prefix, as a record or class</td><td>One key per field or parameter</td></tr>
+        <tr><td>Type safety</td><td>Binds to <code>int</code>, <code>Duration</code> (<code>30s</code>), <code>DataSize</code> (<code>10MB</code>), lists, maps, nested records</td><td>String conversion per key; collections need SpEL</td></tr>
+        <tr><td>Validation</td><td><code>@Validated</code> + Bean Validation, checked at startup</td><td>None</td></tr>
+        <tr><td>Relaxed binding</td><td>Full</td><td>Limited — use the canonical kebab-case name</td></tr>
+        <tr><td>IDE metadata</td><td>Generated by <code>spring-boot-configuration-processor</code>: autocomplete and docs in <code>application.properties</code></td><td>None</td></tr>
+        <tr><td>Use it for</td><td>Anything your application owns: <code>warehouse.*</code></td><td>A single value in a single place, with a default</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>A record is the natural shape: immutable, constructor-bound, no setters to call by accident. Register it with <code>@EnableConfigurationProperties(WarehouseProps.class)</code> as the program does, or with <code>@ConfigurationPropertiesScan</code> on the application class to pick up every annotated record in the package.</p>
+
+  <h3 class="mt-8 mb-3">How <code>spring.jpa.*</code> reaches Hibernate</h3>
+
+  <p>There are two families of keys and confusing them is a common, silent bug:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>spring.jpa.*</code> and <code>spring.jpa.hibernate.*</code></strong> bind to Spring Boot's own <code>JpaProperties</code> class, which knows a fixed set: <code>show-sql</code>, <code>open-in-view</code>, <code>database-platform</code>, <code>defer-datasource-initialization</code>, <code>hibernate.ddl-auto</code>, <code>hibernate.naming.*</code>. Boot translates them into Hibernate settings.</li>
+    <li><strong><code>spring.jpa.properties.*</code></strong> is a pass-through map. Everything after the prefix goes to Hibernate unchanged — <code>spring.jpa.properties.hibernate.jdbc.batch_size</code> becomes <code>hibernate.jdbc.batch_size</code>, as the output showed.</li>
+  </ul>
+  <p>So <code>spring.jpa.hibernate.jdbc.batch_size=20</code>, which looks right, matches nothing: <code>JpaProperties.Hibernate</code> has no such field, and nothing complains. If a Hibernate setting from JPA §9 seems to have no effect, check the prefix first.</p>
+
+  <h3 class="mt-8 mb-3">The connection pool</h3>
+
+  <p>Spring Boot picks HikariCP when it is on the class path, which <code>spring-boot-starter-data-jpa</code> guarantees. The knobs that matter:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">HikariCP settings and their meaning</caption>
+      <thead><tr><th scope="col">Property (<code>spring.datasource.hikari.</code>…)</th><th scope="col">Default</th><th scope="col">What it controls</th></tr></thead>
+      <tbody>
+        <tr><td><code>maximum-pool-size</code></td><td>10</td><td>The hard cap on open connections <em>per application instance</em>. The number to size.</td></tr>
+        <tr><td><code>minimum-idle</code></td><td>same as max</td><td>Idle connections kept ready. Hikari recommends leaving it equal to the maximum: a fixed-size pool never has to open connections during a traffic spike.</td></tr>
+        <tr><td><code>connection-timeout</code></td><td>30 s</td><td>How long a thread waits for a free connection before <code>SQLTransientConnectionException</code>. Lower it so an exhausted pool fails fast instead of piling up waiting requests.</td></tr>
+        <tr><td><code>max-lifetime</code></td><td>30 min</td><td>Retires each connection after this long. Must be shorter than any timeout the database, firewall or proxy applies, or the pool hands out connections that were already cut.</td></tr>
+        <tr><td><code>idle-timeout</code></td><td>10 min</td><td>Retires idle connections above <code>minimum-idle</code>; irrelevant for a fixed-size pool.</td></tr>
+        <tr><td><code>leak-detection-threshold</code></td><td>off</td><td>Logs a stack trace when a connection is held longer than this — the way to find the code that never returns one. A diagnostic, not a permanent setting.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Bigger is not better.</strong> A database server with eight cores runs eight things at once; give it eighty connections and seventy-two of them queue inside the database instead of inside the pool, where they also contend for locks and memory. HikariCP's starting formula — <code>cores × 2 + effective spindle count</code> — is a budget for the whole database, so it must be shared by every instance of every service that connects to it. Then check the demand side with Little's law: connections busy at once equals requests per second times the database time per request.</p>
+
+  <div class="lm-card" data-sandbox="hikari-sizer">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+      Size the pool for this deployment
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Database cores <span class="lm-readout" data-sb-coresout>8</span></span>
+        <input type="range" data-sb-cores min="2" max="64" value="8" step="2">
+      </label>
+      <label class="lm-field">
+        <span>Storage</span>
+        <select data-sb-storage>
+          <option value="ssd" selected>SSD / cloud volume (count as 1)</option>
+          <option value="hdd2">2 spinning disks</option>
+          <option value="hdd4">4 spinning disks</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Application instances <span class="lm-readout" data-sb-instancesout>3</span></span>
+        <input type="range" data-sb-instances min="1" max="20" value="3" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Peak requests / s, all instances <span class="lm-readout" data-sb-rpsout>200</span></span>
+        <input type="range" data-sb-rps min="10" max="3000" value="200" step="10">
+      </label>
+      <label class="lm-field">
+        <span>Database time per request <span class="lm-readout" data-sb-qmsout>5 ms</span></span>
+        <input type="range" data-sb-qms min="1" max="200" value="5" step="1">
+      </label>
+      <label class="lm-field">
+        <span>Database max_connections</span>
+        <select data-sb-maxconn>
+          <option value="100" selected>100 (PostgreSQL default)</option>
+          <option value="200">200</option>
+          <option value="500">500</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">SQL initialisation and Hibernate's schema</h3>
+
+  <p>Spring Boot can run SQL scripts at startup: <code>schema.sql</code> and <code>data.sql</code> from the class path by default, or the files named in <code>spring.sql.init.schema-locations</code> / <code>data-locations</code>. Two settings decide whether and when:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>spring.sql.init.mode</code></strong> — <code>embedded</code> (the default: only for H2, HSQLDB and Derby), <code>always</code>, or <code>never</code>. The default is deliberate: scripts that recreate data are a convenience for an in-memory database and a hazard for a real one.</li>
+    <li><strong><code>spring.jpa.defer-datasource-initialization</code></strong> — by default the scripts run <em>before</em> the <code>EntityManagerFactory</code> exists, which suits a hand-written <code>schema.sql</code>. If Hibernate generates the schema (<code>ddl-auto</code>), a <code>data.sql</code> that inserts into its tables needs <code>true</code>, or it runs against tables that do not exist yet. The program sets it for exactly that reason.</li>
+  </ul>
+  <p>In production neither mechanism should own the schema: a migration tool should. Put Flyway or Liquibase on the class path and Spring Boot runs it before JPA starts, configured under <code>spring.flyway.*</code> or <code>spring.liquibase.*</code>, with migrations in <code>db/migration</code>. Combine it with <code>ddl-auto=validate</code> so Hibernate checks the migrated schema against the entities (JPA §10). Do not mix script-based initialisation with a migration tool; choose one owner for the schema.</p>
+
+  <h3 class="mt-8 mb-3">A property set per environment</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Recommended properties by environment">
+      <button type="button" class="lm-tab" role="tab" id="tab-configuration-dev" aria-controls="panel-configuration-dev" aria-selected="true" tabindex="0">Local development</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-configuration-ci" aria-controls="panel-configuration-ci" aria-selected="false" tabindex="-1">CI tests</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-configuration-prod" aria-controls="panel-configuration-prod" aria-selected="false" tabindex="-1">Production</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-configuration-dev" aria-labelledby="tab-configuration-dev" tabindex="0">
+      <pre data-code data-lang="bash" data-file="application-dev.properties">
+# a real database in a container (docker compose, or Boot's Testcontainers dev-time support)
+spring.datasource.url=jdbc:postgresql://localhost:5432/warehouse
+spring.datasource.username=warehouse
+spring.datasource.password=dev-only-password
+
+spring.jpa.hibernate.ddl-auto=validate        # the migrations own the schema even locally
+spring.jpa.open-in-view=false
+spring.jpa.show-sql=false                     # use the logger below: it can be turned on per package
+logging.level.org.hibernate.SQL=debug         # every statement
+logging.level.org.hibernate.orm.jdbc.bind=trace   # and its bound parameters
+spring.jpa.properties.hibernate.generate_statistics=true
+      </pre>
+      <p class="mb-0 text-sm">Developing against the same database engine as production is the single cheapest way to avoid "works on H2" surprises. Statistics on locally means N+1 regressions show up in a log line, not a production graph.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-configuration-ci" aria-labelledby="tab-configuration-ci" tabindex="0" hidden>
+      <pre data-code data-lang="bash" data-file="application-test.properties">
+# the datasource itself comes from @ServiceConnection on a Testcontainers PostgreSQL (§11)
+spring.jpa.hibernate.ddl-auto=validate        # migrations run first; this proves they match the entities
+spring.jpa.open-in-view=false
+spring.jpa.properties.hibernate.generate_statistics=true   # tests assert statement counts
+spring.datasource.hikari.maximum-pool-size=4  # tests are not load tests
+logging.level.root=WARN
+      </pre>
+      <p class="mb-0 text-sm">CI is where <code>validate</code> earns its keep: a migration that forgot a column fails the build, not the deployment.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-configuration-prod" aria-labelledby="tab-configuration-prod" tabindex="0" hidden>
+      <pre data-code data-lang="bash" data-file="application-prod.properties">
+# url, username and password arrive as environment variables or from a secret store — never here
+spring.jpa.hibernate.ddl-auto=validate        # or none; never update, never create
+spring.jpa.open-in-view=false
+spring.jpa.show-sql=false
+
+spring.datasource.hikari.maximum-pool-size=8  # sized for the database, divided by instance count
+spring.datasource.hikari.minimum-idle=8
+spring.datasource.hikari.connection-timeout=3000
+spring.datasource.hikari.max-lifetime=1740000 # just under a 30-minute server or proxy timeout
+
+spring.jpa.properties.hibernate.jdbc.batch_size=50
+spring.jpa.properties.hibernate.order_inserts=true
+spring.jpa.properties.hibernate.order_updates=true
+spring.jpa.properties.hibernate.default_batch_fetch_size=16   # the N+1 safety net from §6
+spring.jpa.properties.hibernate.generate_statistics=false     # it has a cost; enable briefly to diagnose
+      </pre>
+      <p class="mb-0 text-sm">Nothing here is environment-specific secret material, so the file can live in the repository. Health and pool metrics come from Spring Boot Actuator (<code>/actuator/health</code>, <code>hikaricp.connections.*</code> metrics) once it is added.</p>
+    </div>
+  </div>
+
+  <h4 class="mt-6 mb-2">Secrets</h4>
+  <p>A database password in <code>application.properties</code> is committed to version control, copied into every build artefact and readable by anyone with the jar. Supply it at runtime instead: an environment variable (<code>SPRING_DATASOURCE_PASSWORD</code>) injected by the platform, a mounted file imported with <code>spring.config.import=configtree:/run/secrets/</code>, or a secret store such as Vault through its Spring integration. The property name stays the same; only the source changes — which is precisely what the precedence list is for.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Configuration gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Seed rows with explicit ids collide with the sequence.</strong> The program's script inserted ids 1, 2 and 3 directly. The first entity Hibernate persists afterwards asks <code>product_seq</code> for a value, gets 1, and fails on the primary key. Either let seed scripts call the sequence (<code>next value for product_seq</code>), restart the sequence after seeding, or seed through the application.</li>
+        <li><strong>A misspelt key is silently ignored.</strong> <code>spring.jpa.hibernate.jdbc.batch_size</code>, <code>spring.datasource.hikari.max-pool-size</code> and <code>spring.jpa.open_in_view</code> all bind to nothing. Your own <code>@ConfigurationProperties</code> classes can opt into strictness with <code>ignoreUnknownFields = false</code>; Spring's own keys cannot, so verify the effective value, as the program does.</li>
+        <li><strong>Every instance has its own pool.</strong> Ten pods with the default pool of 10 open 100 connections, which is PostgreSQL's entire default <code>max_connections</code>. A rolling deployment briefly doubles it.</li>
+        <li><strong><code>spring.profiles.active</code> in a packaged <code>application.properties</code></strong> sets the profile for every environment that does not override it, including production if someone forgets. Leave it out of the jar and set it where the application is deployed.</li>
+        <li><strong>An <code>@Profile</code> that matches no active profile removes the bean.</strong> If the only implementation of an interface is <code>@Profile("prod")</code>, every other environment fails at startup. That is usually what you want; make sure it is not a surprise.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-configuration-1" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>warehouse.site</code> is set in the packaged <code>application.properties</code>, as an environment variable <code>WAREHOUSE_SITE</code>, as a system property <code>-Dwarehouse.site</code>, and as a command-line argument <code>--warehouse.site</code>. Which value does <code>Environment.getProperty</code> return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-configuration-1"><span>The <code>application.properties</code> value — files are the application's own configuration <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-configuration-1"><span>The environment variable <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-configuration-1"><span>The system property <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-configuration-1"><span>The command-line argument <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> Command-line arguments sit above every other runtime source; only test overrides rank higher. The order follows who is closest to this particular run: the person typing the command beats the deployment, which beats the build.</p>
+        <p class="mb-0"><strong>A</strong> is the lowest of the four — a packaged file holds defaults meant to be overridden. <strong>B</strong> loses to system properties, which are more specific to one JVM than the process environment. <strong>C</strong> would win if the command-line argument were absent; the worked example showed a system property beating the default properties for the same reason.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-configuration-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>An application uses <code>spring.jpa.hibernate.ddl-auto=create-drop</code> on H2 and has a <code>data.sql</code> that inserts into the <code>product</code> table Hibernate generates. It does <em>not</em> set <code>spring.jpa.defer-datasource-initialization</code>. What happens at startup?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-configuration-2"><span>The rows load normally; Spring Boot always runs <code>data.sql</code> last <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-configuration-2"><span>Startup fails: the script runs before Hibernate has created the table <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-configuration-2"><span>Nothing: <code>data.sql</code> only runs when <code>spring.sql.init.mode=always</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-configuration-2"><span>The rows load, then <code>create-drop</code> deletes them when Hibernate creates the schema <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> By default script initialisation runs before the <code>EntityManagerFactory</code> is built, so the <code>insert</code> targets a table that does not exist and the context fails to start. Setting <code>spring.jpa.defer-datasource-initialization=true</code> moves the scripts after Hibernate's schema generation, which is why the worked example sets it.</p>
+        <p class="mb-0"><strong>A</strong> describes the deferred behaviour, not the default. <strong>C</strong> is wrong for H2: the default mode <code>embedded</code> does run scripts against an in-memory database; <code>always</code> is needed only for a real one. <strong>D</strong> gets the order backwards — and Hibernate's drop happens at shutdown, not after the scripts.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-configuration-3" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which line actually changes Hibernate's JDBC batch size?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-configuration-3"><span><code>spring.jpa.hibernate.jdbc.batch_size=50</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-configuration-3"><span><code>spring.jpa.jdbc.batch-size=50</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-configuration-3"><span><code>spring.jpa.properties.hibernate.jdbc.batch_size=50</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-configuration-3"><span><code>hibernate.jdbc.batch_size=50</code> in <code>application.properties</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>spring.jpa.properties.*</code> is the pass-through map: the remainder of the key reaches Hibernate unchanged. The worked example read it back from the <code>EntityManagerFactory</code> as <code>batch_size = 20</code>.</p>
+        <p class="mb-0"><strong>A</strong> looks plausible but binds to Spring Boot's <code>JpaProperties.Hibernate</code>, which knows only <code>ddl-auto</code> and the naming strategies, so it is silently ignored. <strong>B</strong> is not a key anything binds to. <strong>D</strong> sits in Spring's <code>Environment</code>, but nothing copies arbitrary <code>hibernate.*</code> keys from the environment into the persistence unit — only the <code>spring.jpa.properties</code> prefix does that.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-configuration-4" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>Twelve instances of a service each use Hikari's default pool against a PostgreSQL server with 8 cores and <code>max_connections = 100</code>. Response times rise sharply under load. Which changes help? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Shrink each pool so the total is near what 8 cores can run, around 2 per instance <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Raise <code>maximum-pool-size</code> to 50 so requests stop waiting for connections <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Raise <code>connection-timeout</code> to two minutes so fewer requests fail <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Reduce the database time per request — fix N+1 queries, add indexes, project DTOs <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Twelve pools of 10 ask for 120 connections from a server that can usefully run about 17 (<code>8 × 2 + 1</code>) and refuses beyond 100. Shrinking the pools moves the queue out of the database, where waiting connections compete for CPU and locks, into the pool, where waiting is cheap. Reducing database time per request lowers the demand side of Little's law directly.</p>
+        <p class="mb-0"><strong>B</strong> makes it worse: 600 requested connections, most refused, and the rest contending inside an overloaded server. <strong>C</strong> only lets requests wait longer before failing; it hides the saturation and lets threads pile up behind it.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="configuration"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,310 @@
+<section class="lm-section" id="schema" data-title="Schema generation, validation and migrations" data-num="10">
+  <p class="lm-eyebrow">Section 10</p>
+  <h2 class="mb-4">Schema generation, validation and migrations</h2>
+
+  <p>Every program in this module has started with <code>drop-and-create</code>: Hibernate reads the mappings, derives DDL, and builds a fresh schema in an empty in-memory database. That is exactly right for a learning page and a test, and exactly wrong for a database with data in it. The question this section answers is who owns the schema once the data matters &mdash; and the answer is never "the application at startup".</p>
+
+  <p>Two vocabularies describe the same switch. JPA's is <code>jakarta.persistence.schema-generation.database.action</code> with the values <code>none</code>, <code>create</code>, <code>drop</code>, <code>drop-and-create</code>; Hibernate's older <code>hibernate.hbm2ddl.auto</code> adds the two values JPA does not have, <code>update</code> and <code>validate</code>. When both are set, the JPA property wins and the Hibernate one is ignored &mdash; a detail that bit the worked example below on its first draft.</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Schema generation settings in JPA and Hibernate spelling</caption>
+      <thead><tr><th scope="col">Hibernate <code>hbm2ddl.auto</code></th><th scope="col">JPA <code>schema-generation.database.action</code></th><th scope="col">At startup</th><th scope="col">Existing data</th></tr></thead>
+      <tbody>
+        <tr><td><code>create</code></td><td><code>drop-and-create</code></td><td>drop mapped tables, create them</td><td class="no">destroyed</td></tr>
+        <tr><td><code>create-drop</code></td><td><code>drop-and-create</code> (+ drop on close)</td><td>as above, then drop on shutdown</td><td class="no">destroyed</td></tr>
+        <tr><td><code>create-only</code></td><td><code>create</code></td><td>create without dropping first</td><td>kept, but fails if tables exist</td></tr>
+        <tr><td><code>update</code></td><td>&mdash;</td><td>add missing tables and columns</td><td>kept; drift accumulates</td></tr>
+        <tr><td><code>validate</code></td><td>&mdash;</td><td>compare, refuse to start on mismatch</td><td class="yes">untouched</td></tr>
+        <tr><td><code>none</code></td><td><code>none</code></td><td>nothing</td><td class="yes">untouched</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example: generate, export, validate, and refuse</h3>
+
+  <p>One in-memory database, three bootstraps. The first generates the schema from the v1 mapping and also writes the DDL to a script file. The second starts with <code>validate</code> against the same mapping and is allowed through. The third validates a v2 mapping that gained a field nobody migrated &mdash; and the program ends there, in the exception the build expects.</p>
+
+  <pre data-code data-lang="java" data-file="SchemaValidate.java" data-verify="SchemaValidate" data-verify-throws="SchemaManagementException" data-hi="27,46,47,60,69" data-bad="70">
+import jakarta.persistence.*;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public class SchemaValidate {
+
+    /* Version 1 of the mapping: what the database was created from. */
+    @Entity(name = "StockLevel")
+    @Table(name = "stock_level")
+    public static class StockLevel {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+        @Column(nullable = false, unique = true, length = 16) private String sku;
+        private int onHand;
+        protected StockLevel() {}
+        StockLevel(String sku, int onHand) { this.sku = sku; this.onHand = onHand; }
+    }
+
+    /* Version 2 of the mapping: a developer added a field — but nobody migrated the table. */
+    @Entity(name = "StockLevelV2")
+    @Table(name = "stock_level")
+    public static class StockLevelV2 {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+        @Column(nullable = false, unique = true, length = 16) private String sku;
+        private int onHand;
+        private int reorderPoint;          // new column, never added to the schema
+        protected StockLevelV2() {}
+    }
+
+    static PersistenceConfiguration base(Class<?> entity) {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(entity)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:SchemaValidate;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property("hibernate.show_sql", "true");
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("-- 1. generate the schema from the v1 mapping, and export the DDL to a script --");
+        Path script = Path.of("schema.sql");
+        Files.deleteIfExists(script);
+        var create = base(StockLevel.class)
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property(PersistenceConfiguration.SCHEMAGEN_SCRIPTS_ACTION, "create")
+            .property("jakarta.persistence.schema-generation.scripts.create-target", script.toString());
+        try (EntityManagerFactory emf = create.createEntityManagerFactory();
+             EntityManager em = emf.createEntityManager()) {
+            em.getTransaction().begin();
+            em.persist(new StockLevel("BOLT-7", 120));
+            em.getTransaction().commit();
+        }
+        System.out.println("- schema.sql, the starting point for a hand-written migration -");
+        for (String line : Files.readAllLines(script)) System.out.println("  " + line);
+        Files.delete(script);
+
+        System.out.println("-- 2. start again with 'none' + validate against the v1 mapping: fine --");
+        var validateV1 = base(StockLevel.class)
+            .property("hibernate.hbm2ddl.auto", "validate");
+        try (EntityManagerFactory emf = validateV1.createEntityManagerFactory();
+             EntityManager em = emf.createEntityManager()) {
+            List<?> rows = em.createQuery("select s.sku from StockLevel s").getResultList();
+            System.out.println("validated, rows = " + rows);
+        }
+
+        System.out.println("-- 3. the v2 mapping against the unmigrated table: bootstrap refuses --");
+        var validateV2 = base(StockLevelV2.class)
+            .property("hibernate.hbm2ddl.auto", "validate");
+        EntityManagerFactory never = validateV2.createEntityManagerFactory();   // throws SchemaManagementException
+        never.close();
+        System.out.println("unreachable");
+    }
+}
+  </pre>
+
+  <pre data-output data-for="SchemaValidate">
+-- 1. generate the schema from the v1 mapping, and export the DDL to a script --
+Hibernate: create global temporary table HTE_stock_level(onHand integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists stock_level cascade
+Hibernate: drop sequence if exists stock_level_SEQ
+Hibernate: create sequence stock_level_SEQ start with 1 increment by 50
+Hibernate: create table stock_level (onHand integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: select next value for stock_level_SEQ
+Hibernate: insert into stock_level (onHand,sku,id) values (?,?,?)
+- schema.sql, the starting point for a hand-written migration -
+  create sequence stock_level_SEQ start with 1 increment by 50;
+  create table stock_level (onHand integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id));
+-- 2. start again with 'none' + validate against the v1 mapping: fine --
+Hibernate: create global temporary table HTE_stock_level(onHand integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: select sl1_0.sku from stock_level sl1_0
+validated, rows = [BOLT-7]
+-- 3. the v2 mapping against the unmigrated table: bootstrap refuses --
+Hibernate: create global temporary table HTE_stock_level(onHand integer, reorderPoint integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+  </pre>
+
+  <pre data-output data-label="Standard error (the build checks for this)" data-variant="error">
+Exception in thread "main" jakarta.persistence.PersistenceException: Unable to build Hibernate SessionFactory  [persistence unit: warehouse]
+Caused by: org.hibernate.tool.schema.spi.SchemaManagementException: Schema validation: missing column [reorderPoint] in table [stock_level]
+  </pre>
+
+  <p>Three things to take from the output. The <code>schema.sql</code> that step 1 wrote is <em>almost</em> the DDL that ran, and it is the right starting point for a migration: copy it into a versioned script, read every line, fix the names you do not like, add the index the mapping cannot express, and commit it. Step 2 shows <code>validate</code> costing one metadata query at startup and nothing else. Step 3 is the payoff: the deploy fails at bootstrap with the exact column named, instead of succeeding and then failing on the first request that touches <code>reorderPoint</code>. Notice also that <code>validate</code> left the <code>HTE_stock_level</code> temporary table alone in step 2 but recreated it in step 3 with the new column: that table is not part of your schema at all. Hibernate 7 declares it at every bootstrap for bulk-mutation queries, which is why it appears even under <code>none</code>, and why <code>validate</code> never complains about it.</p>
+
+  <h3 class="mt-8 mb-3">Is this setting safe here?</h3>
+
+  <div class="lm-card" data-sandbox="ddl-auto">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.5 8.5 8 9 4.5-.5 8-4 8-9V7z"/></svg>
+      Schema setting versus environment
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Environment</span>
+        <select data-sb-env>
+          <option value="local" selected>local development</option>
+          <option value="ci">CI test run</option>
+          <option value="staging">staging</option>
+          <option value="prod">production</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>hibernate.hbm2ddl.auto</span>
+        <select data-sb-mode>
+          <option value="create">create</option>
+          <option value="create-drop" selected>create-drop</option>
+          <option value="update">update</option>
+          <option value="validate">validate</option>
+          <option value="none">none</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Why <code>update</code> is not a migration</h3>
+
+  <p><code>update</code> looks like the grown-up option: it keeps the data and adds what is missing. The trouble is everything it cannot know. Rename a field from <code>onHand</code> to <code>quantityOnHand</code> and <code>update</code> adds a new nullable column and leaves the old one full of data, forever. Remove a field and the column stays. Narrow a <code>String</code> from 255 to 16 characters and nothing happens, because shrinking might fail. Add a <code>nullable = false</code> column to a populated table and the <code>ALTER</code> fails, or on some databases succeeds and leaves nulls in a not-null column. Add a unique constraint that existing data violates and startup fails in production at the worst possible moment. And in every case the DDL ran unreviewed, under the application's credentials, at the instant the pod started, possibly holding a table lock while traffic waited.</p>
+
+  <p>A migration tool fixes all of that by making schema change a <em>versioned, reviewed, ordered</em> artefact that runs once per environment and records that it ran.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Migration tools">
+      <button type="button" class="lm-tab" role="tab" id="tab-schema-flyway" aria-controls="panel-schema-flyway" aria-selected="true" tabindex="0">Flyway</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-schema-liquibase" aria-controls="panel-schema-liquibase" aria-selected="false" tabindex="-1">Liquibase</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-schema-workflow" aria-controls="panel-schema-workflow" aria-selected="false" tabindex="-1">The workflow</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-schema-flyway" aria-labelledby="tab-schema-flyway" tabindex="0">
+      <pre data-code data-lang="plain" data-nobar>
+src/main/resources/db/migration/
+  V1__create_product_and_stock.sql      <- the hand-edited output of schema.sql
+  V2__add_reorder_point.sql             <- alter table stock_level add column reorder_point integer not null default 0;
+  V3__backfill_reorder_point.sql        <- update stock_level set reorder_point = 10 where ...;
+  R__product_view.sql                   <- repeatable: re-run whenever its checksum changes
+      </pre>
+      <pre data-code data-lang="bash" data-nobar>
+# Flyway and Liquibase are not on this page's class path — these are shown, not run
+flyway -url=jdbc:postgresql://db/warehouse -user=deploy migrate     # applies V2, V3 in order, records each in flyway_schema_history
+flyway info                                                          # which versions are applied, pending, or failed
+flyway validate                                                      # checksums of applied scripts still match the files
+flyway baseline -baselineVersion=1                                   # adopt an existing database without re-running V1
+      </pre>
+      <p class="mb-0">Plain SQL, one file per change, a version in the name, a checksum recorded on apply so an edited historical script is detected. Simple enough that the review is of the SQL itself, which is the point.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-schema-liquibase" aria-labelledby="tab-schema-liquibase" tabindex="0" hidden>
+      <pre data-code data-lang="plain" data-nobar>
+# db/changelog/db.changelog-master.yaml
+databaseChangeLog:
+  - changeSet:
+      id: 2-add-reorder-point
+      author: warehouse-team
+      changes:
+        - addColumn:
+            tableName: stock_level
+            columns:
+              - column: { name: reorder_point, type: int, defaultValueNumeric: 0, constraints: { nullable: false } }
+      rollback:
+        - dropColumn: { tableName: stock_level, columnName: reorder_point }
+      </pre>
+      <p class="mb-0">Liquibase describes changes in a database-neutral form (YAML, XML, JSON or SQL) and renders them per dialect, tracks them in <code>DATABASECHANGELOG</code>, and supports declared rollbacks and preconditions. More machinery than Flyway; worth it when the same migrations must run on several database products.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-schema-workflow" aria-labelledby="tab-schema-workflow" tabindex="0" hidden>
+      <ol class="mb-0">
+        <li><strong>Change the mapping</strong> in the entity.</li>
+        <li><strong>Generate</strong> the DDL difference locally &mdash; <code>schema-generation.scripts.action=create</code> for a new table, or simply read what <code>update</code> would have done against a scratch database.</li>
+        <li><strong>Write the migration by hand</strong> from that output: real names, the index, the default value, the backfill, the constraint added <em>after</em> the backfill.</li>
+        <li><strong>Review it</strong> like code. Ask what happens to a 50-million-row table while this runs, and whether the previous version of the application can still run against the new schema during a rolling deploy.</li>
+        <li><strong>Run it in CI</strong> against a real database engine (Testcontainers), then run the tests with <code>validate</code>.</li>
+        <li><strong>Deploy</strong> with the migration step before the application starts, and the application on <code>validate</code>.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">What <code>validate</code> checks, and what it does not</h3>
+
+  <p>Validation compares, for every mapped entity: that the table exists, that each mapped column exists, and that each column's type is compatible with the mapping. It does <em>not</em> check indexes, foreign-key or unique-constraint names, column nullability, defaults, or column length on most dialects. So <code>validate</code> catches the missing column and the wrong type &mdash; the two failures that break at runtime &mdash; and ignores the ones that only affect performance or integrity. Those still need a migration review; <code>validate</code> is a tripwire, not an audit.</p>
+
+  <pre data-code data-lang="java" data-nobar>
+@Entity
+@Table(name = "order_line",
+       indexes = { @Index(name = "ix_order_line_order", columnList = "order_id"),
+                   @Index(name = "ix_order_line_sku",   columnList = "sku") },
+       uniqueConstraints = @UniqueConstraint(name = "uq_order_line_order_sku", columnNames = { "order_id", "sku" }))
+public class OrderLine {
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "order_id", nullable = false, foreignKey = @ForeignKey(name = "fk_order_line_order"))
+    private Order order;
+    ...
+}
+  </pre>
+
+  <p>Naming is the other half. By default Hibernate derives column names from field names as written (<code>priceInCents</code> becomes a column called <code>priceInCents</code>, as every echoed statement in this module shows); most teams install a physical naming strategy that produces <code>price_in_cents</code> instead (<code>hibernate.physical_naming_strategy</code>, or the <code>CamelCaseToUnderscoresNamingStrategy</code> that Spring Boot applies by default). Whichever you choose, choose it before the first migration is written, because renaming later is exactly the change <code>update</code> cannot make.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Schema gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The JPA property silently wins.</strong> With <code>schema-generation.database.action=none</code> set, <code>hbm2ddl.auto=validate</code> is ignored and no validation happens. The first draft of the worked example printed "unreachable". Set one or the other.</li>
+        <li><strong>H2 in tests, PostgreSQL in production.</strong> Types differ (<code>timestamp(6) with time zone</code> is not the same object in both), sequences differ, <code>for update</code> and <code>on conflict</code> differ, case-sensitivity of identifiers differs. A migration that passed on H2 can fail on PostgreSQL. Test on the engine you deploy to; Testcontainers makes that a one-line annotation.</li>
+        <li><strong><code>create</code> drops tables it does not own.</strong> Anything mapped is dropped, including a table another service shares with you.</li>
+        <li><strong>Sequences are schema too.</strong> <code>product_SEQ</code> in the echoed DDL must exist in production with the same increment, or ids collide. A migration that creates the table but not the sequence passes <code>validate</code> (which does not check sequences) and fails on the first insert.</li>
+        <li><strong>Rolling deploys need backward-compatible schemas.</strong> Add the column, deploy code that writes both, backfill, deploy code that reads the new column, drop the old one &mdash; five steps, two releases. A rename in one migration breaks the old pods still running.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-schema-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A team renames the entity field <code>onHand</code> to <code>quantity</code> and deploys with <code>hbm2ddl.auto=update</code>. What happens to the production table?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-schema-1"><span>The column is renamed and the data is preserved <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-schema-1"><span>Startup fails because the mapping no longer matches the table <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-schema-1"><span>A new <code>quantity</code> column is added, empty; the old <code>onHand</code> column and its data remain, unused <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-schema-1"><span>The old column is dropped and the new one added, losing the data <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>update</code> only adds. It cannot know a rename from an add-plus-remove, so it adds the new column and never drops anything. Every stock level now reads as null or zero, and nothing failed to tell you.</p>
+        <p class="mb-0"><strong>A</strong> would require intent the tool cannot infer. <strong>B</strong> is what <code>validate</code> does, not <code>update</code>. <strong>D</strong> is wrong because <code>update</code> never drops &mdash; which is sometimes presented as its safety feature, and is really why drift accumulates.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-schema-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Production runs Flyway migrations in a deploy step and starts the application with <code>hbm2ddl.auto=validate</code>. A migration added a <code>product</code> table but forgot the <code>product_SEQ</code> sequence the mapping uses. When does this fail?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-schema-2"><span>At startup: <code>validate</code> reports the missing sequence <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-schema-2"><span>On the first <code>persist</code> of a <code>Product</code>, when Hibernate calls <code>select next value for product_SEQ</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-schema-2"><span>Never: Hibernate creates missing sequences on demand <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-schema-2"><span>At the Flyway step, because Flyway validates against the entity mappings <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Validation checks tables and columns, not sequences. Startup passes; the first insert asks the sequence for a value and the database answers that it does not exist. This is the gap between a tripwire and an audit.</p>
+        <p class="mb-0"><strong>A</strong> overstates what <code>validate</code> checks. <strong>C</strong> is false under <code>validate</code> and <code>none</code>; only the generation modes create sequences. <strong>D</strong> is false: Flyway knows nothing about JPA mappings; it runs the SQL you wrote.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-schema-3" data-answer="a,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which are sound reasons to run integration tests against the production database engine rather than H2? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Column types and DDL syntax differ between dialects, so a migration can pass on H2 and fail on PostgreSQL <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>H2 cannot run Hibernate's generated schema at all <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Locking and isolation behaviour differ, so a test that passes on H2 may deadlock or read stale data on the real engine <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Native queries written for one dialect may not parse on another <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, C and D.</strong> Each is a class of bug that only the real engine reveals: DDL and types, concurrency semantics, and dialect-specific native SQL. Testcontainers makes the real engine as convenient as H2 was.</p>
+        <p class="mb-0"><strong>B</strong> is false &mdash; every program in this module ran on H2. H2 is a fine learning and unit-test database; the argument is about fidelity, not capability.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="schema"> Mark this section complete
+  </label>
+</section>

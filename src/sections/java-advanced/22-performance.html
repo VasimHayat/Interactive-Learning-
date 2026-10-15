@@ -1,0 +1,311 @@
+<section class="lm-section" id="performance" data-title="Measuring: JIT tiers, JMH, JFR and profilers" data-num="13">
+  <p class="lm-eyebrow">Section 13</p>
+  <h2 class="mb-4">Measuring: JIT tiers, JMH, JFR and profilers</h2>
+
+  <p>Java performance intuitions imported from C are mostly wrong, and intuitions from Python are wrong in the other direction, because the code that runs is not the code you wrote. The JVM starts by <em>interpreting</em> bytecode, watches what is hot, compiles that with a fast compiler, keeps watching, then recompiles the hottest parts with an aggressive optimiser that inlines calls, removes allocations and deletes branches the profile says never happen. A method's speed therefore depends on how long it has been running, what types it has seen, and what the code around it looks like. Measuring it well means respecting all three.</p>
+
+  <p>This section has no verified program. Every number here is machine-dependent by definition, and the build of this page would prove nothing by printing one. Instead it shows you the tools that produce trustworthy numbers and the mistakes that produce confident wrong ones.</p>
+
+  <h3 class="mt-8 mb-3">Tiered compilation</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">HotSpot's compilation tiers</caption>
+      <thead><tr><th scope="col">Tier</th><th scope="col">Who</th><th scope="col">What</th><th scope="col">Entered when</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>Interpreter</td><td>Executes bytecode directly; counts invocations and loop back-edges</td><td>Every method starts here</td></tr>
+        <tr><td>1</td><td>C1, no profiling</td><td>Final tier for trivial methods (getters) that C2 could not improve</td><td>C1 decides the method is trivial</td></tr>
+        <tr><td>2</td><td>C1, light profiling</td><td>Used when C2's queue is long, so the method is not stuck at tier 3</td><td>Compiler back-pressure</td></tr>
+        <tr><td>3</td><td>C1, full profiling</td><td>Fast compile; instruments branches, receiver types, counters for C2</td><td>~200 invocations or ~2,000 back-edges (defaults)</td></tr>
+        <tr><td>4</td><td>C2</td><td>The optimising compiler: inlining, escape analysis, loop unrolling, vectorisation, profile-guided layout</td><td>~5,000 invocations or ~15,000 back-edges, with a profile</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>A loop that is hot <em>inside</em> a method called once (a <code>main</code> that loops a million times) is handled by <strong>on-stack replacement</strong> (OSR): the compiled version is entered mid-loop, at a back-edge. Compiled code can also be thrown away. If a branch the profile called "never taken" is taken, C2's uncommon trap <strong>deoptimises</strong> the method back to the interpreter, re-profiles, and recompiles. Loading a new subclass can do the same thing to every compiled call site that assumed the old hierarchy. Steady state is a moving target, which is the first reason benchmarks need warm-up.</p>
+
+  <h3 class="mt-8 mb-3">Watch a call chain get compiled</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of tiered compilation and inlining">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">From interpreter to C2</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="inlining"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Compiler state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">-XX:+PrintCompilation</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="inlining">
+    {
+      "lang": "java",
+      "code": "long total(List<OrderLine> lines) {\n    long sum = 0;\n    for (OrderLine line : lines)\n        sum += line.subtotal();\n    return sum;\n}\n\nlong subtotal() {                 // OrderLine\n    return product.price() * qty;\n}\n\nlong price() {                    // Product\n    return priceInCents;\n}",
+      "steps": [
+        { "line": [1, 8, 12], "vars": { "total()": "tier 0, 1 call", "subtotal()": "tier 0, 40 calls", "price()": "tier 0, 40 calls" }, "out": "",
+          "note": "First call. Everything is interpreted; the JVM is only counting. Each line.subtotal() is a real invokevirtual, each product.price() inside it another one." },
+        { "line": 12, "vars": { "total()": "tier 0, 5 calls", "subtotal()": "tier 0, 200 calls", "price()": "tier 3 queued, 200 calls" }, "out": "    112   1   3   Product::price (5 bytes)",
+          "note": "price() crosses the tier-3 invocation threshold first — it is called once per line, so it is the hottest. C1 compiles it in about a tenth of a millisecond, with profiling counters." },
+        { "line": 8, "vars": { "total()": "tier 0, 5 calls", "subtotal()": "tier 3, 200 calls", "price()": "tier 1 (trivial), 200 calls" }, "out": "    112   1   3   Product::price (5 bytes)\n    115   2   3   OrderLine::subtotal (12 bytes)\n    116   1   1   Product::price (5 bytes)",
+          "note": "subtotal() follows. price() is recompiled at tier 1: it is a trivial accessor, C2 could not do better, so profiling it is a waste. C1 at tier 3 inlines trivial callees like this one, nothing more." },
+        { "line": 3, "vars": { "total()": "tier 3 via OSR, 10 calls", "subtotal()": "tier 3, 400 calls", "back-edges in total()": "400" }, "out": "    120   3 %   3   Report::total @ 2 (31 bytes)",
+          "note": "total() itself has been called only ten times, but its loop has taken 400 back-edges. The % marks on-stack replacement: the compiled loop is entered mid-iteration without returning from the method." },
+        { "line": 8, "vars": { "subtotal()": "tier 4 queued, 5,000 calls", "profile at line 9": "receiver: Product (100%)", "profile branch": "none" }, "out": "    400   4   4   OrderLine::subtotal (12 bytes)",
+          "note": "5,000 invocations with a complete profile: C2's turn. The profile says product.price() has only ever seen a Product — a monomorphic site — so C2 inlines it without even a type guard." },
+        { "line": [8, 9, 12, 13], "vars": { "subtotal()": "tier 4", "price() at line 9": "inlined", "allocation": "none", "cost per call": "one multiply" }, "out": "    400   4   4   OrderLine::subtotal (12 bytes)\n        @ 4   Product::price (5 bytes)   inline (hot)",
+          "note": "-XX:+PrintInlining shows the decision. The compiled subtotal() reads priceInCents straight from the Product's field and multiplies: no call, no stack frame." },
+        { "line": [3, 4], "vars": { "total()": "tier 4, 5,000 calls", "subtotal() at line 4": "inlined", "price() at line 9": "inlined (nested)", "loop": "unrolled ×4, bounds check hoisted" }, "out": "    900   5   4   Report::total (31 bytes)\n        @ 14  OrderLine::subtotal (12 bytes)   inline (hot)\n          @ 4   Product::price (5 bytes)   inline (hot)",
+          "note": "Finally total() reaches tier 4 and inlines subtotal(), which already contains price(). The whole chain is one loop body. This is why small methods cost nothing in Java, and why a benchmark of price() alone would measure something that never exists in the real program." },
+        { "line": 9, "vars": { "a new subclass appears": "DiscountedProduct overrides price()", "profile at line 9": "now bimorphic", "subtotal()": "made not entrant → tier 0" }, "out": "   2100   4   4   OrderLine::subtotal (12 bytes)   made not entrant",
+          "note": "A class is loaded that breaks the assumption. The compiled code hits an uncommon trap, is marked not entrant, and subtotal() drops back to the interpreter to re-profile. It will be recompiled with a type guard and both bodies inlined — bimorphic sites still inline. A third receiver type would end inlining at that site." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Which tier is my method in?</h3>
+
+  <div class="lm-card" data-sandbox="jit-tiers">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      Tier and inlining for <code>product.price()</code> called from <code>subtotal()</code> <span class="lm-badge lm-badge--sim">Simulated</span>
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field grow">
+        <span>Invocations so far <span class="lm-readout" data-sb-invout>0</span></span>
+        <input type="range" data-sb-inv min="0" max="100" value="20" step="1">
+      </label>
+      <label class="lm-check"><input type="checkbox" data-sb-mega> Call site has seen 3+ receiver types (megamorphic)</label>
+      <label class="lm-check"><input type="checkbox" data-sb-big> Callee body is larger than 325 bytecodes</label>
+    </div>
+    <div data-sb-out></div>
+    <p class="mb-0 mt-3 text-caption text-ink-subtle">Modelled on HotSpot's default <code>Tier3InvocationThreshold=200</code>, <code>Tier4InvocationThreshold=5000</code>, <code>MaxInlineSize=35</code>, <code>FreqInlineSize=325</code>. The real policy also counts back-edges and compiler queue length; the numbers are illustrative, the tiers and rules are not.</p>
+  </div>
+
+  <h3 class="mt-8 mb-3">Why microbenchmarks lie, and how JMH tells the truth</h3>
+
+  <p>A loop with <code>System.nanoTime()</code> around it measures, in roughly this order: the interpreter, C1, a C2 compile, JIT compiler threads competing for the CPU, a GC pause, and then, if you are unlucky, nothing at all because C2 noticed the result was never used and deleted the code. The Java Microbenchmark Harness exists to remove each of those, one option at a time.</p>
+
+  <pre data-code data-lang="java" data-file="PricingBench.java" data-hi="7,8,9,18,24">
+import org.openjdk.jmh.annotations.*;
+import org.openjdk.jmh.infra.Blackhole;
+import java.util.concurrent.TimeUnit;
+
+@BenchmarkMode(Mode.AverageTime)            // ns per operation, not ops per second
+@OutputTimeUnit(TimeUnit.NANOSECONDS)
+@Warmup(iterations = 5, time = 1)           // let tiered compilation finish BEFORE measuring
+@Measurement(iterations = 5, time = 1)
+@Fork(2)                                    // fresh JVMs: run-to-run variance becomes visible
+@State(Scope.Thread)
+public class PricingBench {
+
+    Product[] products;
+
+    @Setup(Level.Trial)
+    public void setUp() {
+        products = new Product[1_000];
+        for (int i = 0; i < products.length; i++)
+            products[i] = new Product("SKU-" + i, 80 + (i % 7) * 25);   // data the JIT cannot fold
+    }
+
+    @Benchmark
+    public void subtotal(Blackhole bh) {
+        for (Product p : products) bh.consume(p.price() * 3);   // consumed: cannot be dead-code eliminated
+    }
+
+    @Benchmark
+    public long subtotalReturned() {
+        long sum = 0;
+        for (Product p : products) sum += p.price() * 3;
+        return sum;                                            // returning is the other way to keep it alive
+    }
+}
+  </pre>
+
+  <pre data-output data-label="Sample JMH output — illustrative, from one laptop; yours will differ">
+Benchmark                        Mode  Cnt    Score    Error  Units
+PricingBench.subtotal            avgt   10  512.431 ±  6.209  ns/op
+PricingBench.subtotalReturned    avgt   10  341.877 ±  4.113  ns/op
+  </pre>
+
+  <p>Two benchmarks of "the same" loop and a 50% difference: <code>Blackhole.consume</code> per element costs a few nanoseconds itself, which the returned-sum version avoids. Neither number is wrong; they measure different things. Reading a benchmark means knowing exactly what the measured code was allowed to become.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Benchmark pitfalls">
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-dce" aria-controls="panel-performance-dce" aria-selected="true" tabindex="0">Dead-code elimination</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-fold" aria-controls="panel-performance-fold" aria-selected="false" tabindex="-1">Constant folding</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-performance-warm" aria-controls="panel-performance-warm" aria-selected="false" tabindex="-1">No warm-up, one JVM</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-dce" aria-labelledby="tab-performance-dce" tabindex="0">
+      <pre data-code data-lang="java" data-nobar data-bad="3" data-hi="8">
+@Benchmark
+public void wrong() {
+    long x = products[0].price() * 3;      // never read → C2 deletes the multiply AND the call
+}
+
+@Benchmark
+public long right() {
+    return products[0].price() * 3;        // the result escapes, so the work must be done
+}
+      </pre>
+      <p class="mb-0">The wrong version reports an impossibly small number (often under 1 ns), which is the time of an empty method. C2 is not being clever; removing unobservable work is its job. Return the value or feed it to a <code>Blackhole</code>.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-fold" aria-labelledby="tab-performance-fold" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar data-bad="1,5" data-hi="8,9,12">
+private static final int QTY = 3;          // a compile-time constant
+
+@Benchmark
+public long wrong() {
+    return 80L * QTY;                      // folded to 240 at JIT time: you measure a constant load
+}
+
+@State(Scope.Thread)
+public static class Input { int qty = 3; long price = 80; }   // non-final fields: real loads
+
+@Benchmark
+public long right(Input in) {
+    return in.price * in.qty;
+}
+      </pre>
+      <p class="mb-0">Anything derivable from <code>final</code> or literal values is computed once by the compiler. Benchmark inputs belong in non-final fields of a <code>@State</code> object so the JIT has to read them every time, the way production code would.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-performance-warm" aria-labelledby="tab-performance-warm" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar data-bad="2,3,4,5">
+public static void main(String[] a) {
+    long t0 = System.nanoTime();
+    for (int i = 0; i < 1_000_000; i++) work();
+    System.out.println((System.nanoTime() - t0) / 1_000_000 + " ns/op");
+    // measures: interpreter + C1 + C2 compile time + JIT threads + first GC. Not work().
+}
+      </pre>
+      <p class="mb-0">The first few hundred thousand iterations run at interpreter speed and include the compilers' own CPU time. JMH's <code>@Warmup</code> runs the method until the tiers settle, then measures; <code>@Fork</code> repeats in fresh JVMs because the order in which classes happened to load changes what gets inlined, and a single JVM's number is one sample of that distribution. Also: disable CPU frequency scaling, close the browser, and never benchmark on battery.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Measuring the real thing: JFR and profilers</h3>
+
+  <p>Microbenchmarks answer "is A faster than B?" for code you have already decided to look at. The prior question, "what is slow?", is answered by looking at the running application, and the JDK ships the tool for that: <strong>JDK Flight Recorder</strong>. It is built into the JVM, costs about 1–2% overhead, and records allocation, GC, lock contention, I/O, exceptions and sampled stacks into a file you analyse offline with JDK Mission Control or the <code>jfr</code> command.</p>
+
+  <pre data-code data-lang="bash" data-nobar>
+# record one minute, starting now, from a running process
+jcmd 12345 JFR.start duration=60s filename=/tmp/inventory.jfr settings=profile
+
+# or from launch
+java -XX:StartFlightRecording=duration=60s,filename=inventory.jfr,settings=profile -jar inventory.jar
+
+# what allocated the most?
+jfr print --events jdk.ObjectAllocationSample inventory.jfr | grep -A3 "objectClass" | sort | uniq -c | sort -rn | head
+
+# summary of everything recorded
+jfr summary inventory.jfr
+
+# where are threads waiting on monitors longer than 10 ms?
+jfr print --events jdk.JavaMonitorEnter inventory.jfr
+
+# a thread dump, when "it is slow right now" and you have thirty seconds
+jcmd 12345 Thread.print
+  </pre>
+
+  <p><strong>Sampling profilers</strong> (JFR's method sampler, async-profiler, YourKit) interrupt threads periodically and record the stack. JFR samples only at <em>safepoints</em> by default, points where the JVM can safely pause a thread, which biases the samples toward method exits and loop back-edges and away from the middle of tight compiled code. async-profiler uses the kernel's perf events and AsyncGetCallTrace to avoid that bias, which is why its flame graphs are the usual choice for CPU work, while JFR is unmatched for allocation, lock and I/O events. Use both; they disagree in instructive ways.</p>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">The first three things to look at when a service is slow</div>
+      <ol class="mb-0">
+        <li><strong>GC log</strong> (<code>-Xlog:gc*</code>, §8–9). Long or frequent pauses explain latency spikes immediately, and a sawtooth that never returns to baseline is a leak.</li>
+        <li><strong>A thread dump under load</strong> (<code>jcmd PID Thread.print</code>, three of them ten seconds apart). Dozens of threads <code>BLOCKED</code> on one monitor, or <code>WAITING</code> in a connection pool, is a contention problem, not a CPU problem, and no profiler flame graph will show it.</li>
+        <li><strong>Hot methods</strong> (JFR or async-profiler). Only now. The hottest frame is usually a surprise — a <code>toString</code> in a log statement, a regex compiled per call, <code>String.format</code> in a loop.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Startup and the alternatives to JIT</h3>
+
+  <p>JIT optimises for throughput after warm-up, which is the wrong trade for a CLI tool or a serverless function that lives for 200 ms. <strong>Class Data Sharing</strong> (CDS) maps a pre-parsed archive of classes instead of loading them from JARs; the JDK ships one for its own classes, and <code>-XX:ArchiveClassesAtExit=app.jsa</code> then <code>-XX:SharedArchiveFile=app.jsa</code> extends it to yours, typically cutting startup by a third. <strong>GraalVM native image</strong> goes further: it compiles the whole program ahead of time into a native executable with no JIT, no bytecode and no class loading, starting in milliseconds and using a fraction of the memory, at the cost of a closed-world assumption (reflection, proxies and resources must be declared up front), a long build, and peak throughput that only recently caught up with C2 on some workloads. Project Leyden is bringing parts of that idea into the standard JDK.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Performance gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A benchmark of a method measures the method in isolation, which production never runs.</strong> Inlining context changes the generated code. If the question is "which <code>Map</code> is faster in my service?", measure the service.</li>
+        <li><strong>"Optimising" by making methods bigger can make them slower.</strong> Past <code>FreqInlineSize</code> a hot callee stops being inlined; past about 8,000 bytecodes (<code>HugeMethodLimit</code>) it is never compiled at all. The generated code for a giant <code>switch</code> or a 2,000-line method runs in the interpreter forever.</li>
+        <li><strong>Interface calls on one implementation are free; on three they are not.</strong> A monomorphic <code>List</code> site inlines <code>ArrayList.get</code>. Mix in <code>LinkedList</code> and <code>Arrays.asList</code> at the same site and it becomes a megamorphic itable dispatch. This is also why <code>Stream</code> pipelines in hot paths can be slower than a loop: the lambda call sites inside the stream implementation are shared by every stream in the process.</li>
+        <li><strong>Median, not mean.</strong> GC pauses and deoptimisations give latency a long tail. Report p50/p99/p999; a mean hides the pauses that pages your on-call.</li>
+        <li><strong>The profiler changes the program.</strong> Instrumenting profilers (the kind that rewrite bytecode) disable inlining in instrumented methods and can slow code 10×, attributing time to the wrong place. Prefer sampling for CPU; use instrumentation only for counting.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-performance-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A JMH benchmark of <code>products[0].price() * 3</code> reports 0.3 ns/op, faster than a single CPU cycle on the machine. The most likely cause?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-performance-1"><span>C2 vectorised the multiply <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-performance-1"><span>The result is never consumed, so the computation was dead-code eliminated <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-performance-1"><span>JMH's timer has nanosecond granularity and rounded down <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-performance-1"><span>The method was inlined, so there is nothing left to measure <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Sub-cycle times mean no work happened. A value that is neither returned nor passed to a <code>Blackhole</code> has no observable effect, and C2 removes it along with the call that produced it.</p>
+        <p class="mb-0"><strong>A</strong> cannot make one multiply take less than a cycle. <strong>C</strong> is backwards: JMH measures many operations per timer read precisely so granularity does not matter. <strong>D</strong> describes something that <em>does</em> happen but still leaves a field load and a multiply, which take time; inlining removes the call, not the work.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-performance-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A service's p99 latency jumps from 20 ms to 400 ms a few times an hour, while CPU is at 30%. Where do you look first?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-performance-2"><span>A CPU flame graph, to find the hottest method <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-performance-2"><span>A JMH benchmark of the request handler <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-performance-2"><span>The GC log, then thread dumps taken during a spike <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-performance-2"><span><code>-XX:+PrintCompilation</code>, to see what is being recompiled <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Intermittent tail latency with idle CPU is the signature of <em>waiting</em>: GC pauses or lock/pool contention. The GC log shows the former in seconds; thread dumps during a spike show the latter as many threads <code>BLOCKED</code> or <code>WAITING</code> on one thing.</p>
+        <p class="mb-0"><strong>A</strong> finds where CPU time goes, and CPU is not the problem. <strong>B</strong> measures the handler alone in a warm JVM, which is exactly the condition under which it is fine. <strong>D</strong> can explain a one-off spike after deployment (recompilation), but not a recurring one at steady state.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-performance-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which changes could make a hot method <em>slower</em> after C2 compiles it? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>A third implementation of an interface starts arriving at a call site inside it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Splitting it into two smaller methods <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Inlining a helper into it by hand, pushing it past ~325 bytecodes <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Marking its parameters <code>final</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> A megamorphic site loses inlining and becomes a real dispatch, and a method past <code>FreqInlineSize</code> is no longer inlined into <em>its</em> callers; both remove optimisations the small, monomorphic version enjoyed.</p>
+        <p class="mb-0"><strong>B</strong> usually helps or is neutral: small methods inline back together. <strong>D</strong> changes nothing for the JIT; <code>final</code> on locals and parameters is a compile-time check with no bytecode footprint.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="performance"> Mark this section complete
+  </label>
+</section>

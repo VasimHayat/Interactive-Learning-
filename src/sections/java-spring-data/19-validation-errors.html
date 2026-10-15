@@ -1,0 +1,363 @@
+<section class="lm-section" id="validation-errors" data-title="Validation and exception translation" data-num="10">
+  <p class="lm-eyebrow">Section 10</p>
+  <h2 class="mb-4">Validation and exception translation</h2>
+
+  <p>Bad data reaches a data layer by two roads. Sometimes your own code produced it: a negative price, a blank SKU, a malformed e-mail. Sometimes the database refuses something that looked fine in Java: a duplicate key, a stale version, a foreign key to a row that has gone. Both deserve a clear, specific exception at the right place — and in a raw JPA application they arrive as an assortment of Hibernate, JDBC and driver types whose names change with the database you happen to run.</p>
+
+  <p>Spring addresses each road separately. <strong>Bean Validation</strong> (Jakarta Validation, implemented by Hibernate Validator) puts the rules on the fields — <code>@NotBlank</code>, <code>@Positive</code>, <code>@Email</code> or your own — and checks them both on entities when Hibernate flushes and on method parameters of any <code>@Validated</code> bean. <strong>Exception translation</strong> catches whatever the persistence provider throws as it leaves a repository proxy and rethrows it as one of Spring's <code>DataAccessException</code> subclasses, a hierarchy that means the same thing on H2, PostgreSQL and Oracle. This section provokes one of each and prints what arrives.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: five ways to be rejected</h3>
+
+  <p>A <code>Product</code> with field constraints, including a custom <code>@Sku</code>; a <code>@Validated</code> service; a unique SKU column; and a <code>@Version</code> for the stale-update case. Every failure is caught and reported as "outer exception <code>&lt;-</code> root cause". SQL echo is off for this program so the exceptions are not buried in DDL, and Hibernate's own SQL-error log category is switched off because H2's messages embed generated constraint names.</p>
+
+  <pre data-code data-lang="java" data-file="Validation.java" data-verify="Validation" data-package="lm.validation" data-hi="28,46,66,124,136,145,165">
+package lm.validation;
+
+import jakarta.persistence.*;
+import jakarta.validation.*;
+import jakarta.validation.constraints.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.validation.annotation.Validated;
+
+import java.lang.annotation.*;
+import java.util.Map;
+import java.util.TreeSet;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class Validation {
+
+    /* A custom constraint: an annotation plus a validator. */
+    @Documented
+    @Constraint(validatedBy = SkuValidator.class)
+    @Target({ElementType.FIELD, ElementType.PARAMETER})
+    @Retention(RetentionPolicy.RUNTIME)
+    public @interface Sku {
+        String message() default "must look like ABC-123";
+        Class&lt;?&gt;[] groups() default {};
+        Class&lt;? extends Payload&gt;[] payload() default {};
+    }
+    public static class SkuValidator implements ConstraintValidator&lt;Sku, String&gt; {
+        @Override public boolean isValid(String value, ConstraintValidatorContext ctx) {
+            return value == null || value.matches("[A-Z]+-\\d+");      // null is @NotBlank's job, not ours
+        }
+    }
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @NotBlank @Size(max = 16) @Sku
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        @Positive int priceInCents;
+        @Email String supplierContact;
+        @Version long version;
+        protected Product() {}
+        Product(String sku, int priceInCents, String supplierContact) {
+            this.sku = sku; this.priceInCents = priceInCents; this.supplierContact = supplierContact;
+        }
+        @Override public String toString() { return sku + "=" + priceInCents + "c v" + version; }
+    }
+
+    public interface ProductRepository extends JpaRepository&lt;Product, Long&gt; {}
+
+    public static class ProductNotFound extends RuntimeException {
+        ProductNotFound(long id) { super("no product with id " + id); }
+    }
+
+    /* A service with method validation: @Validated on the class, @Valid / constraints on parameters. */
+    @Service
+    @Validated
+    public static class CatalogService {
+        private final ProductRepository repo;
+        CatalogService(ProductRepository repo) { this.repo = repo; }
+
+        public Product reprice(@Positive long id, @Min(1) @Max(1_000_000) int newPrice) {
+            Product p = repo.findById(id).orElseThrow(() -&gt; new ProductNotFound(id));
+            p.priceInCents = newPrice;
+            return repo.save(p);
+        }
+        public Product register(@Valid Product p) { return repo.save(p); }
+    }
+
+    static String rootOf(Throwable t) {
+        while (t.getCause() != null &amp;&amp; t.getCause() != t) t = t.getCause();
+        return t.getClass().getSimpleName();
+    }
+    static void report(String label, Throwable t) {
+        System.out.println(label + ": " + t.getClass().getSimpleName() + " &lt;- root " + rootOf(t));
+    }
+    static void violations(Throwable t) {
+        while (t != null &amp;&amp; !(t instanceof ConstraintViolationException)) t = t.getCause();
+        if (t == null) { System.out.println("  (no ConstraintViolationException in the chain)"); return; }
+        TreeSet&lt;String&gt; lines = new TreeSet&lt;&gt;();
+        for (ConstraintViolation&lt;?&gt; v : ((ConstraintViolationException) t).getConstraintViolations()) {
+            lines.add("  " + v.getPropertyPath() + ": " + v.getMessage());
+        }
+        lines.forEach(System.out::println);
+    }
+
+    @Bean CommandLineRunner demo(ProductRepository repo, CatalogService catalog, PlatformTransactionManager txm) {
+        return args -&gt; {
+            System.out.println("-- 1. entity constraints are checked at flush --");
+            try {
+                repo.save(new Product("bolt 7", -5, "not-an-email"));
+            } catch (RuntimeException e) {
+                report("save", e);
+                violations(e);
+            }
+
+            System.out.println("-- 2. method validation on a service --");
+            try {
+                catalog.reprice(-1, 0);
+            } catch (RuntimeException e) {
+                report("reprice", e);
+                violations(e);
+            }
+            try {
+                catalog.register(new Product("", 10, null));
+            } catch (RuntimeException e) {
+                report("register", e);
+                violations(e);
+            }
+
+            System.out.println("-- 3. a valid product, then a duplicate --");
+            Product ok = repo.save(new Product("BOLT-7", 80, "sales@acme.example"));
+            System.out.println("saved " + ok);
+            try {
+                repo.saveAndFlush(new Product("BOLT-7", 90, null));
+            } catch (DataAccessException e) {
+                System.out.println("duplicate: " + e.getClass().getSimpleName()
+                        + " &lt;- most specific " + e.getMostSpecificCause().getClass().getSimpleName());
+            }
+
+            System.out.println("-- 4. missing rows --");
+            try {
+                catalog.reprice(999, 100);
+            } catch (ProductNotFound e) {
+                System.out.println("lookup: " + e.getClass().getSimpleName() + " (" + e.getMessage() + ")");
+            }
+            repo.deleteById(999L);
+            System.out.println("deleteById(999) threw: false");
+
+            System.out.println("-- 5. a stale update is translated --");
+            TransactionTemplate tx = new TransactionTemplate(txm);
+            Product stale = tx.execute(s -&gt; repo.findById(ok.id).orElseThrow());       // detached copy, version 0
+            tx.executeWithoutResult(s -&gt; repo.findById(ok.id).orElseThrow().priceInCents = 85);  // someone else commits first
+            try {
+                stale.priceInCents = 70;
+                repo.save(stale);                                                        // merge + flush → stale version
+            } catch (RuntimeException e) {
+                report("stale save", e);
+            }
+            System.out.println("db now " + repo.findById(ok.id).orElseThrow());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Validation.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:validation;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "false",
+            "spring.jpa.open-in-view", "false",
+            "logging.level.org.hibernate.orm.jdbc.error", "OFF"));   // H2 names its constraints; keep them out of stdout
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Validation">
+-- 1. entity constraints are checked at flush --
+save: TransactionSystemException &lt;- root ConstraintViolationException
+  priceInCents: must be greater than 0
+  sku: must look like ABC-123
+  supplierContact: must be a well-formed email address
+-- 2. method validation on a service --
+reprice: ConstraintViolationException &lt;- root ConstraintViolationException
+  reprice.arg0: must be greater than 0
+  reprice.arg1: must be greater than or equal to 1
+register: ConstraintViolationException &lt;- root ConstraintViolationException
+  register.arg0.sku: must look like ABC-123
+  register.arg0.sku: must not be blank
+-- 3. a valid product, then a duplicate --
+saved BOLT-7=80c v0
+duplicate: DataIntegrityViolationException &lt;- most specific JdbcSQLIntegrityConstraintViolationException
+-- 4. missing rows --
+lookup: ProductNotFound (no product with id 999)
+deleteById(999) threw: false
+-- 5. a stale update is translated --
+stale save: ObjectOptimisticLockingFailureException &lt;- root StaleObjectStateException
+db now BOLT-7=85c v1
+  </pre>
+
+  <p>Five lessons, one per block:</p>
+  <ol class="max-w-prose">
+    <li><strong>Entity constraints run at flush, so they surface at commit.</strong> Hibernate Validator hooks into Hibernate's pre-insert and pre-update events. <code>repo.save</code> only queued the insert; the flush happened as the repository's transaction committed, the validator threw <code>ConstraintViolationException</code> there, and Spring's transaction manager reported the failed commit as <code>TransactionSystemException</code>. If you catch only the inner type, you miss it. The three violations are printed sorted: <code>@Sku</code>, <code>@Positive</code> and <code>@Email</code> all failed, and they are reported together, not one at a time.</li>
+    <li><strong>Method validation runs before the method body.</strong> <code>@Validated</code> on the class makes Spring wrap the bean in a proxy that validates parameters on every call, so <code>reprice(-1, 0)</code> never reached <code>findById</code>. The violation paths read <code>reprice.arg0</code>: the build compiles without <code>-parameters</code>, so the real names are not in the bytecode. Spring Boot's Maven and Gradle plugins add that flag, and you would then see <code>reprice.id</code>. <code>@Valid</code> on <code>register</code>'s parameter cascaded into the <code>Product</code>, which is why its field rules fired — two of them for the blank SKU.</li>
+    <li><strong>A duplicate key is translated.</strong> <code>saveAndFlush</code> forced the insert inside the repository call, H2 refused it, and what came out of the repository proxy was <code>DataIntegrityViolationException</code> — a Spring type you can catch on any database. <code>getMostSpecificCause()</code> still reaches the driver's own exception when you need the detail.</li>
+    <li><strong>Missing rows are your decision.</strong> <code>findById</code> returns an <code>Optional</code>; turning absence into a domain exception (<code>ProductNotFound</code>) is the service's job. <code>deleteById</code> of a missing id is silently ignored since Spring Data 3 — earlier versions threw <code>EmptyResultDataAccessException</code>, and code that relied on that now quietly succeeds.</li>
+    <li><strong>A stale update is translated too.</strong> The detached copy still had version 0; another transaction had already moved the row to version 1. <code>save</code> merged and flushed, Hibernate's <code>where id=? and version=?</code> matched no row, and Hibernate's <code>StaleObjectStateException</code> came out of the proxy as <code>ObjectOptimisticLockingFailureException</code>, a subclass of <code>OptimisticLockingFailureException</code>. The first writer's 85 cents survived.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Match the failure to what you catch</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag an exception onto its situation, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Each situation reaches your service code through a repository or a transactional method. What arrives?</p>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Exceptions to place">
+        <button type="button" class="lm-chip" data-chip="dup"><code>DataIntegrityViolationException</code></button>
+        <button type="button" class="lm-chip" data-chip="stale"><code>ObjectOptimisticLockingFailureException</code></button>
+        <button type="button" class="lm-chip" data-chip="api"><code>InvalidDataAccessApiUsageException</code></button>
+        <button type="button" class="lm-chip" data-chip="flush"><code>TransactionSystemException</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Situations">
+        <button type="button" class="lm-slot" data-slot="dup" data-label="a second product with an existing SKU, saved and flushed"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">a duplicate SKU, saved and flushed</span></button>
+        <button type="button" class="lm-slot" data-slot="stale" data-label="saving a detached copy whose version is behind the row"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">saving a copy whose <code>@Version</code> is behind</span></button>
+        <button type="button" class="lm-slot" data-slot="api" data-label="a modifying query called with no transaction"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">a <code>@Modifying</code> query called outside any transaction</span></button>
+        <button type="button" class="lm-slot" data-slot="flush" data-label="an entity with a negative price, caught when the save commits"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">an entity breaking <code>@Positive</code>, discovered at commit</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. Constraint breaches from the database are <code>DataIntegrityViolationException</code>; version conflicts are <code>ObjectOptimisticLockingFailureException</code>; misuse of the API (here, a bulk update with no transaction to run in, which JPA reports as <code>TransactionRequiredException</code>) is <code>InvalidDataAccessApiUsageException</code>; and a validation failure that only happens at flush-on-commit is reported by the transaction manager as <code>TransactionSystemException</code>, with the <code>ConstraintViolationException</code> as its cause.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The translated hierarchy</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common DataAccessException subclasses and what causes them</caption>
+      <thead><tr><th scope="col">Spring exception</th><th scope="col">Typical cause</th><th scope="col">Usual handling</th></tr></thead>
+      <tbody>
+        <tr><td><code>DataIntegrityViolationException</code></td><td>Unique, not-null, check or foreign-key constraint</td><td>Map to a domain error ("SKU already exists"); not retryable</td></tr>
+        <tr><td><code>DuplicateKeyException</code></td><td>A unique breach the translator could identify precisely (JDBC paths mostly)</td><td>Same as above; a subclass, so catching the parent covers it</td></tr>
+        <tr><td><code>OptimisticLockingFailureException</code></td><td><code>@Version</code> mismatch (the ORM subclass is <code>ObjectOptimisticLockingFailureException</code>)</td><td>Reload and retry, or report a conflict to the user</td></tr>
+        <tr><td><code>PessimisticLockingFailureException</code>, <code>CannotAcquireLockException</code></td><td>Lock timeout, deadlock victim</td><td>Retry the whole transaction</td></tr>
+        <tr><td><code>InvalidDataAccessApiUsageException</code></td><td>Wrong use of the API: bad JPQL, bulk update outside a transaction, null id</td><td>A bug: fix the code</td></tr>
+        <tr><td><code>InvalidDataAccessResourceUsageException</code></td><td>The SQL is wrong for this schema: missing table or column</td><td>A bug or a migration out of step</td></tr>
+        <tr><td><code>DataAccessResourceFailureException</code></td><td>The database is unreachable</td><td>Fail fast; let a health check notice</td></tr>
+        <tr><td><code>QueryTimeoutException</code></td><td>A statement exceeded its timeout</td><td>Investigate the query; maybe retry</td></tr>
+        <tr><td><code>TransactionSystemException</code> (not a <code>DataAccessException</code>)</td><td>The commit itself failed, often wrapping validation at flush</td><td>Inspect the cause chain</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Validation and translation in depth">
+      <button type="button" class="lm-tab" role="tab" id="tab-validation-errors-where" aria-controls="panel-validation-errors-where" aria-selected="true" tabindex="0">Where validation belongs</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-validation-errors-translate" aria-controls="panel-validation-errors-translate" aria-selected="false" tabindex="-1">How translation works</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-validation-errors-handle" aria-controls="panel-validation-errors-handle" aria-selected="false" tabindex="-1">Handling strategies</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-validation-errors-where" aria-labelledby="tab-validation-errors-where" tabindex="0">
+      <p><strong>Validate at the boundary first.</strong> The request DTO a controller receives is where a user's mistake should be caught and reported field by field, before any transaction opens. <strong>Validate entities as the last line.</strong> Constraints on the entity catch bugs inside your own code — a service that computes a negative price — but they fire at flush, possibly at commit, far from the code that caused them.</p>
+      <ul class="mb-0">
+        <li><code>@Valid</code> (Jakarta) cascades into an object's fields; <code>@Validated</code> (Spring) on a class turns on method validation and can select <strong>groups</strong>, such as <code>OnCreate</code> versus <code>OnUpdate</code>.</li>
+        <li>Messages are interpolated from <code>ValidationMessages.properties</code>, so <code>{jakarta.validation.constraints.Positive.message}</code> can be translated without touching code.</li>
+        <li>Keep the database constraint too. Bean Validation cannot see other rows, so uniqueness is only ever enforced reliably by a unique index — a <code>@Unique</code>-style validator that runs a query has a race between the check and the insert.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-validation-errors-translate" aria-labelledby="tab-validation-errors-translate" tabindex="0" hidden>
+      <p>Spring Data repositories are translated automatically: their proxies include a <code>PersistenceExceptionTranslationInterceptor</code>. Your own classes opt in by carrying <code>@Repository</code>, which <code>PersistenceExceptionTranslationPostProcessor</code> (registered by Spring Boot) wraps the same way.</p>
+      <p>The interceptor asks each <code>PersistenceExceptionTranslator</code> in the context — for JPA, the <code>EntityManagerFactory</code> bean, which delegates to Hibernate's dialect-aware SQL state mapping — to convert the exception. That is why a raw <code>entityManager.flush()</code> in a plain <code>@Component</code> throws Hibernate's own <code>ConstraintViolationException</code>, while the same failure through <code>repo.saveAndFlush</code> arrives as <code>DataIntegrityViolationException</code> (§11 shows exactly this).</p>
+      <p class="mb-0">Note the name clash: <code>org.hibernate.exception.ConstraintViolationException</code> (a database constraint) and <code>jakarta.validation.ConstraintViolationException</code> (a Bean Validation rule) are unrelated types with the same simple name. Import carefully.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-validation-errors-handle" aria-labelledby="tab-validation-errors-handle" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong>Translate at the service edge.</strong> Catch <code>DataIntegrityViolationException</code> where you know what it means — registering a product — and throw <code>SkuAlreadyExists</code>. Callers should not have to know about constraints.</li>
+        <li><strong>Retry only what can succeed on a retry.</strong> Optimistic and pessimistic locking failures can; integrity violations and API misuse cannot. A retry must start a <em>new</em> transaction, so it wraps the transactional method from outside (spring-retry's <code>@Retryable</code>, or a loop around a <code>REQUIRES_NEW</code> call as in §5), and the operation must be safe to repeat.</li>
+        <li><strong>In a web layer</strong> a <code>@ControllerAdvice</code> maps domain exceptions to HTTP statuses — 409 for conflicts, 400 for validation, 404 for not found — so controllers stay free of try/catch. Spring MVC is out of scope here, but the mapping is only possible because the data layer threw specific types.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Validation and translation gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The exception arrives at commit, wrapped.</strong> Entity validation fires at flush; if the flush is the commit, you get <code>TransactionSystemException</code>. Catching <code>ConstraintViolationException</code> around <code>save</code> alone catches nothing.</li>
+        <li><strong>Method validation needs the proxy.</strong> <code>@Validated</code> constraints are ignored on self-invocation and on <code>private</code> methods, for the same reason <code>@Transactional</code> is (§5).</li>
+        <li><strong><code>arg0</code> in messages means no <code>-parameters</code>.</strong> Builds outside Spring Boot's plugins often omit the flag; violation paths, <code>@PathVariable</code> without a name and <code>@Param</code>-less queries all depend on it.</li>
+        <li><strong>A transaction that saw an exception is finished.</strong> After a <code>DataIntegrityViolationException</code> inside a <code>@Transactional</code> method, the transaction is marked rollback-only even if you catch the exception. Further work in it is wasted, and the commit raises <code>UnexpectedRollbackException</code>.</li>
+        <li><strong>Do not log and rethrow at every layer.</strong> One stack trace per failure, at the edge that handles it; the translated exception keeps the original as its cause.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-validation-errors-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Outside any transaction, you call <code>repo.save(new Product("BOLT-7", -5))</code> on an entity whose price is <code>@Positive</code> and whose id is <code>SEQUENCE</code>-generated. What do you catch?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-validation-errors-1"><span><code>jakarta.validation.ConstraintViolationException</code>, thrown by <code>save</code> before any SQL <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-validation-errors-1"><span><code>DataIntegrityViolationException</code>, because a check constraint rejects the row <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-validation-errors-1"><span><code>TransactionSystemException</code>, with a <code>ConstraintViolationException</code> as its root cause <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-validation-errors-1"><span>Nothing; entity constraints are only checked by <code>@Valid</code> parameters <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> Step 1 of the worked example printed exactly this. The repository opened its own transaction; <code>persist</code> only queued the insert; validation ran at flush, which happened during commit; the transaction manager wrapped the failed commit.</p>
+        <p class="mb-0"><strong>A</strong> would be true if validation ran at <code>persist</code>, but Hibernate validates on the pre-insert event at flush. <strong>B</strong>: the validator runs in the pre-insert event and stops the insert before the database ever sees the row, so no database constraint gets the chance to fire. <strong>D</strong>: Hibernate Validator is on the class path, so entity validation is on automatically.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-validation-errors-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A plain <code>@Component</code> (not <code>@Repository</code>) injects an <code>EntityManager</code>, persists a duplicate SKU and calls <code>em.flush()</code>. What reaches its caller?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-validation-errors-2"><span><code>DataIntegrityViolationException</code>; Spring translates all persistence exceptions <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-validation-errors-2"><span>Hibernate's <code>ConstraintViolationException</code>, untranslated <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-validation-errors-2"><span>Jakarta's <code>ConstraintViolationException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-validation-errors-2"><span><code>SQLIntegrityConstraintViolationException</code>, the raw JDBC exception <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Translation happens in an interceptor on repository proxies and on <code>@Repository</code> beans. A <code>@Component</code> has none, so Hibernate's exception passes through as-is. §11's harness hit exactly this until it switched to <code>repo.saveAndFlush</code>.</p>
+        <p class="mb-0"><strong>A</strong> overstates translation; it is opt-in by stereotype. <strong>C</strong> is the Bean Validation type with the same simple name — a different thing entirely. <strong>D</strong>: Hibernate already wrapped the JDBC exception in its own type before it left <code>flush</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-validation-errors-3" data-answer="a,c">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which failures is it reasonable to retry automatically in a fresh transaction? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>ObjectOptimisticLockingFailureException</code> on a stock decrement <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>DataIntegrityViolationException</code> on registering a duplicate SKU <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>CannotAcquireLockException</code> after the database chose this transaction as a deadlock victim <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>InvalidDataAccessApiUsageException</code> from a malformed JPQL query <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and C.</strong> Both are contention: another transaction got there first, and a fresh attempt that re-reads current state can succeed. The retry must wrap the transaction from outside and the operation must be safe to repeat.</p>
+        <p class="mb-0"><strong>B</strong> will fail identically every time — the SKU still exists — so it belongs in a domain error. <strong>D</strong> is a bug in the code; retrying only repeats it.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="validation-errors"> Mark this section complete
+  </label>
+</section>

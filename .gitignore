@@ -1,0 +1,7 @@
+# Dependency jars for modules with library programs. Reproducible: the build
+# (or `node tools/fetch-deps.mjs`) re-fetches them from ~/.m2 or Maven Central.
+build/lib/
+
+# Section-level authoring builds and their per-process verify directories.
+build/partial/
+build/verify/*-partial-*/

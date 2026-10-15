@@ -1,0 +1,532 @@
+<section class="lm-section" id="lab" data-title="Hands-on lab" data-num="L">
+  <p class="lm-eyebrow">Put it together</p>
+  <h2 class="mb-4">Hands-on lab: persisting the warehouse</h2>
+
+  <p>Six steps that take the warehouse from in-memory collections to a real schema, with the three things a persistence layer must get right: a mapping that says what it means, stock that cannot be oversold, and reports that do not quietly run four hundred queries. Each step uses tools from one or two sections above and has a trap that the collections version never had. Write each one before opening its solution, and keep <code>show_sql</code> on while you do — the SQL is how you check your work.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Starter</div>
+      <pre data-code data-lang="bash" data-nobar>
+mkdir warehouse-lab && cd warehouse-lab
+# one file, WarehouseLab.java, grown step by step; LIB holds the jars from §1
+javac -cp "$LIB/*" WarehouseLab.java && java -cp ".;$LIB/*" WarehouseLab      # on Linux/macOS the separator is :
+      </pre>
+      <p class="mb-0 text-sm">Hibernate 7.4, JPA 3.2 and H2 as pinned in §1. The finished program below prints only facts and sorted data, so you can diff your run against it; it keeps <code>show_sql</code> off because six tables of DDL would bury the facts — the sections above have already shown you every statement shape it issues.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Step 1 — a product that knows what it is <span class="lm-badge">§2</span></h3>
+  <p>Map <code>Product</code> with a <code>SEQUENCE</code> id, a <code>sku</code> that is both a unique column and Hibernate's <code>@NaturalId</code>, a <code>Category</code> enum stored as its <em>name</em>, and the price as an embedded <code>Money</code> value object (amount in cents plus currency). Then map <code>StockLevel</code> so that its primary key <em>is</em> the product's id, with a <code>@Version</code> column you will need in step 3.</p>
+  <details class="lm-reveal"><summary>Solution — step 1</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Embeddable
+public record Money(long amountInCents, String currency) {}     // a record is a fine embeddable in Hibernate 6.2+
+
+@Entity(name = "Product") @Table(name = "product")
+public static class Product {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+    @NaturalId @Column(nullable = false, unique = true, length = 16) private String sku;
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 16) private Category category;
+    @Embedded private Money price;
+    …
+}
+
+@Entity(name = "StockLevel") @Table(name = "stock_level")
+public static class StockLevel {
+    @Id private Long id;                                     // not generated …
+    @OneToOne(fetch = FetchType.LAZY) @MapsId private Product product;   // … it is copied from the product
+    private int onHand;
+    @Version private int version;
+}
+    </pre>
+    <p class="mb-0 text-sm"><code>@MapsId</code> is the shared-primary-key one-to-one: no separate <code>product_id</code> column, no way to have a stock row for a product that does not exist, and a <code>find(StockLevel.class, productId)</code> that needs no join. <code>EnumType.STRING</code> costs a few bytes per row and survives reordering the enum; the default <code>ORDINAL</code> silently corrupts data the day someone inserts a constant in the middle.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 2 — orders, lines and suppliers <span class="lm-badge">§4</span></h3>
+  <p><code>Order</code> owns its <code>OrderLine</code>s: bidirectional, cascade everything, orphan removal on, with <code>addLine</code>/<code>removeLine</code> helpers so the two sides can never disagree. The line copies the unit price at the time of the order. <code>Supplier</code> is many-to-many with <code>Product</code> through a join table — choose the collection type on the owning side deliberately. Remember that <code>ORDER</code> is a reserved word.</p>
+  <details class="lm-reveal"><summary>Solution — step 2</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Entity(name = "Order") @Table(name = "orders")
+public static class Order {
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true) @OrderBy("id")
+    private List&lt;OrderLine&gt; lines = new ArrayList&lt;&gt;();
+    void addLine(Product p, int qty) { lines.add(new OrderLine(this, p, qty, p.price().amountInCents())); }
+    void removeLine(OrderLine l) { lines.remove(l); l.order = null; }
+}
+
+@Entity(name = "OrderLine") @Table(name = "order_line")
+public static class OrderLine {
+    @ManyToOne(fetch = FetchType.LAZY, optional = false) private Order order;     // the owning side: this column is the FK
+    @ManyToOne(fetch = FetchType.LAZY, optional = false) private Product product;
+    private long unitPriceInCents;                                            // history must not change when the price does
+}
+
+@Entity(name = "Supplier") @Table(name = "supplier")
+public static class Supplier {
+    @ManyToMany @JoinTable(name = "supplier_product",
+        joinColumns = @JoinColumn(name = "supplier_id"), inverseJoinColumns = @JoinColumn(name = "product_id"))
+    private Set&lt;Product&gt; products = new HashSet&lt;&gt;();
+}
+    </pre>
+    <p class="mb-0 text-sm">The constructor of <code>OrderLine</code> sets <code>order</code>, and <code>addLine</code> adds to the list: both sides, always, in one place. Cascade lives on the parent-to-child side only; a <code>@ManyToOne</code> with <code>cascade = ALL</code> would delete the product when a line is removed. The <code>Set</code> matters: with a <code>List</code>, removing one product from a supplier deletes every join row and reinserts the survivors.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 3 — stock that cannot be oversold <span class="lm-badge">§3, §7</span></h3>
+  <p>Write <code>reserve(sku, qty)</code> twice. The pessimistic version loads the <code>StockLevel</code> with <code>PESSIMISTIC_WRITE</code> — a <code>select … for update</code> — so a second reservation waits. The optimistic version loads it normally and relies on <code>@Version</code>: if someone else committed first, the commit fails with <code>OptimisticLockException</code>, and you retry once in a fresh context. Prove the retry by having another transaction change the row between your read and your commit.</p>
+  <details class="lm-reveal"><summary>Solution — step 3</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+StockLevel s = em.find(StockLevel.class, productId, LockModeType.PESSIMISTIC_WRITE);   // pessimistic: nobody else may read-for-update until commit
+s.take(qty);
+
+while (true) {                                                                       // optimistic: read, change, let the version decide
+    attempts++;
+    try {
+        if (!em.getTransaction().isActive()) em.getTransaction().begin();
+        em.find(StockLevel.class, productId).take(qty);
+        em.getTransaction().commit();                                                // update … where id=? and version=?
+        return attempts;
+    } catch (RollbackException e) {
+        if (!(e.getCause() instanceof OptimisticLockException)) throw e;
+        em.close(); em = emf.createEntityManager();                                  // the stale context is useless now
+    }
+}
+    </pre>
+    <p class="mb-0 text-sm">Both are correct; they fail differently. Pessimistic serialises the two reservations in the database and costs a lock held for the transaction. Optimistic lets both proceed and refuses the loser at commit — cheaper when conflicts are rare, and the retry must start from a <em>new</em> context, because the old one still holds the stale row. After the second failure, the version check is the only thing standing between you and an oversold warehouse.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 4 — reports without an N+1 <span class="lm-badge">§5, §6</span></h3>
+  <p>Three queries: revenue per category as a DTO (<code>select new</code> into a record, grouped and summed in the database); the two most expensive products with pagination; and every order with its lines and their products, listed in one statement. Prove the last claim with <code>Statistics.getPrepareStatementCount()</code>.</p>
+  <details class="lm-reveal"><summary>Solution — step 4</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+select new WarehouseLab$CategoryRevenue(p.category, sum(l.qty * l.unitPriceInCents))   // a nested record: use its binary name
+from OrderLine l join l.product p group by p.category order by p.category
+
+select p from Product p order by p.price.amountInCents desc, p.sku        // then setFirstResult(0).setMaxResults(2)
+
+select distinct o from Order o join fetch o.lines l join fetch l.product order by o.placed
+    </pre>
+    <p class="mb-0 text-sm">The projection never materialises an entity: no persistence context entry, no dirty checking, exactly the columns the report needs. The ordered-and-limited query is the only correct pagination — <code>getResultList().subList(…)</code> loads the whole table. The double <code>join fetch</code> brings lines and products in the same result set, so touching them later costs nothing; without it the loop would run one query per order for the lines and one per line for the product. <code>distinct</code> keeps Hibernate from handing you the same order once per line.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 5 — importing five hundred products <span class="lm-badge">§9</span></h3>
+  <p>Insert 500 products in one transaction without the context growing to 500 managed entities and without 500 round trips. Use a second <code>EntityManagerFactory</code> configured for writes — JDBC batching at 50, ordered inserts — flush and clear every 50, and report how many statements Hibernate actually prepared.</p>
+  <details class="lm-reveal"><summary>Solution — step 5</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+EntityManagerFactory bulk = base("none")                       // same database, no schema action this time
+    .property("hibernate.jdbc.batch_size", "50")
+    .property("hibernate.order_inserts", "true")
+    .createEntityManagerFactory();
+
+for (int i = 1; i &lt;= 500; i++) {
+    em.persist(new Product("IMP-" + i, …));
+    if (i % 50 == 0) { em.flush(); em.clear(); }               // one batch out, context emptied
+}
+    </pre>
+    <p class="mb-0 text-sm">Twenty statements for five hundred rows: ten batched <code>insert</code>s of fifty, and ten <code>select next value</code> calls, because the sequence hands out fifty ids per call (§2). An <code>IDENTITY</code> id would have made batching impossible — Hibernate must insert each row to learn its key. The flush-and-clear keeps dirty checking cheap: a context holding ten thousand entities checks ten thousand snapshots at every flush.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">Step 6 — auditing and soft delete <span class="lm-badge">§10, §11</span></h3>
+  <p>Give <code>Product</code> <code>createdAt</code>/<code>updatedAt</code> timestamps and a <code>revision</code> counter maintained by lifecycle callbacks, not by every caller. Then make <code>em.remove(product)</code> a soft delete: the row stays, flagged, and disappears from every JPQL query — while a native count still sees it.</p>
+  <details class="lm-reveal"><summary>Solution — step 6</summary><div class="lm-reveal-body">
+    <pre data-code data-lang="java" data-nobar>
+@Entity(name = "Product") @Table(name = "product")
+@SQLDelete(sql = "update product set deleted = true where id = ?")     // what remove() issues instead of DELETE
+@SQLRestriction("deleted = false")                                     // appended to every query and find
+public static class Product {
+    private boolean deleted;
+    private Instant createdAt, updatedAt;
+    private int revision;
+    @PrePersist void onCreate() { createdAt = updatedAt = Instant.now(); }
+    @PreUpdate  void onUpdate() { updatedAt = Instant.now(); revision++; }
+}
+    </pre>
+    <p class="mb-0 text-sm">Callbacks run inside the flush, so no caller can forget them, and <code>@PreUpdate</code> fires only when dirty checking found a real change. The two Hibernate annotations make soft delete a mapping concern rather than a <code>where deleted = false</code> that every query must remember. The native count is the reminder that the restriction is Hibernate's, not the database's: reports written in SQL, and other applications, still see the row.</p>
+  </div></details>
+
+  <h3 class="mt-8 mb-3">The finished thing</h3>
+
+  <p>All six steps assembled. This program is compiled and run against the pinned Hibernate and H2 during the build of this page, so every number below is what it really printed.</p>
+
+  <pre data-code data-lang="java" data-file="WarehouseLab.java" data-verify="WarehouseLab" data-hi="22,23,47,48,65,68,88,89,136,174,193,264,276,298,311,320">
+import jakarta.persistence.*;
+import org.hibernate.SessionFactory;
+import org.hibernate.annotations.NaturalId;
+import org.hibernate.annotations.SQLDelete;
+import org.hibernate.annotations.SQLRestriction;
+import org.hibernate.stat.Statistics;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.*;
+
+public class WarehouseLab {
+
+    public enum Category { FASTENER, STRUCTURAL, TOOLING }
+
+    @Embeddable
+    public record Money(long amountInCents, String currency) {}
+
+    // ── step 1: products and stock ───────────────────────────────────────────
+    @Entity(name = "Product")
+    @Table(name = "product")
+    @SQLDelete(sql = "update product set deleted = true where id = ?")   // step 6: soft delete
+    @SQLRestriction("deleted = false")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @NaturalId
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        @Column(nullable = false)
+        private String name;
+        @Enumerated(EnumType.STRING)
+        @Column(nullable = false, length = 16)
+        private Category category;
+        @Embedded
+        private Money price;
+        private boolean deleted;
+        private Instant createdAt;
+        private Instant updatedAt;
+        private int revision;
+
+        protected Product() {}
+        Product(String sku, String name, Category category, long priceInCents) {
+            this.sku = sku; this.name = name; this.category = category;
+            this.price = new Money(priceInCents, "EUR");
+        }
+        @PrePersist void onCreate() { createdAt = updatedAt = Instant.now(); }
+        @PreUpdate  void onUpdate() { updatedAt = Instant.now(); revision++; }
+
+        Long id() { return id; }
+        String sku() { return sku; }
+        Category category() { return category; }
+        Money price() { return price; }
+        void rename(String n) { this.name = n; }
+        boolean hasTimestamps() { return createdAt != null && updatedAt != null; }
+        int revision() { return revision; }
+        @Override public String toString() { return sku + " " + price.amountInCents() + "c"; }
+    }
+
+    @Entity(name = "StockLevel")
+    @Table(name = "stock_level")
+    public static class StockLevel {
+        @Id
+        private Long id;                                  // shares the product's id …
+        @OneToOne(fetch = FetchType.LAZY) @MapsId          // … because this is the product's stock
+        private Product product;
+        private int onHand;
+        @Version
+        private int version;
+
+        protected StockLevel() {}
+        StockLevel(Product product, int onHand) { this.product = product; this.onHand = onHand; }
+        int onHand() { return onHand; }
+        int version() { return version; }
+        void take(int qty) {
+            if (qty > onHand) throw new IllegalStateException("only " + onHand + " on hand");
+            onHand -= qty;
+        }
+    }
+
+    // ── step 2: orders, lines, suppliers ────────────────────────────────────
+    @Entity(name = "Order")
+    @Table(name = "orders")                               // ORDER is a reserved word
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        private LocalDate placed;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+        @OrderBy("id")
+        private List<OrderLine> lines = new ArrayList<>();
+
+        protected Order() {}
+        Order(LocalDate placed) { this.placed = placed; }
+        Long id() { return id; }
+        LocalDate placed() { return placed; }
+        List<OrderLine> lines() { return Collections.unmodifiableList(lines); }
+        void addLine(Product p, int qty) {                // keeps both sides in step
+            OrderLine l = new OrderLine(this, p, qty, p.price().amountInCents());
+            lines.add(l);
+        }
+        void removeLine(OrderLine l) { lines.remove(l); l.order = null; }
+        long totalInCents() { return lines.stream().mapToLong(OrderLine::subtotal).sum(); }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false)
+        private Order order;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false)
+        private Product product;
+        private int qty;
+        private long unitPriceInCents;                    // copied: a later price change must not rewrite history
+
+        protected OrderLine() {}
+        OrderLine(Order order, Product product, int qty, long unitPriceInCents) {
+            this.order = order; this.product = product; this.qty = qty; this.unitPriceInCents = unitPriceInCents;
+        }
+        Product product() { return product; }
+        int qty() { return qty; }
+        long subtotal() { return qty * unitPriceInCents; }
+    }
+
+    @Entity(name = "Supplier")
+    @Table(name = "supplier")
+    public static class Supplier {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        private String name;
+        @ManyToMany
+        @JoinTable(name = "supplier_product",
+                   joinColumns = @JoinColumn(name = "supplier_id"),
+                   inverseJoinColumns = @JoinColumn(name = "product_id"))
+        private Set<Product> products = new HashSet<>();   // a Set: a List here makes every removal rewrite the join table
+
+        protected Supplier() {}
+        Supplier(String name) { this.name = name; }
+        void supplies(Product p) { products.add(p); }
+        Set<Product> products() { return products; }
+    }
+
+    // ── step 4: a projection that is not an entity ──────────────────────────
+    public record CategoryRevenue(Category category, Long revenueInCents) {}
+
+    // ── bootstrap ───────────────────────────────────────────────────────────
+    static PersistenceConfiguration base(String schemaAction) {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class).managedClass(StockLevel.class)
+            .managedClass(Order.class).managedClass(OrderLine.class).managedClass(Supplier.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:WarehouseLab;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, schemaAction)
+            .property("hibernate.show_sql", "false")
+            .property("hibernate.generate_statistics", "true");
+    }
+
+    static Product bySku(EntityManager em, String sku) {         // the natural key is how the business names a product
+        return em.createQuery("select p from Product p where p.sku = :sku", Product.class)
+                 .setParameter("sku", sku).getSingleResult();
+    }
+
+    static Statistics stats(EntityManagerFactory emf) {
+        return emf.unwrap(SessionFactory.class).getStatistics();
+    }
+
+    // ── step 3: reserve stock ───────────────────────────────────────────────
+    static void reservePessimistic(EntityManagerFactory emf, String sku, int qty) {
+        try (EntityManager em = emf.createEntityManager()) {
+            em.getTransaction().begin();
+            Product p = bySku(em, sku);
+            StockLevel s = em.find(StockLevel.class, p.id(), LockModeType.PESSIMISTIC_WRITE);  // select … for update
+            s.take(qty);
+            em.getTransaction().commit();
+        }
+    }
+
+    static int reserveOptimistic(EntityManagerFactory emf, EntityManager stale, long productId, int qty) {
+        // 'stale' already holds a StockLevel read before someone else changed it
+        int attempts = 0;
+        EntityManager em = stale;
+        while (true) {
+            attempts++;
+            try {
+                if (!em.getTransaction().isActive()) em.getTransaction().begin();
+                StockLevel s = em.find(StockLevel.class, productId);
+                s.take(qty);
+                em.getTransaction().commit();
+                em.close();
+                return attempts;
+            } catch (RollbackException e) {
+                if (!(e.getCause() instanceof OptimisticLockException)) throw e;
+                em.close();
+                em = emf.createEntityManager();           // a fresh context: re-read, re-apply
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = base("drop-and-create").createEntityManagerFactory()) {
+            Statistics st = stats(emf);
+
+            // ── seed ────────────────────────────────────────────────────────
+            long boltId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = new Product("BOLT-7", "M8 bolt", Category.FASTENER, 80);
+                Product nut  = new Product("NUT-3", "M8 nut", Category.FASTENER, 25);
+                Product gird = new Product("GIRD-1", "Steel girder", Category.STRUCTURAL, 120_000);
+                Product cam  = new Product("CAM-9", "Cam follower", Category.TOOLING, 2_300);
+                for (Product p : List.of(bolt, nut, gird, cam)) em.persist(p);
+                em.persist(new StockLevel(bolt, 500));
+                em.persist(new StockLevel(nut, 1_000));
+                em.persist(new StockLevel(gird, 3));
+                em.persist(new StockLevel(cam, 40));
+
+                Supplier acme = new Supplier("Acme Fasteners");
+                acme.supplies(bolt); acme.supplies(nut);
+                em.persist(acme);
+
+                Order o1 = new Order(LocalDate.of(2026, 10, 1));
+                o1.addLine(bolt, 100); o1.addLine(nut, 100);
+                Order o2 = new Order(LocalDate.of(2026, 10, 3));
+                o2.addLine(gird, 1); o2.addLine(cam, 2);
+                Order o3 = new Order(LocalDate.of(2026, 10, 9));
+                o3.addLine(bolt, 20);
+                for (Order o : List.of(o1, o2, o3)) em.persist(o);       // cascades to the lines
+                em.getTransaction().commit();
+                boltId = bolt.id();
+            }
+            System.out.println("-- step 1+2: mapped and seeded --");
+            try (EntityManager em = emf.createEntityManager()) {
+                Product bolt = em.find(Product.class, boltId);
+                System.out.println("product     = " + bolt + " (" + bolt.category() + ")");
+                System.out.println("stock id    = " + em.find(StockLevel.class, boltId).onHand() + " on hand, shares id " + boltId);
+                Supplier s = em.createQuery("select s from Supplier s", Supplier.class).getSingleResult();
+                System.out.println("supplier    = " + s.products().stream().map(Product::sku).sorted().toList());
+                System.out.println("orders      = " + em.createQuery("select count(o) from Order o", Long.class).getSingleResult()
+                    + ", lines = " + em.createQuery("select count(l) from OrderLine l", Long.class).getSingleResult());
+            }
+
+            // ── step 3 ──────────────────────────────────────────────────────
+            System.out.println("-- step 3: reserving stock --");
+            reservePessimistic(emf, "BOLT-7", 120);
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("after pessimistic reserve: " + em.find(StockLevel.class, boltId).onHand());
+            }
+            EntityManager stale = emf.createEntityManager();
+            stale.getTransaction().begin();
+            stale.find(StockLevel.class, boltId);                           // version 0 is now in this context
+            reservePessimistic(emf, "BOLT-7", 30);                          // someone else commits first: version 1
+            int attempts = reserveOptimistic(emf, stale, boltId, 50);
+            try (EntityManager em = emf.createEntityManager()) {
+                StockLevel s = em.find(StockLevel.class, boltId);
+                System.out.println("optimistic reserve took " + attempts + " attempts; on hand " + s.onHand() + ", version " + s.version());
+            }
+
+            // ── step 4 ──────────────────────────────────────────────────────
+            System.out.println("-- step 4: reports --");
+            try (EntityManager em = emf.createEntityManager()) {
+                List<CategoryRevenue> rev = em.createQuery(
+                    "select new WarehouseLab$CategoryRevenue(p.category, sum(l.qty * l.unitPriceInCents)) " +
+                    "from OrderLine l join l.product p group by p.category order by p.category", CategoryRevenue.class)
+                    .getResultList();
+                for (CategoryRevenue r : rev) System.out.println("revenue " + r.category() + " = " + r.revenueInCents());
+
+                List<Product> top = em.createQuery(
+                    "select p from Product p order by p.price.amountInCents desc, p.sku", Product.class)
+                    .setFirstResult(0).setMaxResults(2).getResultList();
+                System.out.println("top 2 by price = " + top);
+
+                st.clear();
+                List<Order> orders = em.createQuery(
+                    "select distinct o from Order o join fetch o.lines l join fetch l.product order by o.placed", Order.class)
+                    .getResultList();
+                for (Order o : orders) {
+                    System.out.println("order " + o.placed() + " total " + o.totalInCents() + "c, " + o.lines().size() + " lines, first " + o.lines().get(0).product().sku());
+                }
+                System.out.println("statements for " + orders.size() + " orders with lines and products: " + st.getPrepareStatementCount());
+            }
+
+            // ── step 6 (part a): callbacks ──────────────────────────────────
+            System.out.println("-- step 6: callbacks and soft delete --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = em.find(Product.class, boltId);
+                System.out.println("timestamps set on persist: " + bolt.hasTimestamps() + ", revision " + bolt.revision());
+                bolt.rename("M8 bolt, zinc");
+                em.getTransaction().commit();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = em.find(Product.class, boltId);
+                System.out.println("revision after one update: " + bolt.revision());
+                Product cam = bySku(em, "CAM-9");
+                em.remove(cam);                                              // runs the @SQLDelete update instead
+                em.getTransaction().commit();
+            }
+            try (EntityManager em = emf.createEntityManager()) {
+                long visible = em.createQuery("select count(p) from Product p", Long.class).getSingleResult();
+                Number rows = (Number) em.createNativeQuery("select count(*) from product").getSingleResult();
+                System.out.println("products via JPQL: " + visible + ", rows in the table: " + rows);
+            }
+        }
+
+        // ── step 5: bulk import on a second factory tuned for writes ────────
+        System.out.println("-- step 5: bulk import --");
+        try (EntityManagerFactory bulk = base("none")
+                .property("hibernate.jdbc.batch_size", "50")
+                .property("hibernate.order_inserts", "true")
+                .createEntityManagerFactory()) {
+            Statistics st = stats(bulk);
+            st.clear();
+            try (EntityManager em = bulk.createEntityManager()) {
+                em.getTransaction().begin();
+                for (int i = 1; i <= 500; i++) {
+                    em.persist(new Product("IMP-" + i, "Imported part " + i, Category.TOOLING, 100 + i));
+                    if (i % 50 == 0) { em.flush(); em.clear(); }           // keep the context small
+                }
+                em.getTransaction().commit();
+            }
+            System.out.println("entities inserted     : " + st.getEntityInsertCount());
+            System.out.println("statements prepared   : " + st.getPrepareStatementCount());
+            try (EntityManager em = bulk.createEntityManager()) {
+                System.out.println("imported rows visible : " +
+                    em.createQuery("select count(p) from Product p where p.sku like 'IMP-%'", Long.class).getSingleResult());
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="WarehouseLab">
+-- step 1+2: mapped and seeded --
+product     = BOLT-7 80c (FASTENER)
+stock id    = 500 on hand, shares id 1
+supplier    = [BOLT-7, NUT-3]
+orders      = 3, lines = 5
+-- step 3: reserving stock --
+after pessimistic reserve: 380
+optimistic reserve took 2 attempts; on hand 300, version 3
+-- step 4: reports --
+revenue FASTENER = 12100
+revenue STRUCTURAL = 120000
+revenue TOOLING = 4600
+top 2 by price = [GIRD-1 120000c, CAM-9 2300c]
+order 2026-10-01 total 10500c, 2 lines, first BOLT-7
+order 2026-10-03 total 124600c, 2 lines, first GIRD-1
+order 2026-10-09 total 1600c, 1 lines, first BOLT-7
+statements for 3 orders with lines and products: 1
+-- step 6: callbacks and soft delete --
+timestamps set on persist: true, revision 0
+revision after one update: 1
+products via JPQL: 3, rows in the table: 4
+-- step 5: bulk import --
+entities inserted     : 500
+statements prepared   : 20
+imported rows visible : 500
+  </pre>
+
+  <p>Why each number is what it is. The stock row shares id <strong>1</strong> because <code>@MapsId</code> copied the bolt's generated key. After the pessimistic reserve of 120, <strong>380</strong> remain; the optimistic attempt read the row at version 0, another transaction took 30 and committed (version 1, 350 on hand), so the first commit was refused, the retry read 350 at version 1 and committed 300 at version <strong>2</strong> — the printed <strong>3</strong> is one more because the pessimistic path also bumps the version. Revenue sums <code>qty × unitPriceInCents</code> per line: 100 × 80 + 100 × 25 + 20 × 80 = <strong>12100</strong> for fasteners. The three orders with all their lines and products took <strong>1</strong> statement because of the two <code>join fetch</code>es. Revision <strong>1</strong> after the rename shows <code>@PreUpdate</code> fired exactly once. JPQL sees <strong>3</strong> products after the soft delete; the native count sees the row still there, <strong>4</strong>. And the import prepared <strong>20</strong> statements for 500 rows: ten batches of fifty inserts and ten sequence calls.</p>
+
+  <div class="lm-callout lm-callout--good">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    <div>
+      <div class="lm-callout-title">Extensions worth attempting</div>
+      <ul class="mb-0">
+        <li>Turn <code>show_sql</code> back on and read the step 3 statements: find the <code>for update</code>, and the <code>update … where id=? and version=?</code>. Then change <code>StockLevel</code> to <code>IDENTITY</code> ids and watch the step 5 statement count explode.</li>
+        <li>Add a <code>Warehouse</code> entity and make <code>StockLevel</code> keyed by <em>(product, warehouse)</em> with an <code>@EmbeddedId</code>. What does <code>reserve</code> need to change, and which query in step 4 now has to say which warehouse it means?</li>
+        <li>Make the soft delete visible to one report: write a native query that lists deleted products, then a JPQL equivalent — and discover why the JPQL one cannot be written without <code>@FilterDef</code>/<code>@Filter</code>, which can be switched off per session where <code>@SQLRestriction</code> cannot.</li>
+      </ul>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="lab"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,481 @@
+<section class="lm-section" id="locks" data-title="synchronized, ReentrantLock and deadlock" data-num="3">
+  <p class="lm-eyebrow">Section 3</p>
+  <h2 class="mb-4">synchronized, ReentrantLock and deadlock</h2>
+
+  <p>§1 showed that <code>count++</code> is three operations and that two threads interleaving them lose updates. §2 showed that even a correctly ordered write may never become <em>visible</em> to another core. A lock solves both at once: while one thread holds it, no other thread can enter the guarded code (<strong>mutual exclusion</strong>), and releasing it publishes everything that thread wrote to whoever acquires it next (<strong>happens-before</strong>). That second guarantee is the one people forget. A lock is not only a turnstile; it is also a memory barrier.</p>
+
+  <p>Every Java object carries an <strong>intrinsic lock</strong>, also called its <em>monitor</em>. <code>synchronized (obj) { … }</code> acquires <code>obj</code>'s monitor on entry and releases it on exit, by any path — a <code>return</code>, an exception, a <code>break</code>. A <code>synchronized</code> instance method locks <code>this</code>; a <code>synchronized</code> static method locks the <code>Class</code> object. The monitor is <strong>reentrant</strong>: a thread that already owns it can acquire it again, which is why a synchronized method may call another synchronized method on the same object without deadlocking against itself.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: one lock, one invariant</h3>
+
+  <p>Eight picker threads leave a <code>CountDownLatch</code> gate together and hammer one <code>InventoryService</code> holding 500 units. The invariant — <em>reserved + on hand = 500</em>, and every attempt is either applied or refused — must survive 800 racing calls. Then a synchronized method re-enters another, and a bounded buffer hands 1,000 items between two threads using nothing but <code>wait</code> and <code>notifyAll</code>.</p>
+
+  <pre data-code data-lang="java" data-file="Synchronized.java" data-verify="Synchronized" data-hi="16,17,18,19,20,21">
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.concurrent.CountDownLatch;
+
+public class Synchronized {
+
+    /* One lock, one invariant: onHand never goes negative and every
+       reservation is either fully applied or refused. */
+    static final class InventoryService {
+        private int onHand;
+        private int reserved;
+        private int refused;
+
+        InventoryService(int onHand) { this.onHand = onHand; }
+
+        synchronized boolean reserve(int qty) {
+            if (qty > onHand) { refused++; return false; }
+            onHand -= qty;
+            reserved += qty;
+            return true;
+        }
+
+        synchronized void release(int qty) { onHand += qty; }
+
+        // a synchronized method calling another synchronized method on the
+        // same object: the thread already owns the monitor, so it re-enters
+        synchronized boolean reserveTwice(int qty) {
+            return reserve(qty) && reserve(qty);
+        }
+
+        synchronized int onHand() { return onHand; }
+        synchronized int reserved() { return reserved; }
+        synchronized int refused() { return refused; }
+    }
+
+    /* A bounded buffer built on wait/notifyAll: the textbook shape every
+       BlockingQueue implements for you. */
+    static final class BoundedBuffer {
+        private final Deque<Integer> items = new ArrayDeque<>();
+        private final int capacity;
+        BoundedBuffer(int capacity) { this.capacity = capacity; }
+
+        synchronized void put(int item) throws InterruptedException {
+            while (items.size() == capacity) wait();   // loop, never if: spurious wakeups
+            items.addLast(item);
+            notifyAll();
+        }
+
+        synchronized int take() throws InterruptedException {
+            while (items.isEmpty()) wait();
+            int item = items.removeFirst();
+            notifyAll();
+            return item;
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        // ── 8 pickers hammer one service ────────────────────────────────────
+        InventoryService inv = new InventoryService(500);
+        int threads = 8, perThread = 100, qty = 1;
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        for (int t = 0; t < threads; t++) {
+            Thread picker = new Thread(() -> {
+                try { start.await(); } catch (InterruptedException e) { return; }
+                for (int i = 0; i < perThread; i++) inv.reserve(qty);
+                done.countDown();
+            }, "picker-" + t);
+            picker.start();
+        }
+        start.countDown();                          // everyone leaves the gate together
+        done.await();
+
+        int attempts = threads * perThread;         // 800 attempts against 500 units
+        System.out.println("attempts        = " + attempts);
+        System.out.println("reserved        = " + inv.reserved());
+        System.out.println("refused         = " + inv.refused());
+        System.out.println("on hand         = " + inv.onHand());
+        System.out.println("invariant holds = " + (inv.reserved() + inv.onHand() == 500
+                                                   && inv.reserved() + inv.refused() == attempts));
+
+        // ── reentrancy ──────────────────────────────────────────────────────
+        InventoryService small = new InventoryService(10);
+        System.out.println("reentered       = " + small.reserveTwice(3) + " (on hand " + small.onHand() + ")");
+
+        // ── wait / notifyAll producer-consumer ──────────────────────────────
+        BoundedBuffer buffer = new BoundedBuffer(4);
+        int n = 1000;
+        long[] consumedSum = new long[1];
+        Thread producer = new Thread(() -> {
+            try { for (int i = 1; i <= n; i++) buffer.put(i); buffer.put(-1); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "producer");
+        Thread consumer = new Thread(() -> {
+            try { for (int v; (v = buffer.take()) != -1; ) consumedSum[0] += v; }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "consumer");
+        producer.start(); consumer.start();
+        producer.join(10_000); consumer.join(10_000);
+        System.out.println("consumed sum    = " + consumedSum[0] + " (expected " + ((long) n * (n + 1) / 2) + ")");
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Synchronized">
+attempts        = 800
+reserved        = 500
+refused         = 300
+on hand         = 0
+invariant holds = true
+reentered       = true (on hand 4)
+consumed sum    = 500500 (expected 500500)
+  </pre>
+
+  <p>Three things to notice. The <code>reserve</code> check-then-act — <em>is there enough? then subtract</em> — is exactly the compound operation §1 broke, and the only reason it survives 800 racing calls is that both halves sit inside the same monitor. The accessors are synchronized too: without that, a reader could see a stale <code>onHand</code> even after every writer has finished (§2). And every <code>wait()</code> sits inside a <code>while</code>, because the JVM is permitted to wake a waiting thread for no reason at all — a <em>spurious wakeup</em> — and because <code>notifyAll</code> wakes every waiter, most of whom will find the condition still false.</p>
+
+  <h3 class="mt-8 mb-3">Watch the monitor</h3>
+
+  <p>A monitor is more than a flag. It has an <strong>owner</strong>, an <strong>entry set</strong> of threads blocked trying to acquire it, and a <strong>wait set</strong> of threads that owned it, called <code>wait()</code>, and gave it up until notified. Step through a producer and a consumer sharing the buffer above.</p>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of monitor ownership during wait and notify">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Owner, entry set, wait set</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="monitor"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Monitor state</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Buffer</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="monitor">
+    {
+      "lang": "java",
+      "code": "synchronized int take() throws InterruptedException {\n    while (items.isEmpty()) wait();\n    int item = items.removeFirst();\n    notifyAll();\n    return item;\n}\n\nsynchronized void put(int item) throws InterruptedException {\n    while (items.size() == capacity) wait();\n    items.addLast(item);\n    notifyAll();\n}",
+      "steps": [
+        { "line": 1, "vars": { "owner": "consumer", "entry set": "—", "wait set": "—" }, "out": "[]",
+          "note": "The consumer calls take() on an empty buffer. Entering a synchronized method acquires the monitor: the consumer is now its owner." },
+        { "line": 2, "vars": { "owner": "consumer", "entry set": "producer", "wait set": "—" }, "out": "[]",
+          "note": "The producer arrives at put() and finds the monitor owned. It is parked in the entry set — it cannot even evaluate the while condition." },
+        { "line": 2, "vars": { "owner": "(none)", "entry set": "producer", "wait set": "consumer" }, "out": "[]",
+          "note": "items is empty, so the consumer calls wait(). wait() RELEASES the monitor and moves the caller to the wait set. This is the whole point: holding the lock while waiting would block the producer forever." },
+        { "line": 8, "vars": { "owner": "producer", "entry set": "—", "wait set": "consumer" }, "out": "[]",
+          "note": "The monitor is free, so the producer leaves the entry set and becomes the owner. It enters put()." },
+        { "line": 10, "vars": { "owner": "producer", "entry set": "—", "wait set": "consumer" }, "out": "[42]",
+          "note": "The buffer is not full, so the producer skips the wait loop and appends an item." },
+        { "line": 11, "vars": { "owner": "producer", "entry set": "consumer", "wait set": "—" }, "out": "[42]",
+          "note": "notifyAll() moves every thread in the wait set back to the entry set. The consumer is awake but NOT running: the producer still owns the monitor until put() returns." },
+        { "line": 12, "vars": { "owner": "(none)", "entry set": "consumer", "wait set": "—" }, "out": "[42]",
+          "note": "put() returns and the monitor is released. Only now can the consumer re-acquire it." },
+        { "line": 2, "vars": { "owner": "consumer", "entry set": "—", "wait set": "—" }, "out": "[42]",
+          "note": "The consumer re-acquires the monitor INSIDE wait() and returns to the loop condition. It re-checks isEmpty() — this is why the condition lives in a while, not an if: a spurious wakeup, or another consumer that got there first, would otherwise read from an empty buffer." },
+        { "line": 3, "vars": { "owner": "consumer", "entry set": "—", "wait set": "—", "item": "42" }, "out": "[]",
+          "note": "The condition is false, the consumer takes the item, notifies any waiting producers, and returns — releasing the monitor on the way out." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">What to lock on</h3>
+
+  <p><code>synchronized</code> methods lock <code>this</code>, which means any code holding a reference to your object can lock it too — and can therefore block your methods or, worse, deadlock against them. A <strong>private lock object</strong> keeps the lock inside the class:</p>
+
+  <pre data-code data-lang="java" data-nobar>
+private final Object lock = new Object();          // nobody outside can synchronize on it
+
+void reserve(int qty) {
+    synchronized (lock) { /* … */ }
+}
+  </pre>
+
+  <p>Lock on a <code>final</code> field, never on a value that can be reassigned, and never on a boxed primitive or a <code>String</code> — <code>Integer.valueOf(7)</code> and <code>"lock"</code> are shared instances, so two unrelated classes can end up contending for the same monitor without knowing it.</p>
+
+  <h3 class="mt-8 mb-3">synchronized or a Lock object?</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Lock kinds">
+      <button type="button" class="lm-tab" role="tab" id="tab-locks-sync" aria-controls="panel-locks-sync" aria-selected="true" tabindex="0">synchronized</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-locks-reentrant" aria-controls="panel-locks-reentrant" aria-selected="false" tabindex="-1">ReentrantLock</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-locks-rw" aria-controls="panel-locks-rw" aria-selected="false" tabindex="-1">ReadWriteLock &amp; StampedLock</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-locks-sync" aria-labelledby="tab-locks-sync" tabindex="0">
+      <ul class="mb-0">
+        <li><strong>Cannot be forgotten.</strong> Release is structural: the block ends, the lock is released. There is no <code>unlock()</code> to miss on an exception path.</li>
+        <li><strong>Cannot be interrupted, timed, or tried.</strong> A thread blocked on a monitor waits until it gets it. If the owner never releases, the waiter is stuck for the life of the process.</li>
+        <li><strong>One condition per lock.</strong> <code>wait</code>/<code>notifyAll</code> is a single wait set, so "not full" and "not empty" waiters are woken together and most go straight back to sleep.</li>
+        <li><strong>The default.</strong> Correct, well optimised by the JIT (lock elision, biased-then-lightweight locking), and readable. Reach for <code>ReentrantLock</code> only when you need something from the next tab.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-locks-reentrant" aria-labelledby="tab-locks-reentrant" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+private final ReentrantLock lock = new ReentrantLock();          // new ReentrantLock(true) = fair
+private final Condition notEmpty = lock.newCondition();
+private final Condition notFull  = lock.newCondition();
+
+void put(int item) throws InterruptedException {
+    lock.lockInterruptibly();                                      // or lock(), or tryLock(2, SECONDS)
+    try {
+        while (items.size() == capacity) notFull.await();
+        items.addLast(item);
+        notEmpty.signal();                                         // wake ONE consumer, not everyone
+    } finally {
+        lock.unlock();                                             // the one line you must never forget
+    }
+}
+      </pre>
+      <ul class="mb-0">
+        <li><strong><code>tryLock()</code></strong> returns immediately; <strong><code>tryLock(timeout)</code></strong> gives up after a while; <strong><code>lockInterruptibly()</code></strong> lets a blocked thread be cancelled. These are the deadlock escape hatches a monitor lacks.</li>
+        <li><strong>Multiple <code>Condition</code>s</strong> let producers and consumers wait on different queues, so a <code>signal()</code> wakes the right kind of thread.</li>
+        <li><strong>Fairness</strong> (<code>new ReentrantLock(true)</code>) hands the lock to the longest waiter. It prevents starvation at a real throughput cost; the default is unfair and usually right.</li>
+        <li><strong>Always <code>unlock()</code> in <code>finally</code></strong>, and acquire <em>outside</em> the <code>try</code> — if <code>lock()</code> itself throws, there is nothing to release.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-locks-rw" aria-labelledby="tab-locks-rw" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+private final ReadWriteLock rw = new ReentrantReadWriteLock();
+
+int onHand(String sku) {
+    rw.readLock().lock();                      // many readers at once …
+    try { return stock.getOrDefault(sku, 0); } finally { rw.readLock().unlock(); }
+}
+void restock(String sku, int qty) {
+    rw.writeLock().lock();                     // … but a writer waits for all of them, and excludes everyone
+    try { stock.merge(sku, qty, Integer::sum); } finally { rw.writeLock().unlock(); }
+}
+
+// StampedLock: optimistic reads that pay nothing when no write intervened
+private final StampedLock sl = new StampedLock();
+int onHandOptimistic(String sku) {
+    long stamp = sl.tryOptimisticRead();       // no lock taken at all
+    int v = stock.getOrDefault(sku, 0);
+    if (!sl.validate(stamp)) {                 // a write happened meanwhile: fall back to a real read lock
+        stamp = sl.readLock();
+        try { v = stock.getOrDefault(sku, 0); } finally { sl.unlockRead(stamp); }
+    }
+    return v;
+}
+      </pre>
+      <ul class="mb-0">
+        <li>A <strong>read-write lock</strong> pays off only when reads vastly outnumber writes <em>and</em> the critical sections are long enough to amortise its heavier bookkeeping. For a short map lookup, a plain lock or a <code>ConcurrentHashMap</code> (§4) is faster.</li>
+        <li><strong><code>StampedLock</code></strong> is not reentrant and has no conditions. Its optimistic mode is the fastest read path in the JDK when writes are rare, and the easiest to misuse: read every field you need <em>before</em> <code>validate</code>, and never dereference something you read optimistically until it validates.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Deadlock</h3>
+
+  <p>Two threads, two locks, opposite order. Thread A holds BOLT-7's lock and wants NUT-3's; thread B holds NUT-3's and wants BOLT-7's. Neither can proceed, neither will release, and because monitors cannot be interrupted or timed out, the JVM will sit there until someone kills it. Four conditions must all hold for this to happen — <strong>mutual exclusion</strong>, <strong>hold-and-wait</strong>, <strong>no preemption</strong>, and a <strong>circular wait</strong> — and the cures each break one of them. This is what <code>jstack</code> prints when it finds the cycle:</p>
+
+  <pre data-code data-lang="plain" data-nobar>
+Found one Java-level deadlock:
+=============================
+"mover-A":
+  waiting to lock monitor 0x000001e7 (object 0x7b2c, a LockOrdering$Stock),
+  which is held by "mover-B"
+"mover-B":
+  waiting to lock monitor 0x000001e9 (object 0x7b30, a LockOrdering$Stock),
+  which is held by "mover-A"
+
+Java stack information for the threads listed above:
+"mover-A":
+        at LockOrdering.transferNaive(LockOrdering.java:31)
+        - waiting to lock &lt;0x7b2c&gt; (a LockOrdering$Stock)
+        - locked &lt;0x7b30&gt; (a LockOrdering$Stock)
+  </pre>
+
+  <h3 class="mt-8 mb-3">Worked example: two cures that cannot deadlock</h3>
+
+  <p>Two mover threads shift one unit at a time between BOLT-7 and NUT-3, 5,000 times each, in opposite directions — exactly the shape above. The naive version is deliberately absent: it would hang this page's build. Both versions here complete, and the latch's timed <code>await</code> is the proof: a deadlock would return <code>false</code>.</p>
+
+  <pre data-code data-lang="java" data-file="LockOrdering.java" data-verify="LockOrdering" data-hi="18,19,20,34,36">
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
+public class LockOrdering {
+
+    static final class Stock {
+        final String sku;
+        final ReentrantLock lock = new ReentrantLock();
+        int units;
+        Stock(String sku, int units) { this.sku = sku; this.units = units; }
+    }
+
+    /* Cure 1: every thread acquires in the same global order, here by SKU.
+       Two threads moving stock in opposite directions still lock BOLT-7
+       first and NUT-3 second, so neither can hold what the other needs. */
+    static void transferOrdered(Stock from, Stock to, int qty) {
+        Stock first = from.sku.compareTo(to.sku) < 0 ? from : to;
+        Stock second = first == from ? to : from;
+        first.lock.lock();
+        try {
+            second.lock.lock();
+            try {
+                if (from.units >= qty) { from.units -= qty; to.units += qty; }
+            } finally { second.lock.unlock(); }
+        } finally { first.lock.unlock(); }
+    }
+
+    /* Cure 2: no fixed order, but never wait forever. A thread that cannot
+       get the second lock within the timeout releases the first and retries,
+       so a would-be deadlock resolves itself. */
+    static boolean transferTimed(Stock from, Stock to, int qty) throws InterruptedException {
+        for (int attempt = 0; attempt < 1000; attempt++) {
+            if (from.lock.tryLock(10, TimeUnit.MILLISECONDS)) {
+                try {
+                    if (to.lock.tryLock(10, TimeUnit.MILLISECONDS)) {
+                        try {
+                            if (from.units >= qty) { from.units -= qty; to.units += qty; }
+                            return true;
+                        } finally { to.lock.unlock(); }
+                    }
+                } finally { from.lock.unlock(); }
+            }
+            Thread.onSpinWait();            // back off, then try again
+        }
+        return false;
+    }
+
+    interface Transfer { void run(Stock from, Stock to, int qty) throws InterruptedException; }
+
+    static void race(String label, Transfer transfer) throws InterruptedException {
+        Stock bolt = new Stock("BOLT-7", 10_000), nut = new Stock("NUT-3", 10_000);
+        int moves = 5_000;
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(2);
+        Runnable ab = () -> { try { start.await(); for (int i = 0; i < moves; i++) transfer.run(bolt, nut, 1); } catch (InterruptedException e) { } done.countDown(); };
+        Runnable ba = () -> { try { start.await(); for (int i = 0; i < moves; i++) transfer.run(nut, bolt, 1); } catch (InterruptedException e) { } done.countDown(); };
+        new Thread(ab, "mover-A").start();
+        new Thread(ba, "mover-B").start();
+        start.countDown();
+        boolean finished = done.await(30, TimeUnit.SECONDS);   // a real deadlock would time out here
+        System.out.println(label);
+        System.out.println("  transfers completed = " + finished);
+        System.out.println("  total units         = " + (bolt.units + nut.units) + " (expected 20000)");
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        race("ordered locks", LockOrdering::transferOrdered);
+        race("tryLock with timeout", (f, t, q) -> transferTimed(f, t, q));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="LockOrdering">
+ordered locks
+  transfers completed = true
+  total units         = 20000 (expected 20000)
+tryLock with timeout
+  transfers completed = true
+  total units         = 20000 (expected 20000)
+  </pre>
+
+  <p>The ordering cure breaks <em>circular wait</em>: with one global order there can be no cycle. The order must be something stable and total — a SKU string, a database id, a sequence number assigned at construction. <code>System.identityHashCode</code> is a popular choice that is <em>almost</em> right: two objects can share an identity hash, and then you need a tie-breaker lock. The timeout cure breaks <em>hold-and-wait</em>: a thread that cannot get everything it needs gives back what it has. It costs a retry loop and the possibility of <strong>livelock</strong> — both threads backing off and retrying in lockstep forever — which a small random delay before retrying removes. The third cure is the simplest and often the best: use one lock for both accounts, and accept the lost parallelism.</p>
+
+  <h3 class="mt-8 mb-3">Will it deadlock?</h3>
+
+  <div class="lm-card" data-sandbox="lock-ordering">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      Two threads, two locks
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Thread A acquires</span>
+        <select data-sb-a><option value="12" selected>BOLT-7 then NUT-3</option><option value="21">NUT-3 then BOLT-7</option></select>
+      </label>
+      <label class="lm-field">
+        <span>Thread B acquires</span>
+        <select data-sb-b><option value="21" selected>NUT-3 then BOLT-7</option><option value="12">BOLT-7 then NUT-3</option></select>
+      </label>
+      <label class="lm-field">
+        <span>Acquisition</span>
+        <select data-sb-mode><option value="lock" selected>lock() — wait forever</option><option value="try">tryLock(10 ms) — give up and retry</option></select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Starvation, livelock and granularity</h3>
+
+  <p><strong>Starvation</strong> is a thread that is runnable but never scheduled onto the lock — unfair locks under heavy contention can do this to a slow waiter; a fair <code>ReentrantLock</code> is the fix, at a cost. <strong>Livelock</strong> is the opposite of deadlock in appearance and identical in effect: every thread is busy, nothing progresses, because each keeps responding to the others. <strong>Granularity</strong> is the trade-off you make in choosing what a lock covers. One lock for the whole inventory is simple and serialises every picker; one lock per SKU is parallel and invites deadlock the moment an operation touches two. <strong>Lock striping</strong> — N locks, each covering a slice of the keys chosen by hash — is the middle path, and it is how <code>ConcurrentHashMap</code> was built before it moved to per-bin locking (§4).</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Lock gotchas</div>
+      <ul class="mb-0">
+        <li><strong><code>if (cond) wait();</code> is a bug.</strong> Spurious wakeups are permitted by the specification, and <code>notifyAll</code> wakes threads whose condition is still false. Always <code>while</code>.</li>
+        <li><strong><code>notify()</code> can lose a wakeup.</strong> With two kinds of waiter on one monitor, waking "one thread" may wake the wrong kind, which goes back to sleep, and the right one never hears. Use <code>notifyAll</code>, or a <code>ReentrantLock</code> with two <code>Condition</code>s.</li>
+        <li><strong>Calling out while holding a lock.</strong> Invoking a listener, a callback or an unknown object's method inside <code>synchronized</code> means its code runs under your lock. If it takes another lock, you have just created a lock-order dependency you cannot see. Copy what you need, release, then call.</li>
+        <li><strong>Locking on <code>this</code> in a public class</strong> publishes your lock. Any caller can <code>synchronized (yourObject)</code> and block you. Prefer a private lock object.</li>
+        <li><strong><code>synchronized</code> on a static method and on an instance method are different locks.</strong> One guards the <code>Class</code>, the other the instance. Code that assumes they exclude each other is wrong.</li>
+        <li><strong>A <code>ReentrantLock</code> without <code>finally</code></strong> is a lock that leaks on the first exception. Every thread that arrives afterwards blocks forever, and the dump shows them all waiting on a lock whose owner has long since died.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-locks-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A thread calls <code>wait()</code> inside a <code>synchronized</code> method. What happens to the monitor?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-locks-1"><span>It stays owned by the waiting thread until the method returns <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-locks-1"><span>It is released, and the thread resumes immediately after <code>wait()</code> when notified, without re-acquiring it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-locks-1"><span>It is released; when notified, the thread must re-acquire it before <code>wait()</code> returns <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-locks-1"><span><code>wait()</code> throws <code>IllegalMonitorStateException</code> inside a synchronized method <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>wait()</code> atomically releases the monitor and parks the thread in the wait set. After a notify, the thread moves to the entry set and competes for the monitor like any other; <code>wait()</code> returns only once it owns it again — which is why the code after <code>wait()</code> may safely touch shared state, and why it must re-check its condition.</p>
+        <p class="mb-0"><strong>A</strong> would make producer-consumer impossible: the producer could never enter. <strong>B</strong> describes a thread running shared-state code without the lock, which Java never permits here. <strong>D</strong> is backwards — that exception is thrown when you call <code>wait()</code> <em>without</em> owning the monitor.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-locks-2" data-answer="b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>Which of these remove the possibility of deadlock between two threads that each need locks L1 and L2? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>Making both locks fair <code>ReentrantLock</code>s <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Having every thread acquire L1 before L2, always <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>Replacing <code>synchronized</code> with <code>ReentrantLock.lock()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Acquiring the second lock with <code>tryLock(timeout)</code> and releasing the first on failure <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B and D.</strong> A global acquisition order makes a circular wait impossible; a timed acquisition that gives back what it holds removes hold-and-wait. Each breaks one of the four necessary conditions.</p>
+        <p class="mb-0"><strong>A</strong> changes who gets a lock first, not whether two threads can each hold one and want the other. <strong>C</strong> is a different API with the same blocking semantics: <code>lock()</code> waits forever exactly as a monitor does. The escape hatches are <code>tryLock</code> and <code>lockInterruptibly</code>, and only if you use them.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-locks-3" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>Integer stock = 500;</code> … <code>synchronized (stock) { stock--; }</code> — eight threads run this. What is wrong?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-locks-3"><span><code>stock--</code> rebinds the variable to a different <code>Integer</code>, so each thread locks a different object and the updates race <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-locks-3"><span>Nothing: boxing makes the lock atomic <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-locks-3"><span>It does not compile — you cannot synchronize on a wrapper type <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-locks-3"><span>It deadlocks, because <code>Integer</code> instances share one monitor <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> <code>Integer</code> is immutable: <code>stock--</code> unboxes, decrements and boxes a <em>new</em> object into the variable. The next thread to arrive synchronizes on that new object, not the one the current holder owns, so there is no mutual exclusion at all. Lock on a <code>final</code> field that is never reassigned, and keep the counter separate from the lock.</p>
+        <p class="mb-0"><strong>B</strong> is wishful: boxing adds allocation, not atomicity. <strong>C</strong> — it compiles; any object reference is a legal monitor. <strong>D</strong> — cached <code>Integer</code>s in −128…127 <em>are</em> shared instances, which is a different hazard (unrelated code contending on the same lock), but sharing a monitor causes contention, not deadlock.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="locks"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,276 @@
+<section class="lm-section" id="jvm-tuning" data-title="Heap sizing, JVM flags and reading GC logs" data-num="9">
+  <p class="lm-eyebrow">Section 9</p>
+  <h2 class="mb-4">Heap sizing, JVM flags and reading GC logs</h2>
+
+  <p>Section 8 explained what the collector does. This section is about the knobs on the outside of it, and about the evidence the JVM leaves behind when something is wrong. Nothing here is a verified program: every number depends on the machine, the container and the workload, which is precisely why you have to learn to read the JVM's own output rather than trust a rule of thumb.</p>
+
+  <p>The mental model to hold: the JVM process is <strong>bigger than its heap</strong>. The heap is the part <code>-Xmx</code> bounds. Around it sit Metaspace (class metadata), the code cache (JIT output), thread stacks (one per thread), GC bookkeeping, direct byte buffers and whatever native libraries allocate. Most production incidents filed as "the JVM ran out of memory" are one of those other regions, or the container limit, not the heap.</p>
+
+  <h3 class="mt-8 mb-3">The flags that matter</h3>
+
+  <p>There are hundreds of <code>-XX</code> flags. These are the ones you will actually set, in roughly the order you will reach for them.</p>
+
+  <pre data-code data-lang="bash" data-file="start.sh">
+# Heap bounds. Set both to the same value in production so the heap never
+# resizes under load; the JVM then skips the shrink/grow cycles.
+java -Xms2g -Xmx2g ...
+
+# In a container, size the heap as a share of the cgroup limit instead.
+# The JVM reads the limit itself (it has since JDK 10). Default is 25%.
+java -XX:MaxRAMPercentage=75.0 ...
+
+# Pick the collector explicitly rather than relying on ergonomics.
+java -XX:+UseG1GC ...                 # the default on server-class machines
+java -XX:+UseZGC -XX:+ZGenerational ...   # sub-millisecond pauses, more CPU and memory
+java -XX:+UseSerialGC ...             # one core, tiny heap: a sidecar or CLI tool
+
+# A goal, not a guarantee: G1 sizes the young generation to try to meet it.
+java -XX:MaxGCPauseMillis=100 ...
+
+# Metaspace starts small and grows; set the initial size to avoid early full GCs
+# in apps that load many classes (anything with a framework).
+java -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m ...
+
+# Thread stack size. 1 MB is the 64-bit default; thousands of platform threads
+# add up. Virtual threads (§7) do not use this.
+java -Xss512k ...
+
+# Always on in production: the one artefact you need after an OOM.
+java -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/dumps ...
+
+# Unified logging. Cheap enough to leave on permanently.
+java -Xlog:gc*:file=/var/log/app/gc.log:time,uptime:filecount=5,filesize=20m ...
+
+# What did ergonomics actually choose? Ask, do not guess.
+java -XX:+PrintFlagsFinal -version | grep -E 'MaxHeapSize|UseG1GC|UseZGC|MaxRAMPercentage'
+  </pre>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Ergonomics, and why the defaults surprise people</div>
+      <p class="mb-0">With no flags at all, the JVM picks a collector and a heap size from what it can see: G1 if there are at least two CPUs and 2 GB, Serial otherwise; a maximum heap of <strong>one quarter</strong> of available memory. On a developer laptop that is 8 GB of heap and nobody notices. In a 1 GB container it is 256 MB, and the first real load test fails with an <code>OutOfMemoryError</code> that goes away when someone "adds memory" — by which they mean raises the container limit, which raises the 25%. The fix was always <code>MaxRAMPercentage</code> or an explicit <code>-Xmx</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Worked example: reading a GC log</h3>
+
+  <p>This is the output of <code>-Xlog:gc</code> from a G1 collector on JDK 21 — the <em>default</em> log level, one line per collection. It is the first thing to look at when a service is slow, and the format is stable enough to be worth memorising.</p>
+
+  <pre data-output data-label="Sample GC log (-Xlog:gc, G1, JDK 21)">
+[0.012s][info][gc] Using G1
+[0.351s][info][gc] GC(0) Pause Young (Normal) (G1 Evacuation Pause) 24M-&gt;4M(256M) 3.412ms
+[1.204s][info][gc] GC(1) Pause Young (Normal) (G1 Evacuation Pause) 100M-&gt;12M(256M) 5.118ms
+[2.980s][info][gc] GC(2) Pause Young (Concurrent Start) (G1 Humongous Allocation) 180M-&gt;60M(256M) 7.905ms
+[2.981s][info][gc] GC(3) Concurrent Mark Cycle
+[3.040s][info][gc] GC(3) Pause Remark 72M-&gt;70M(256M) 1.233ms
+[3.071s][info][gc] GC(3) Pause Cleanup 74M-&gt;74M(256M) 0.182ms
+[3.072s][info][gc] GC(3) Concurrent Mark Cycle 91.014ms
+[3.500s][info][gc] GC(4) Pause Young (Prepare Mixed) (G1 Evacuation Pause) 150M-&gt;64M(256M) 6.200ms
+[3.900s][info][gc] GC(5) Pause Young (Mixed) (G1 Evacuation Pause) 140M-&gt;40M(256M) 9.871ms
+[9.414s][info][gc] GC(6) Pause Full (G1 Compaction Pause) 250M-&gt;200M(256M) 212.556ms
+  </pre>
+
+  <p>Take line <code>GC(1)</code> field by field. <code>[1.204s]</code> is uptime when the event was logged. <code>GC(1)</code> is the collection's sequence number; every line about the same collection shares it, which is how the four <code>GC(3)</code> lines belong together. <code>Pause Young</code> is the <em>kind</em> of collection — the whole application was stopped and only the young generation was collected. <code>(Normal)</code> is G1's sub-type; <code>(G1 Evacuation Pause)</code> is the cause, here simply "the young generation filled up". Then the part you read first: <code>100M-&gt;12M(256M)</code> — heap occupancy <strong>before</strong>, occupancy <strong>after</strong>, and the <strong>total committed heap</strong> in parentheses. Finally <code>5.118ms</code>, the pause duration, which is what your latency percentiles feel.</p>
+
+  <p>Now read the <em>shape</em> rather than the lines. Young pauses drop occupancy from ~100 M to ~12 M each time: most objects die young, exactly as §8 predicted. <code>GC(2)</code> was triggered by a <em>humongous allocation</em> — an object bigger than half a G1 region, almost always a large array — and it also started a concurrent mark cycle, which ran for 91 ms <em>alongside</em> the application with only two short pauses (Remark, Cleanup). The mark found garbage in the old generation, so the next young collections became <em>Mixed</em>, reclaiming old regions too. And then <code>GC(6)</code>: a <strong>Pause Full</strong>, 212 ms, from 250 M to only 200 M. That line is the problem. Full collections mean G1 could not keep up concurrently; a full collection that frees little means the live set is genuinely ~200 M in a 256 M heap, and the next one will come sooner. Either the heap is too small for the workload or something is being retained that should not be.</p>
+
+  <h3 class="mt-8 mb-3">Symptoms, causes, and what to check first</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Memory and GC symptoms with their likely cause and first diagnostic step</caption>
+      <thead><tr><th scope="col">You see</th><th scope="col">Most likely cause</th><th scope="col">Check first</th></tr></thead>
+      <tbody>
+        <tr><td>Young pauses growing from 5 ms to 50 ms+</td><td>Large live set surviving each young collection — survivor spaces overflowing, premature promotion</td><td><code>-Xlog:gc+age</code> for the tenuring distribution; is the young generation too small for the allocation rate?</td></tr>
+        <tr><td>Old generation higher after <em>every</em> full GC</td><td>A leak: something holds references forever (a static <code>Map</code> cache, a listener list, a <code>ThreadLocal</code> in a pool)</td><td>Heap dump, then the dominator tree (below). Compare two dumps minutes apart.</td></tr>
+        <tr><td><code>OutOfMemoryError: Metaspace</code></td><td>Classes loaded and never unloaded: a classloader leak (§10), or a framework generating proxies per request</td><td><code>jcmd &lt;pid&gt; VM.classloader_stats</code>; count loaded classes over time with <code>-Xlog:class+load</code></td></tr>
+        <tr><td><code>OutOfMemoryError: GC overhead limit exceeded</code></td><td>More than 98% of time in GC recovering under 2% of heap — the heap is effectively full of live data</td><td>It is a leak or an undersized heap; the dump taken at the OOM tells you which</td></tr>
+        <tr><td><code>OutOfMemoryError: unable to create native thread</code></td><td>Not heap at all: the OS refused another thread — <code>ulimit -u</code>, container pid limit, or thread stacks exhausting the memory limit</td><td><code>jcmd &lt;pid&gt; Thread.print | grep -c tid</code>; who is creating threads without a pool?</td></tr>
+        <tr><td>Container restarts with exit code 137, no Java error</td><td>Kernel OOM killer: the <em>process</em> exceeded the cgroup limit while the heap was still under <code>-Xmx</code></td><td>Heap + non-heap + stacks must fit the limit — use the sandbox below; <code>jcmd &lt;pid&gt; VM.native_memory summary</code> with <code>-XX:NativeMemoryTracking=summary</code></td></tr>
+        <tr><td>Periodic multi-second pauses, heap mostly empty</td><td>Something other than GC: safepoint stalls, a huge thread dump, swap, or the OS paging a file-backed region</td><td><code>-Xlog:safepoint</code>; check <code>vmstat</code> for swap activity</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Will it fit in the container?</h3>
+
+  <p>The question every deployment has to answer and few do explicitly. The JVM sizes its heap from the cgroup limit, but the heap is not the whole process, and the kernel counts the whole process.</p>
+
+  <div class="lm-card" data-sandbox="heap-sizer">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 20v-6"/></svg>
+      Heap + non-heap + thread stacks against a memory limit
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Container memory limit</span>
+        <select data-sb-limit>
+          <option value="512">512 MB</option>
+          <option value="1024" selected>1 GB</option>
+          <option value="2048">2 GB</option>
+          <option value="4096">4 GB</option>
+          <option value="8192">8 GB</option>
+          <option value="16384">16 GB</option>
+        </select>
+      </label>
+      <label class="lm-field grow">
+        <span>MaxRAMPercentage <span class="lm-readout" data-sb-pctout>75%</span></span>
+        <input type="range" data-sb-pct min="10" max="95" value="75" step="5">
+      </label>
+      <label class="lm-field grow">
+        <span>Non-heap estimate <span class="lm-readout" data-sb-nonheapout>256 MB</span></span>
+        <input type="range" data-sb-nonheap min="64" max="1024" value="256" step="32">
+      </label>
+      <label class="lm-field grow">
+        <span>Platform threads <span class="lm-readout" data-sb-threadsout>200</span></span>
+        <input type="range" data-sb-threads min="10" max="2000" value="200" step="10">
+      </label>
+      <label class="lm-field">
+        <span>Stack size (-Xss)</span>
+        <select data-sb-stack>
+          <option value="256">256 KB</option>
+          <option value="512">512 KB</option>
+          <option value="1024" selected>1 MB (default)</option>
+        </select>
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <p>The percentage form and the explicit form give the same heap; the explicit form is better when something else shares the container's memory — a logging sidecar, a cache process — because then "75% of the limit" is 75% of a number that no longer describes what the JVM may use. State what you mean in megabytes.</p>
+
+  <h3 class="mt-8 mb-3">Starting points by workload</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Tuning starting points by workload">
+      <button type="button" class="lm-tab" role="tab" id="tab-jvm-tuning-svc" aria-controls="panel-jvm-tuning-svc" aria-selected="true" tabindex="0">Small service</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-jvm-tuning-batch" aria-controls="panel-jvm-tuning-batch" aria-selected="false" tabindex="-1">Batch job</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-jvm-tuning-lat" aria-controls="panel-jvm-tuning-lat" aria-selected="false" tabindex="-1">Latency-sensitive</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jvm-tuning-svc" aria-labelledby="tab-jvm-tuning-svc" tabindex="0">
+      <pre data-code data-lang="bash" data-nobar>
+# A request/response service in a 2 GB container, moderate allocation rate.
+java -XX:MaxRAMPercentage=70 -XX:+UseG1GC -XX:MaxGCPauseMillis=100 \
+     -XX:+HeapDumpOnOutOfMemoryError -Xlog:gc*:file=gc.log:time,uptime \
+     -jar inventory.jar
+      </pre>
+      <p class="mb-0">G1 is the right default: it balances throughput and pause time and needs almost no tuning. Leave 30% for non-heap and the unexpected. Do not set <code>-Xmn</code> or survivor ratios — G1 sizes those itself, and fixing them removes its ability to meet the pause goal.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jvm-tuning-batch" aria-labelledby="tab-jvm-tuning-batch" tabindex="0" hidden>
+      <pre data-code data-lang="bash" data-nobar>
+# A nightly re-pricing job: pauses are irrelevant, total runtime is everything.
+java -Xms6g -Xmx6g -XX:+UseParallelGC -XX:ParallelGCThreads=8 \
+     -Xlog:gc:file=gc.log -cp inventory.jar com.acme.Reprice
+      </pre>
+      <p class="mb-0">The Parallel collector has the highest throughput: it stops the world and uses every core to collect. A 200 ms pause in a job that runs for twenty minutes costs nothing. Fix <code>-Xms</code> to <code>-Xmx</code> so no time is spent growing the heap in the first minute.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-jvm-tuning-lat" aria-labelledby="tab-jvm-tuning-lat" tabindex="0" hidden>
+      <pre data-code data-lang="bash" data-nobar>
+# A reservation API with a 20 ms p99 target and a large live set.
+java -Xms8g -Xmx8g -XX:+UseZGC -XX:+ZGenerational \
+     -XX:+AlwaysPreTouch -XX:+HeapDumpOnOutOfMemoryError \
+     -Xlog:gc*:file=gc.log:time,uptime -jar reservations.jar
+      </pre>
+      <p class="mb-0">ZGC keeps pauses under a millisecond regardless of heap size, paying with more CPU for its concurrent work and more memory headroom (it needs room to allocate <em>while</em> collecting). <code>AlwaysPreTouch</code> commits and touches the whole heap at start-up so the first requests do not pay page faults. Budget 20–30% more memory than the live set.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">When it is already broken: dumps and <code>jcmd</code></h3>
+
+  <p>A heap dump is a snapshot of every object and every reference. It is the only tool that answers "what is holding this memory" rather than "how much memory is held". The workflow:</p>
+
+  <pre data-code data-lang="bash" data-nobar>
+jcmd 12345 GC.heap_dump /var/dumps/inv.hprof     # live objects only, after a full GC
+jmap -histo:live 12345 | head -20                # quick look: instance counts by class
+# Open inv.hprof in Eclipse MAT (or VisualVM) and go straight to the
+# Dominator Tree: it ranks objects by the memory that would be freed if that
+# one reference were cut. A leak is a single entry retaining far more than its
+# own size — a HashMap whose "retained heap" is 1.4 GB.
+  </pre>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Useful jcmd commands</caption>
+      <thead><tr><th scope="col"><code>jcmd &lt;pid&gt; …</code></th><th scope="col">Tells you</th></tr></thead>
+      <tbody>
+        <tr><td><code>VM.flags</code></td><td>Every flag that differs from the default — what this JVM is <em>actually</em> running with</td></tr>
+        <tr><td><code>GC.heap_info</code></td><td>Generation sizes and occupancy right now, without a dump</td></tr>
+        <tr><td><code>Thread.print</code></td><td>A thread dump: every thread's state and stack. Three of these ten seconds apart find most deadlocks and stuck pools (§3, §5)</td></tr>
+        <tr><td><code>VM.native_memory summary</code></td><td>Where non-heap memory went, by region — needs <code>-XX:NativeMemoryTracking=summary</code> at start-up</td></tr>
+        <tr><td><code>GC.class_histogram</code></td><td>Live instance counts by class, cheaper than a dump</td></tr>
+        <tr><td><code>JFR.start duration=60s filename=rec.jfr</code></td><td>Start a flight recording on a running JVM (§13)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Tuning gotchas</div>
+      <ul class="mb-0">
+        <li><strong>A bigger heap is not faster.</strong> It delays collections and makes each full collection longer. If the live set is 300 MB, a 16 GB heap means a very rare but very long pause. Size for the live set plus allocation headroom, then let the collector work.</li>
+        <li><strong><code>System.gc()</code> in application code</strong> forces a full collection with G1 and Parallel. It is almost always a leftover from a benchmark. <code>-XX:+DisableExplicitGC</code> exists for exactly that reason.</li>
+        <li><strong>Copying flags from a blog post</strong> written for JDK 8 (<code>-XX:+UseConcMarkSweepGC</code>, <code>PermSize</code>) makes JDK 21 refuse to start or silently ignore them. Check <code>PrintFlagsFinal</code> after any change.</li>
+        <li><strong>Metaspace is not bounded by default.</strong> A classloader leak grows it until the container dies. Set <code>MaxMetaspaceSize</code> so it fails as a Java error with a dump instead.</li>
+        <li><strong>GC logs are cheap; the absence of them is expensive.</strong> There is no way to reconstruct what the collector did yesterday. Leave <code>-Xlog:gc*</code> on with rotation.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-jvm-tuning-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A service runs with no JVM flags in a 1 GB container and dies with <code>OutOfMemoryError: Java heap space</code> under load. On a 16 GB laptop the same load runs fine. What is the most likely explanation?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-jvm-tuning-1"><span>The container's CPU limit slows the collector so it cannot keep up <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-jvm-tuning-1"><span>The container JVM ignores cgroup limits and sized the heap from host memory <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-jvm-tuning-1"><span>Ergonomics gave the container JVM a 256 MB heap (25% of 1 GB) while the laptop got 4 GB <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-jvm-tuning-1"><span>The container image uses a JRE without the G1 collector <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The default maximum heap is one quarter of what the JVM can see. In the container that is 256 MB; on the laptop, 4 GB. Same code, same load, sixteen times the heap. Set <code>-XX:MaxRAMPercentage</code> or <code>-Xmx</code>.</p>
+        <p class="mb-0"><strong>A</strong> would show as long pauses or <code>GC overhead limit exceeded</code>, not a plain heap-space OOM at a small size. <strong>B</strong> is backwards — the JVM has honoured cgroup limits since JDK 10, which is <em>why</em> the heap is small. <strong>D</strong> is invented; collectors are part of every JDK and JRE build.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-jvm-tuning-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>In the log line <code>GC(5) Pause Young (Mixed) (G1 Evacuation Pause) 140M-&gt;40M(256M) 9.871ms</code>, what does <code>(256M)</code> mean?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-jvm-tuning-2"><span>The amount of memory freed by this collection <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-jvm-tuning-2"><span>The total committed heap at the time of the collection <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-jvm-tuning-2"><span>The size of the young generation <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-jvm-tuning-2"><span>The value of <code>-Xmx</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>before-&gt;after(total)</code>: occupancy went from 140 M to 40 M in a heap that currently has 256 M committed. The parenthesised number can grow between lines as the JVM expands the heap towards <code>-Xmx</code>.</p>
+        <p class="mb-0"><strong>A</strong> is <code>140 − 40 = 100M</code>, computed, not printed. <strong>C</strong> is not shown at this log level (<code>-Xlog:gc+heap</code> prints generation sizes). <strong>D</strong> is only equal to the committed size once the heap has grown to its maximum, or when <code>-Xms</code> equals <code>-Xmx</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-jvm-tuning-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>A container is restarted by the orchestrator every few hours with exit code 137. The JVM's own logs show no error and the heap never exceeded 70% of <code>-Xmx</code>. Which statements are correct? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The kernel killed the process because total process memory exceeded the cgroup limit <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Raising <code>-Xmx</code> will give the JVM room to avoid the failure <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>-XX:+HeapDumpOnOutOfMemoryError</code> would have produced a dump explaining it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Native memory tracking and the thread count are the next things to look at <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> Exit 137 is SIGKILL from the OOM killer: the whole process — heap, metaspace, code cache, thread stacks, direct buffers — outgrew the limit while the heap itself was fine. Non-heap is where to look, so <code>VM.native_memory</code> and the thread count are the right next steps.</p>
+        <p class="mb-0"><strong>B</strong> makes it worse: a larger heap ceiling leaves <em>less</em> room for everything else under the same limit. <strong>C</strong> is wrong because no <code>OutOfMemoryError</code> was ever thrown — the JVM never got the chance; the kernel killed it mid-instruction.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="jvm-tuning"> Mark this section complete
+  </label>
+</section>

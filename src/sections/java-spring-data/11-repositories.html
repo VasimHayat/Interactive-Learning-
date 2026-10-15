@@ -1,0 +1,434 @@
+<section class="lm-section" id="repositories" data-title="Repositories: from CrudRepository to JpaRepository" data-num="2">
+  <p class="lm-eyebrow">Section 2</p>
+  <h2 class="mb-4">Repositories: from CrudRepository to JpaRepository</h2>
+
+  <p>In §1 the repository was an interface with no implementation, and yet <code>repo.save</code> inserted a row. Somebody wrote that body. At startup Spring Data finds every interface that extends <code>Repository</code>, and for each one builds a JDK proxy whose method calls are routed to one of three places: a <strong>base implementation</strong> (<code>SimpleJpaRepository</code>, which holds an <code>EntityManager</code> and implements <code>save</code>, <code>findById</code>, <code>delete</code> and the rest), a <strong>query method</strong> generated from the method's name or annotation (§3, §4), or a <strong>fragment</strong> you implement by hand. Knowing which of the three is behind a call is most of what there is to know about repositories — because the base implementation is ordinary JPA code, and every one of its decisions is something the JPA module already taught.</p>
+
+  <p>The interfaces form a ladder. You pick the rung whose methods you want to expose, not the most powerful one available:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Spring Data repository interfaces and what each adds</caption>
+      <thead><tr><th scope="col">Interface</th><th scope="col">Adds</th><th scope="col">Use it when</th></tr></thead>
+      <tbody>
+        <tr><td><code>Repository&lt;T, ID&gt;</code></td><td>nothing — a marker</td><td>you want to expose only the query methods you declare, e.g. a read-only reference-data repository</td></tr>
+        <tr><td><code>CrudRepository</code> / <code>ListCrudRepository</code></td><td><code>save</code>, <code>findById</code>, <code>findAll</code>, <code>count</code>, <code>delete*</code>, <code>existsById</code> (the <code>List</code> variant returns <code>List</code> instead of <code>Iterable</code>)</td><td>the usual aggregate root</td></tr>
+        <tr><td><code>PagingAndSortingRepository</code> / <code>List…</code></td><td><code>findAll(Sort)</code>, <code>findAll(Pageable)</code></td><td>you page or sort the whole table (§7)</td></tr>
+        <tr><td><code>JpaRepository</code></td><td><code>flush</code>, <code>saveAndFlush</code>, <code>saveAllAndFlush</code>, <code>getReferenceById</code>, <code>deleteAllInBatch</code>, <code>deleteAllByIdInBatch</code>, plus Query by Example</td><td>you need JPA-specific operations — which in practice is most of the time</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Every method you inherit is a method a caller can use. A repository for an append-only audit log that extends <code>JpaRepository</code> has a <code>deleteAllInBatch()</code> on it, whether you meant to offer one or not. Narrowing the interface is cheap API design.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: what each method actually sends</h3>
+
+  <p>One application, two entities, and a runner that calls the repository methods people most often misjudge. <code>Product</code> has a generated id and a <code>@Version</code>; <code>Tag</code> has an <em>assigned</em> <code>String</code> id and implements <code>Persistable</code>. The runner is <em>not</em> transactional, so unless a <code>TransactionTemplate</code> wraps a block, every repository call is its own transaction — a detail that explains several lines of the output.</p>
+
+  <pre data-code data-lang="java" data-file="Repositories.java" data-verify="Repositories" data-package="lm.repos" data-hi="25,41,48,49,59,103,105">
+package lm.repos;
+
+import jakarta.persistence.*;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.repository.NoRepositoryBean;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class Repositories {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Version Long version;                                   // save() looks at this first
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int priceInCents;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        static Product detached(Long id, Long version, String sku, int price) {   // a row we hold without a context
+            Product p = new Product(sku, price); p.id = id; p.version = version; return p;
+        }
+        String sku() { return sku; }
+        @Override public String toString() { return "Product[" + id + ", v" + version + ", " + sku + ", " + priceInCents + "c]"; }
+    }
+
+    /* An assigned id gives save() nothing to go on: id is never null, there is
+       no @Version. Persistable lets the entity say whether it is new. */
+    @Entity(name = "Tag")
+    @Table(name = "tag")
+    public static class Tag implements Persistable<String> {
+        @Id String code;
+        String label;
+        @Transient private boolean isNew = true;
+        protected Tag() {}
+        Tag(String code, String label) { this.code = code; this.label = label; }
+        @Override public String getId() { return code; }
+        @Override public boolean isNew() { return isNew; }
+        @PostPersist @PostLoad void markNotNew() { isNew = false; }
+    }
+
+    @NoRepositoryBean
+    public interface BaseRepository<T, ID> extends JpaRepository<T, ID> {   // shared signatures, no bean of its own
+        List<T> findAllSortedById();
+    }
+
+    public interface ProductRepositoryCustom { List<Product> cheaperThan(int cents); }
+
+    public static class ProductRepositoryCustomImpl implements ProductRepositoryCustom {   // a fragment: hand-written body
+        @PersistenceContext EntityManager em;
+        @Override public List<Product> cheaperThan(int cents) {
+            return em.createQuery("select p from Product p where p.priceInCents < :c order by p.sku", Product.class)
+                     .setParameter("c", cents).getResultList();
+        }
+    }
+
+    public interface ProductRepository extends JpaRepository<Product, Long>, ProductRepositoryCustom {}
+    public interface TagRepository extends JpaRepository<Tag, String> {}
+
+    @Bean
+    CommandLineRunner demo(ProductRepository products, TagRepository tags, TransactionTemplate tx) {
+        return args -> {
+            System.out.println("-- the hierarchy --");
+            System.out.println("JpaRepository extends " + Arrays.stream(JpaRepository.class.getInterfaces())
+                    .map(Class::getSimpleName).sorted().toList());
+
+            System.out.println("-- save: new entity (id null) --");
+            Product bolt = products.save(new Product("BOLT-7", 80));
+            System.out.println("saved " + bolt);
+
+            System.out.println("-- save: detached entity (id and version set) --");
+            Product copy = Product.detached(bolt.id, bolt.version, "BOLT-7", 85);
+            Product merged = products.save(copy);
+            System.out.println("merged == copy: " + (merged == copy) + ", merged = " + merged);
+
+            System.out.println("-- save: looks detached, but the row does not exist --");
+            try {
+                products.save(Product.detached(404L, 0L, "GHOST-1", 1));
+            } catch (RuntimeException e) {
+                System.out.println("threw " + e.getClass().getSimpleName() + " caused by " + rootCause(e).getClass().getSimpleName());
+            }
+
+            System.out.println("-- save: Persistable decides --");
+            Tag fast = tags.save(new Tag("FAST", "fast mover"));
+            fast.label = "fast-moving";
+            tags.save(fast);
+            System.out.println("tags = " + tags.count());
+
+            System.out.println("-- reads --");
+            System.out.println("findById       = " + products.findById(bolt.id).map(Product::toString).orElse("none"));
+            System.out.println("findById(404)  = " + products.findById(404L).isPresent());
+            tx.executeWithoutResult(status -> {
+                Product ref = products.getReferenceById(bolt.id);
+                System.out.println("reference type = " + (ref.getClass() == Product.class ? "Product" : "a Hibernate proxy") + " (no select yet)");
+                System.out.println("field read     = " + ref.sku + " (a field read bypasses the proxy)");
+                System.out.println("getter read    = " + ref.sku());
+            });
+            System.out.println("existsById     = " + products.existsById(bolt.id));
+
+            System.out.println("-- saveAndFlush inside a transaction --");
+            tx.executeWithoutResult(status -> {
+                products.save(new Product("NUT-3", 25));
+                System.out.println("after save: nothing sent yet");
+                products.saveAndFlush(new Product("CAM-9", 2300));
+                System.out.println("after saveAndFlush: both inserts sent");
+            });
+
+            System.out.println("-- the custom fragment --");
+            System.out.println("cheaperThan(100) = " + products.cheaperThan(100));
+
+            System.out.println("-- deletes --");
+            products.deleteById(bolt.id);
+            System.out.println("remaining = " + products.count());
+            products.deleteAllInBatch();
+            System.out.println("remaining = " + products.count());
+        };
+    }
+
+    static Throwable rootCause(Throwable t) { while (t.getCause() != null) t = t.getCause(); return t; }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(Repositories.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:repos;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Repositories">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, version bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade 
+Hibernate: drop table if exists tag cascade 
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (price_in_cents integer not null, id bigint not null, version bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: create table tag (code varchar(255) not null, label varchar(255), primary key (code))
+-- the hierarchy --
+JpaRepository extends [ListCrudRepository, ListPagingAndSortingRepository, QueryByExampleExecutor]
+-- save: new entity (id null) --
+Hibernate: select next value for product_seq
+Hibernate: insert into product (price_in_cents,sku,version,id) values (?,?,?,?)
+saved Product[1, v0, BOLT-7, 80c]
+-- save: detached entity (id and version set) --
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+Hibernate: update product set price_in_cents=?,sku=?,version=? where id=? and version=?
+merged == copy: false, merged = Product[1, v1, BOLT-7, 85c]
+-- save: looks detached, but the row does not exist --
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+threw ObjectOptimisticLockingFailureException caused by StaleObjectStateException
+-- save: Persistable decides --
+Hibernate: insert into tag (label,code) values (?,?)
+Hibernate: select t1_0.code,t1_0.label from tag t1_0 where t1_0.code=?
+Hibernate: update tag set label=? where code=?
+Hibernate: select count(*) from tag t1_0
+tags = 1
+-- reads --
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+findById       = Product[1, v1, BOLT-7, 85c]
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+findById(404)  = false
+reference type = a Hibernate proxy (no select yet)
+field read     = null (a field read bypasses the proxy)
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+getter read    = BOLT-7
+Hibernate: select count(*) from product p1_0 where p1_0.id=?
+existsById     = true
+-- saveAndFlush inside a transaction --
+Hibernate: select next value for product_seq
+after save: nothing sent yet
+Hibernate: insert into product (price_in_cents,sku,version,id) values (?,?,?,?)
+Hibernate: insert into product (price_in_cents,sku,version,id) values (?,?,?,?)
+after saveAndFlush: both inserts sent
+-- the custom fragment --
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.price_in_cents<? order by p1_0.sku
+cheaperThan(100) = [Product[1, v1, BOLT-7, 85c], Product[2, v0, NUT-3, 25c]]
+-- deletes --
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku,p1_0.version from product p1_0 where p1_0.id=?
+Hibernate: delete from product where id=? and version=?
+Hibernate: select count(*) from product p1_0
+remaining = 2
+Hibernate: delete from product p1_0
+Hibernate: select count(*) from product p1_0
+remaining = 0
+Hibernate: drop table if exists product cascade 
+Hibernate: drop table if exists tag cascade 
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>Read it block by block:</p>
+  <ul class="max-w-prose">
+    <li><strong>The hierarchy.</strong> <code>JpaRepository</code> extends <code>ListCrudRepository</code>, <code>ListPagingAndSortingRepository</code> and <code>QueryByExampleExecutor</code> (§9) — the table above, read off the class itself.</li>
+    <li><strong>A new entity: sequence call, insert, no select.</strong> <code>save</code> asked "is this entity new?", decided yes, and called <code>em.persist</code>. The insert appears straight away rather than at some later flush because the call was its own transaction, and the transaction committed as <code>save</code> returned. The returned object is the same instance you passed in, now with <code>id = 1</code> and <code>version = 0</code>.</li>
+    <li><strong>A detached copy: select, then update.</strong> The copy carried an id and a version, so <code>save</code> decided it was <em>not</em> new and called <code>em.merge</code> — which loads the row (the select), copies your state onto the managed instance, and the commit's dirty check writes it (the update, guarded by <code>and version=?</code>). Note <code>merged == copy: false</code>: <code>merge</code> returns a different, managed instance, exactly as JPA §3 showed. The version is now <code>1</code> on the returned object; the <code>copy</code> you still hold says <code>0</code>.</li>
+    <li><strong>A copy whose row does not exist.</strong> Same decision — id and version set, so merge — but the select finds nothing. Because the entity is versioned, Hibernate does not treat the missing row as "insert it": it concludes another transaction deleted it and throws <code>StaleObjectStateException</code>, which Spring translates into its own <code>ObjectOptimisticLockingFailureException</code> (§10 covers the translation). Without <code>@Version</code>, the same call would have inserted a new row with whatever id the copy carried — usually not what anybody wanted.</li>
+    <li><strong><code>Persistable</code> decides for <code>Tag</code>.</strong> An assigned id is never <code>null</code>, and <code>Tag</code> has no version, so neither of the usual signals can tell a new tag from an existing one. Implementing <code>Persistable</code> hands the decision to the entity: <code>isNew()</code> starts <code>true</code>, so the first <code>save</code> is a plain insert with no select. A <code>@PostPersist</code>/<code>@PostLoad</code> callback flips the flag, so the second <code>save</code> merges — select, then update.</li>
+    <li><strong><code>findById</code> always selects</strong>, and returns <code>Optional</code>; a missing id is an empty <code>Optional</code>, not an exception. Each call ran in a separate transaction with a fresh persistence context, so the second read of the same id hit the database again.</li>
+    <li><strong><code>getReferenceById</code> sent nothing.</strong> It returned a Hibernate proxy — a generated subclass of <code>Product</code> — without touching the database. Then the surprise: reading the <em>field</em> <code>ref.sku</code> printed <code>null</code>. The proxy is a subclass instance whose own fields are never populated; only <em>method</em> calls are intercepted and forwarded to the real, lazily loaded entity. The getter <code>ref.sku()</code> triggered the select and returned <code>BOLT-7</code>. The block needed a <code>TransactionTemplate</code>: outside a transaction the persistence context would be gone before the getter ran (JPA §5).</li>
+    <li><strong><code>existsById</code> is a <code>count(*)</code></strong>, never a full row load.</li>
+    <li><strong><code>save</code> inside a transaction defers the insert.</strong> Within the template, <code>save(NUT-3)</code> fetched an id (the sequence call) but sent no insert — persist only queues the action. <code>saveAndFlush(CAM-9)</code> then flushed the whole persistence context, and <em>both</em> inserts went out. CAM-9 needed no sequence call of its own: the block of fifty fetched for NUT-3 covered it.</li>
+    <li><strong>The fragment.</strong> <code>cheaperThan</code> is a method no naming convention could produce. <code>ProductRepositoryCustomImpl</code> holds its body; Spring Data found it by the interface name plus the <code>Impl</code> postfix and wired it into the proxy, so callers see one repository.</li>
+    <li><strong>Two deletes, two shapes.</strong> <code>deleteById</code> loads the entity (select) and removes it through the persistence context, so the delete carries <code>and version=?</code> and any cascades, orphan removal and <code>@PreRemove</code> callbacks run. <code>deleteAllInBatch</code> is a single bulk <code>delete from product</code>: no select, no version check, no cascades, no callbacks.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch save decide</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of how SimpleJpaRepository.save chooses between persist and merge">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">persist or merge?</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">SimpleJpaRepository.save, simplified</div>
+        <div data-stepper-code data-for="save-decision"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">The entity and the decision</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="save-decision">
+    {
+      "lang": "java",
+      "code": "public <S extends T> S save(S entity) {\n    if (entityInformation.isNew(entity)) {\n        em.persist(entity);\n        return entity;\n    }\n    return em.merge(entity);\n}\n\n// isNew(entity), in order:\n//   1. implements Persistable?           -> entity.isNew()\n//   2. @Version of a wrapper type?       -> version == null\n//   3. otherwise the id                   -> id == null (or 0 for a primitive id)",
+      "steps": [
+        { "line": 1, "vars": { "entity": "new Product(\"BOLT-7\", 80)", "id": "null", "version": "null" }, "out": "",
+          "note": "save is the only write method on the repository. It has to choose between JPA's persist (for new entities) and merge (for existing ones), and the entity itself carries the only evidence." },
+        { "line": 11, "vars": { "entity": "Product BOLT-7", "Persistable?": "no", "@Version": "Long version = null", "isNew": "true" }, "out": "",
+          "note": "Product has a @Version of wrapper type, so the version is the signal. A null version can only mean the row was never written: Hibernate sets it to 0 on insert." },
+        { "line": 3, "vars": { "entity": "Product BOLT-7", "call": "em.persist(entity)", "returns": "the same instance" }, "out": "select next value for product_seq\ninsert into product (...) values (?,?,?,?)",
+          "note": "persist takes the instance into the persistence context. The id comes from the sequence immediately; the insert waits for the flush, which here is the commit of save's own transaction." },
+        { "line": 11, "vars": { "entity": "detached copy of BOLT-7", "id": "1", "version": "0", "isNew": "false" }, "out": "",
+          "note": "The copy was built by hand with id 1 and version 0, as if it had come back from a web form. Version is not null, so it is not new." },
+        { "line": 6, "vars": { "entity": "detached copy", "call": "em.merge(entity)", "returns": "a DIFFERENT, managed instance (v1)" }, "out": "select ... from product where id=?\nupdate product set ... where id=? and version=?",
+          "note": "merge loads the row, copies the detached state onto the managed instance and returns that one. Keep using the return value; the argument is still detached and still says version 0." },
+        { "line": 6, "vars": { "entity": "copy of id 404", "id": "404", "version": "0", "row exists?": "no" }, "out": "select ... from product where id=?\n→ StaleObjectStateException",
+          "note": "Same path, but the row is missing. A versioned entity with a version but no row means someone deleted it concurrently, so Hibernate refuses rather than silently inserting." },
+        { "line": 10, "vars": { "entity": "new Tag(\"FAST\")", "id": "FAST (assigned)", "Persistable?": "yes", "isNew()": "true" }, "out": "insert into tag (label,code) values (?,?)",
+          "note": "With an assigned id the id is never null, so rule 3 would call this existing. Persistable answers first: the entity's own flag says new, so it is persisted with no select." },
+        { "line": 10, "vars": { "entity": "the same Tag, label changed", "isNew()": "false (set by @PostPersist)" }, "out": "select ... from tag where code=?\nupdate tag set label=? where code=?",
+          "note": "The callback flipped the flag after the insert, so the second save merges. Forget the callback and every save of this tag would try to insert again — and fail on the primary key." },
+        { "line": 12, "vars": { "entity": "assigned id, no @Version, no Persistable", "id": "FAST", "isNew": "false — always" }, "out": "select ... where code=?\ninsert into tag ...",
+          "note": "The trap Persistable exists for: every new entity looks existing, so save calls merge, merge selects, finds nothing and inserts. Correct result, one wasted select per insert — and a batch import doubles its round trips." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Proxies, transactions and fragments</h3>
+
+  <p><strong>Every repository method is transactional.</strong> <code>SimpleJpaRepository</code> is annotated <code>@Transactional(readOnly = true)</code> at class level and plain <code>@Transactional</code> on its write methods. Called from code that has no transaction, each call opens and commits its own — which is why every <code>save</code> in the worked example produced SQL at once. Called from inside a <code>@Transactional</code> service (§5), the repository joins the caller's transaction and the SQL waits for that transaction's flush. Same call, different timing, and the difference is entirely in the caller. Your own query methods inherit the read-only default; a <code>@Modifying</code> query method needs its own <code>@Transactional</code> (§4).</p>
+
+  <p><strong>Fragments compose.</strong> A repository interface may extend any number of fragment interfaces; for each, Spring Data looks for a class named after the fragment interface plus <code>Impl</code> (the postfix is configurable) and routes those methods to it. Fragments are ordinary beans, so they can inject an <code>EntityManager</code>, a <code>JdbcClient</code> or anything else. A fragment method with the same signature as a base method <em>overrides</em> it — which is how you replace, say, <code>save</code> for one aggregate without touching the others.</p>
+
+  <p><strong>Shared signatures without a bean.</strong> <code>BaseRepository</code> in the example is marked <code>@NoRepositoryBean</code>: it is a building block that other repository interfaces extend, and Spring Data must not try to create a repository for it on its own (it has no concrete entity type). Nothing in this program extends it; it is there to show the shape. <code>@RepositoryDefinition(domainClass = …, idClass = …)</code> is the opposite tool: it makes a plain interface a repository <em>without</em> extending anything, so it exposes exactly the methods you write.</p>
+
+  <p><strong>Return types.</strong> Single results come back as <code>Optional&lt;T&gt;</code> or as <code>T</code> (then <code>null</code> for "no row"); collections as <code>List</code>, <code>Iterable</code>, <code>Streamable</code> or <code>Stream</code> (the last one must be consumed inside a transaction and closed — §4). Prefer <code>Optional</code> for anything a caller might look up by user input. An application with two databases declares two <code>@EnableJpaRepositories</code> blocks, each with its own <code>basePackages</code>, <code>entityManagerFactoryRef</code> and <code>transactionManagerRef</code>; that is the only time the repository infrastructure needs configuring by hand.</p>
+
+  <p><strong>Why <code>flush</code> is on the interface.</strong> Most code never needs it: the commit flushes. You need it when the database must see the change <em>before</em> the transaction ends — to trip a unique constraint now rather than at commit, so the exception surfaces where you can handle it, or before a native query that reads the same table. <code>saveAndFlush</code> is <code>save</code> followed by <code>flush</code>; as the output showed, it flushes everything pending, not just the entity you passed.</p>
+
+  <h3 class="mt-8 mb-3">Match the method to its SQL</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag a method onto its SQL shape, or click one then click the other
+    </div>
+    <p class="text-sm text-ink-muted">Each method is called on its own, outside any transaction, for a versioned <code>Product</code>.</p>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="Repository methods to place">
+        <button type="button" class="lm-chip" data-chip="delbyid"><code>deleteById(1L)</code></button>
+        <button type="button" class="lm-chip" data-chip="ref"><code>getReferenceById(1L)</code></button>
+        <button type="button" class="lm-chip" data-chip="save"><code>save(new Product(…))</code></button>
+        <button type="button" class="lm-chip" data-chip="batch"><code>deleteAllInBatch()</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="SQL shapes">
+        <button type="button" class="lm-slot" data-slot="save" data-label="sequence call and insert, no select"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">sequence call and insert, no select</span></button>
+        <button type="button" class="lm-slot" data-slot="delbyid" data-label="select, then delete with a version check"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">select, then delete … and version=?</span></button>
+        <button type="button" class="lm-slot" data-slot="ref" data-label="no SQL until a getter is called"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">no SQL until a getter is called</span></button>
+        <button type="button" class="lm-slot" data-slot="batch" data-label="one bulk delete, no select"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">one bulk delete, no select</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All four correct. The pattern: anything that goes through the persistence context (<code>save</code>, <code>deleteById</code>) behaves like the JPA operation underneath it, with its callbacks, cascades and version checks; anything named <code>…InBatch</code> is a bulk statement that bypasses the context entirely; and <code>getReferenceById</code> defers the database until the data is actually needed.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Repository gotchas</div>
+      <ul class="mb-0">
+        <li><strong>Use the object <code>save</code> returns.</strong> For a new entity it is the same instance; for anything merged it is a different one. Code that ignores the return value works for inserts and silently keeps a stale, detached object for updates.</li>
+        <li><strong>Calling <code>save</code> on a managed entity is redundant.</strong> Inside a transaction, a loaded entity is already tracked; changing a field is enough and the commit's dirty check writes it. The extra <code>save</code> is harmless but suggests the author thinks it is required — and in a long loop with detached entities it turns into a select per row.</li>
+        <li><strong>Assigned ids need <code>Persistable</code> or a <code>@Version</code>.</strong> Otherwise every <code>save</code> of a new entity is a merge: one extra select per insert, and a batch import twice as chatty as it needs to be.</li>
+        <li><strong>A proxy's fields are empty.</strong> Code that reads entity fields directly — from <code>equals</code>, from a mapper, from a test — sees <code>null</code> on a reference or a lazy association. Access state through methods; it is one more reason entity <code>equals</code> should use getters (§11 of the JPA module).</li>
+        <li><strong><code>deleteAllInBatch</code> and <code>deleteAllByIdInBatch</code> skip the domain model.</strong> No cascades, no orphan removal, no <code>@PreRemove</code>, no auditing — and managed instances of the deleted rows stay in any open persistence context, stale. Fast, and only correct when nothing depends on those hooks.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-repositories-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A web handler receives a <code>Product</code> with <code>id = 7</code> and <code>version = 3</code> deserialised from JSON, calls <code>repo.save(product)</code> and then returns <code>product.version</code> to the client. The database row ends with version 4. What does the client receive?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-repositories-1"><span>4 — <code>save</code> updates the version on the object it was given <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-repositories-1"><span>3 — <code>save</code> merged and returned a different, managed instance; the argument is untouched <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-repositories-1"><span>An exception, because <code>save</code> cannot accept an entity with an id <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-repositories-1"><span><code>null</code>, because the detached object's version is cleared on merge <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> A non-null version means "not new", so <code>save</code> called <code>merge</code>, which copied the state onto a managed instance and returned <em>that</em>. The worked example printed <code>merged == copy: false</code> for exactly this reason. The client is told version 3, sends it back on its next edit, and gets an optimistic-locking failure for a conflict that never happened. Return the value <code>save</code> returns.</p>
+        <p class="mb-0"><strong>A</strong> is true only for new entities, where <code>persist</code> manages the instance you passed. <strong>C</strong> is wrong: an id is precisely what makes <code>save</code> choose merge. <strong>D</strong> is invented; merge never writes to its argument.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-repositories-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>An entity has an assigned <code>String</code> id, no <code>@Version</code>, and does not implement <code>Persistable</code>. What SQL does <code>repo.save(new Country("NO", "Norway"))</code> send for a code that is not yet in the table?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-repositories-2"><span>A single insert <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-repositories-2"><span>An update that affects zero rows, then an exception <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-repositories-2"><span>A select by id, then an insert <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-repositories-2"><span>Nothing: the entity is silently ignored because Spring Data cannot tell whether it is new <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> With no <code>Persistable</code> and no version, the id decides — and an assigned id is never null, so the entity looks existing and <code>save</code> calls <code>merge</code>. Merge selects, finds nothing, and treats the object as new: an insert. The result is correct; the select is wasted. That is the case <code>Persistable</code> exists for, as <code>Tag</code> showed.</p>
+        <p class="mb-0"><strong>A</strong> is what happens <em>with</em> <code>Persistable</code> reporting new. <strong>B</strong> describes a hand-written update, not merge; merge reads before it writes. <strong>D</strong> is wrong: <code>save</code> always ends in persist or merge, and both write.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-repositories-3" data-answer="a">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Inside a transaction, <code>Product ref = repo.getReferenceById(1L);</code> then <code>System.out.println(ref.sku);</code> prints <code>null</code> although the row's SKU is <code>BOLT-7</code>. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-repositories-3"><span><code>ref</code> is a proxy subclass; its own fields are never filled, and only method calls are forwarded to the loaded entity <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-repositories-3"><span>The reference is created outside the persistence context, so no data can ever be loaded through it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-repositories-3"><span><code>getReferenceById</code> returns a new, empty entity when the id has not been loaded in this transaction <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-repositories-3"><span>The <code>sku</code> column is lazily loaded by default, and a field read does not count as an access <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A.</strong> Hibernate builds the reference as a ByteBuddy subclass of <code>Product</code> holding an interceptor and the id. Calling a method runs the interceptor, which loads the real entity and delegates; reading a field goes straight to the proxy object's own, never-populated field. The worked example printed <code>null</code> for the field and <code>BOLT-7</code> for the getter.</p>
+        <p class="mb-0"><strong>B</strong> is wrong: the getter in the same block loaded the data, because a transaction was open. <strong>C</strong> is wrong: the proxy points at the existing row; it is not a new entity. <strong>D</strong> is wrong: basic columns are eagerly loaded by default, and the problem is the proxy, not column fetching.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-repositories-4" data-answer="a,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>An <code>Order</code> has <code>@OneToMany(cascade = ALL, orphanRemoval = true)</code> lines and a <code>@PreRemove</code> audit callback. Which statements about <code>orderRepo.deleteAllInBatch()</code> are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>The <code>@PreRemove</code> callback does not run <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Each order is loaded first so that its version can be checked <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>The cascade to the lines is not applied; with a foreign key in place the delete fails while lines exist <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>It sends one bulk <code>delete</code> statement for the order table <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, C and D.</strong> <code>deleteAllInBatch</code> issues a single JPQL bulk delete — the worked example's <code>delete from product p1_0</code> — which runs in the database and bypasses the persistence context. Nothing is loaded, so no lifecycle callback can run and no cascade is applied; the database's foreign key then rejects deleting orders that still have lines.</p>
+        <p class="mb-0"><strong>B</strong> describes <code>deleteById</code> and <code>delete(entity)</code>, which load the entity and remove it through the context, version check included. Use those when the domain model's hooks matter; use the batch variants for tables where they do not.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="repositories"> Mark this section complete
+  </label>
+</section>

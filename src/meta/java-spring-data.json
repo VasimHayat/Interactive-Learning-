@@ -1,0 +1,12 @@
+{
+  "title": "Spring Data JPA",
+  "subtitle": "The same warehouse, now a Spring Boot application — repositories, derived and declared queries, transactions as a cross-cutting concern, projections, auditing, pagination, validation and testing — with every statement on the page emitted by Spring Boot 4.1 and Hibernate 7.4 at build time.",
+  "level": "Applied",
+  "tech": "Java 21 · Spring Boot 4.1 · Spring Data JPA · Hibernate 7.4 · H2",
+  "time": "8–10 hours",
+  "updated": "October 2026",
+  "accent": "rose",
+  "order": 5,
+  "prev": "JPA & Hibernate",
+  "deps": "java-spring-data"
+}

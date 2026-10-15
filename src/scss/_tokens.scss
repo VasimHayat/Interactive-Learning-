@@ -110,6 +110,16 @@
   --lm-accent-weak: #ede9fe;
   --lm-accent-contrast: #ffffff;
 }
+:root[data-accent="emerald"] {
+  --lm-accent: #047857;
+  --lm-accent-weak: #d1fae5;
+  --lm-accent-contrast: #ffffff;
+}
+:root[data-accent="rose"] {
+  --lm-accent: #be123c;
+  --lm-accent-weak: #ffe4e6;
+  --lm-accent-contrast: #ffffff;
+}
 :root[data-accent="sky"] {
   --lm-accent: #0369a1;
   --lm-accent-weak: #e0f2fe;
@@ -118,6 +128,8 @@
 @mixin dark-accents {
   &[data-accent="violet"] { --lm-accent: #c4b5fd; --lm-accent-weak: #2e2548; --lm-accent-contrast: #141416; }
   &[data-accent="sky"]    { --lm-accent: #7dd3fc; --lm-accent-weak: #11304a; --lm-accent-contrast: #141416; }
+  &[data-accent="emerald"] { --lm-accent: #6ee7b7; --lm-accent-weak: #0f3a2c; --lm-accent-contrast: #141416; }
+  &[data-accent="rose"] { --lm-accent: #fda4af; --lm-accent-weak: #4a1d26; --lm-accent-contrast: #141416; }
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { @include dark-accents; }

@@ -1,0 +1,152 @@
+<section class="lm-section" id="glossary" data-title="Glossary" data-num="G">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Glossary</h2>
+  <p>Thirty terms, each linked back to the section that introduces it. The same entries drive the flashcard deck below — one list, two ways to use it.</p>
+
+  <div data-flash>
+
+    <div class="lm-card" data-print="hide">
+      <div class="lm-card-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M7 3h14v14"/></svg>
+        Flashcards
+      </div>
+      <div class="lm-flash">
+        <button type="button" class="lm-flash-card" aria-pressed="false" aria-label="Flashcard — activate to flip between term and definition">
+          <span class="lm-flash-face"><span class="text-h3" data-flash-front></span><span class="text-caption text-ink-subtle">click, or press Space, to flip</span></span>
+          <span class="lm-flash-face lm-flash-face--back"><span data-flash-back></span></span>
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <button type="button" class="lm-btn" data-flash-prev>Previous</button>
+        <button type="button" class="lm-btn lm-btn--primary" data-flash-next>Next</button>
+        <button type="button" class="lm-btn" data-flash-known>I knew it</button>
+        <button type="button" class="lm-btn" data-flash-shuffle>Shuffle</button>
+        <span class="text-caption text-ink-subtle" data-flash-count></span>
+      </div>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    </div>
+
+    <dl class="mt-6">
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g1">
+        <dt class="font-semibold" data-term>Bag</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Hibernate's name for a <code>List</code> collection mapping without an <code>@OrderColumn</code>: unordered, duplicates allowed. Removing one element can delete and re-insert the rest, and two bags cannot be fetch-joined in one query (<code>MultipleBagFetchException</code>). <a href="#relationships">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g2">
+        <dt class="font-semibold" data-term>Batch fetching</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Loading lazy collections or proxies for several parents at once with <code>where id in (?, …)</code>, via <code>@BatchSize</code> or <code>session.setFetchBatchSize</code>. Turns 1 + N statements into 1 + ⌈N / size⌉ with no change to the query. <a href="#fetching">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g3">
+        <dt class="font-semibold" data-term>Cascade</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Propagating an <code>EntityManager</code> operation along an association: <code>cascade = PERSIST</code> persists the children with the parent, <code>REMOVE</code> deletes them with it. Right for owned children; wrong — and destructive — on references to shared entities. <a href="#relationships">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g4">
+        <dt class="font-semibold" data-term>Criteria API</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Building a JPQL-equivalent query from Java objects (<code>CriteriaBuilder</code>, <code>Root</code>, <code>Predicate</code>) instead of a string. The right tool when the query's shape depends on which filters the caller supplied; verbose for anything static. <a href="#queries">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g5">
+        <dt class="font-semibold" data-term>Dirty checking</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>At flush, Hibernate compares every managed entity with the snapshot taken when it was loaded and emits an <code>update</code> for each one that differs — all columns by default. It is why a plain setter on a managed entity reaches the database without any "save" call. <a href="#persistence-context">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g6">
+        <dt class="font-semibold" data-term>Discriminator</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The column in a <code>SINGLE_TABLE</code> hierarchy that records which subclass a row is (<code>@DiscriminatorColumn</code> / <code>@DiscriminatorValue</code>). Hibernate 7 adds a check constraint on its values and filters by it for subtype queries. <a href="#inheritance">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g7">
+        <dt class="font-semibold" data-term>Entity graph</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A declared fetch plan — which attributes to load with the root — applied to a query or a <code>find</code> as the <code>jakarta.persistence.fetchgraph</code> or <code>loadgraph</code> hint. The same SQL join as <code>join fetch</code>, kept out of the query text so one query can serve several screens. <a href="#fetching">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g8">
+        <dt class="font-semibold" data-term>Entity states</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><strong>Transient</strong>: a new object with no row. <strong>Managed</strong>: tracked by a context, dirty-checked at flush. <strong>Detached</strong>: has a row, no context watching it. <strong>Removed</strong>: scheduled for deletion. Every <code>EntityManager</code> method is a transition between them. <a href="#persistence-context">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g9">
+        <dt class="font-semibold" data-term>EntityManagerFactory</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Hibernate's <code>SessionFactory</code>: the thread-safe, expensive, application-scoped object holding the metamodel, dialect, connection pool and second-level cache. Build one per application; create a cheap <code>EntityManager</code> from it per unit of work. <a href="#why-orm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g10">
+        <dt class="font-semibold" data-term>First-level cache</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The persistence context's identity map: within one <code>EntityManager</code>, a second <code>find</code> for the same id returns the same instance with no SQL. Gives repeatable reads for free — and stale ones if another transaction wrote in between. <a href="#persistence-context">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g11">
+        <dt class="font-semibold" data-term>Flush</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Turning the queued inserts, updates and deletes into SQL — at commit, before a query that could see them (<code>FlushModeType.AUTO</code>), or on <code>flush()</code>. Statements run in a fixed order (inserts, updates, collection changes, deletes), not the order you called the methods. <a href="#transactions-locking">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g12">
+        <dt class="font-semibold" data-term>Impedance mismatch</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The five ways objects and rows disagree — identity, associations, granularity, inheritance, navigation — that an object-relational mapper exists to translate across, and that every later section is a consequence of. <a href="#why-orm">§1</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g13">
+        <dt class="font-semibold" data-term>JDBC batching</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Sending many parameter sets for one statement in a single round trip (<code>hibernate.jdbc.batch_size</code>, with <code>order_inserts</code>/<code>order_updates</code>). Needs write-behind, so it is impossible with <code>IDENTITY</code> ids; invisible to <code>show_sql</code>, visible in <code>Statistics</code>. <a href="#performance">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g14">
+        <dt class="font-semibold" data-term>Join fetch</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>select o from Order o join fetch o.lines</code>: load the association in the same statement as the root. One query instead of N+1; inner join unless written <code>left join fetch</code>; cannot be combined with database-side pagination. <a href="#fetching">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g15">
+        <dt class="font-semibold" data-term>JPQL</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The Jakarta Persistence Query Language: SQL-like syntax over entities and their attributes rather than tables and columns, translated per dialect by Hibernate (whose superset is HQL). Paths become joins, collection predicates become subqueries, <code>select new</code> becomes a DTO. <a href="#queries">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g16">
+        <dt class="font-semibold" data-term>Mapped superclass</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A class whose mapped fields are copied into every entity table that extends it (<code>@MappedSuperclass</code>). Not an entity: no table, no queries against it, no associations to it. The tool for shared audit columns, not for polymorphism. <a href="#inheritance">§8</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g17">
+        <dt class="font-semibold" data-term>mappedBy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Marks the inverse side of a bidirectional association, naming the owning field on the other entity. Hibernate reads and cascades through it but never writes from it — set only this side and the foreign key stays null. <a href="#relationships">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g18">
+        <dt class="font-semibold" data-term>Merge</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>em.merge(detached)</code> copies the argument's state onto a managed instance (loading it first if needed) and returns that instance; the argument stays detached. Copies every field, so a partially filled object overwrites the rest of the row. <a href="#persistence-context">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g19">
+        <dt class="font-semibold" data-term>Migration</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A versioned, reviewed, checksummed DDL script applied in order by a tool such as Flyway or Liquibase. The only safe way to change a production schema; <code>hbm2ddl.auto=update</code> is not one, because it can only add. <a href="#schema">§10</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g20">
+        <dt class="font-semibold" data-term>N+1 problem</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>One query for N parents and then one more per parent as each lazy association is touched. The most common JPA performance bug; detected by counting statements, fixed per query with <code>join fetch</code>, an entity graph, batch fetching or a DTO — never with <code>EAGER</code>. <a href="#fetching">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g21">
+        <dt class="font-semibold" data-term>Natural id</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A unique, immutable business key such as a SKU, marked <code>@NaturalId</code> (Hibernate). Gets its own lookup API and cache region, and is the best candidate for <code>equals</code>/<code>hashCode</code> when one exists. <a href="#mapping">§2</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g22">
+        <dt class="font-semibold" data-term>Optimistic locking</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Detecting rather than preventing concurrent updates: a <code>@Version</code> column goes into every update's <code>where</code> clause, a stale version matches zero rows, and Hibernate throws <code>OptimisticLockException</code>. No locks, no waiting; the loser retries. <a href="#transactions-locking">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g23">
+        <dt class="font-semibold" data-term>Orphan removal</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>orphanRemoval = true</code>: removing a child from the parent's collection deletes its row at flush. For children that cannot exist without their parent; distinct from <code>cascade = REMOVE</code>, which fires only when the parent itself is removed. <a href="#relationships">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g24">
+        <dt class="font-semibold" data-term>Owning side</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>The side of an association whose field maps to the foreign-key column or join table — the many side of one-to-many, the <code>@JoinTable</code> side of many-to-many, the <code>@JoinColumn</code> side of one-to-one. Only its state is written to the database. <a href="#relationships">§4</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g25">
+        <dt class="font-semibold" data-term>Persistence context</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>What an <code>EntityManager</code> owns: an identity map (one instance per id) plus a snapshot of each managed entity's loaded state, and a queue of pending writes. The source of the identity guarantee, dirty checking and write-behind. <a href="#persistence-context">§3</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g26">
+        <dt class="font-semibold" data-term>Pessimistic locking</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def><code>LockModeType.PESSIMISTIC_WRITE</code> → <code>select … for update</code>: the database locks the row until commit and other lockers wait, then time out. Prevents conflicts instead of detecting them; needs a timeout and a consistent lock order to avoid deadlocks. <a href="#transactions-locking">§7</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g27">
+        <dt class="font-semibold" data-term>Projection</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A query that returns scalars, a <code>Tuple</code> or a DTO (<code>select new …</code>) instead of entities. Nothing is hydrated or dirty-checked and nothing can lazy-load later — the right shape for read-only screens and reports. <a href="#queries">§6</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g28">
+        <dt class="font-semibold" data-term>Proxy</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>A runtime subclass (ByteBuddy) standing in for an entity or collection that has not been loaded; the first access to anything but the id runs the select. Why entities cannot be final, why <code>getClass()</code> lies, and what <code>LazyInitializationException</code> is thrown by. <a href="#fetching">§5</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g29">
+        <dt class="font-semibold" data-term>Second-level cache</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>An optional, provider-backed cache of entity state by primary key, shared across persistence contexts for <code>@Cacheable</code> entities. Does not cache queries; is left stale by writes that bypass Hibernate. Worth it for immutable reference data, measured with statistics. <a href="#performance">§9</a></dd>
+      </div>
+      <div class="lm-flash-item grid sm:grid-cols-3 gap-x-6 py-2 border-b border-line" data-id="g30">
+        <dt class="font-semibold" data-term>Soft delete</dt>
+        <dd class="m-0 sm:col-span-2 text-ink-muted" data-def>Marking a row deleted instead of removing it: <code>@SQLDelete</code> turns <code>remove</code> into an <code>update</code>, <code>@SQLRestriction</code> hides the row from <code>find</code> and JPQL. Native SQL still sees it, and unique constraints and joins need thought. <a href="#entity-design">§11</a></dd>
+      </div>
+    </dl>
+  </div>
+</section>

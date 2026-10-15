@@ -1,0 +1,325 @@
+<section class="lm-section" id="cheatsheet" data-title="Cheat sheet" data-num="C">
+  <p class="lm-eyebrow">Reference</p>
+  <h2 class="mb-4">Cheat sheet</h2>
+  <p>Everything worth having in front of you while a persistence layer is misbehaving. This section is laid out to print cleanly — controls and navigation are hidden, and tables are kept whole across page breaks. Each block names the section it condenses. Where a fact is specific to the pinned stack (Hibernate 7.4, JPA 3.2, H2), it says so.</p>
+
+  <h3 class="mt-8 mb-3">Bootstrap without <code>persistence.xml</code> <span class="lm-badge">§1</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">PersistenceConfiguration keys and their Hibernate equivalents</caption>
+      <thead><tr><th scope="col">JPA 3.2 constant</th><th scope="col">Property</th><th scope="col">Hibernate equivalent / note</th></tr></thead>
+      <tbody>
+        <tr><td><code>JDBC_URL</code>, <code>JDBC_USER</code>, <code>JDBC_PASSWORD</code></td><td><code>jakarta.persistence.jdbc.url</code> …</td><td><code>hibernate.connection.url</code> …; the built-in pool is not for production — use HikariCP</td></tr>
+        <tr><td><code>SCHEMAGEN_DATABASE_ACTION</code></td><td><code>jakarta.persistence.schema-generation.database.action</code></td><td><code>none</code> / <code>create</code> / <code>drop-and-create</code> / <code>drop</code>; <strong>if set, it overrides <code>hibernate.hbm2ddl.auto</code></strong> (§10)</td></tr>
+        <tr><td>—</td><td><code>hibernate.hbm2ddl.auto</code></td><td><code>validate</code> is Hibernate-only; set this and <em>not</em> the JPA key when you want validation</td></tr>
+        <tr><td>—</td><td><code>hibernate.show_sql</code></td><td>Echo each logical statement to stdout; <code>format_sql</code> pretty-prints; cannot show batching</td></tr>
+        <tr><td>—</td><td><code>hibernate.generate_statistics</code></td><td><code>emf.unwrap(SessionFactory.class).getStatistics()</code>: prepared statements, entity loads, flushes</td></tr>
+        <tr><td>—</td><td><code>hibernate.jdbc.batch_size</code>, <code>hibernate.order_inserts</code>, <code>hibernate.order_updates</code></td><td>JDBC batching (§9); useless with IDENTITY ids</td></tr>
+        <tr><td>—</td><td><code>hibernate.physical_naming_strategy</code></td><td><code>CamelCaseToUnderscoresNamingStrategy</code> → <code>price_in_cents</code> (Spring Boot's default)</td></tr>
+        <tr><td>—</td><td><code>hibernate.jpa.compliance.transaction</code></td><td><code>true</code> makes <code>commit()</code> on a rollback-only transaction throw <code>RollbackException</code>; by default Hibernate rolls back quietly (§7)</td></tr>
+        <tr><td><code>.managedClass(X.class)</code></td><td>—</td><td>Register every entity, embeddable and auto-applied converter; a nested entity needs <code>@Entity(name = "X")</code> or JPQL must say <code>Outer$X</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Architecture: one <code>EntityManagerFactory</code> per application (expensive, thread-safe); one <code>EntityManager</code> per unit of work (cheap, not thread-safe); one transaction per unit of work. The first <code>Hibernate:</code> line of every program here, <code>create global temporary table HTE_…</code>, is Hibernate 7's scratch table for bulk HQL on H2 — harmless.</p>
+
+  <h3 class="mt-8 mb-3">Mapping annotations by purpose <span class="lm-badge">§2</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Mapping annotations grouped by what they control</caption>
+      <thead><tr><th scope="col">Purpose</th><th scope="col">Annotations</th><th scope="col">Remember</th></tr></thead>
+      <tbody>
+        <tr><td>The class</td><td><code>@Entity(name)</code>, <code>@Table(name, indexes, uniqueConstraints)</code>, <code>@Access(FIELD)</code></td><td>no-arg constructor, not final, not a record, static if nested</td></tr>
+        <tr><td>The key</td><td><code>@Id</code>, <code>@GeneratedValue(strategy)</code>, <code>@SequenceGenerator(allocationSize)</code>, <code>@EmbeddedId</code>, <code>@NaturalId</code> (Hibernate)</td><td>default SEQUENCE allocation is 50; IDENTITY inserts at <code>persist</code></td></tr>
+        <tr><td>A column</td><td><code>@Column(name, nullable, unique, length, precision, scale, updatable)</code>, <code>@Basic(optional)</code>, <code>@Lob</code>, <code>@Transient</code></td><td>unannotated <code>String</code> is <code>varchar(255)</code>; hints become constraints only via schema generation</td></tr>
+        <tr><td>A type</td><td><code>@Enumerated(STRING)</code>, <code>@Convert</code> / <code>@Converter(autoApply = true)</code>, <code>java.time</code> types need nothing</td><td>never <code>ORDINAL</code>; <code>@Temporal</code> is for <code>java.util.Date</code> only</td></tr>
+        <tr><td>A value object</td><td><code>@Embeddable</code> + <code>@Embedded</code> + <code>@AttributeOverride</code>; an <code>@Embeddable record</code> works in Hibernate 6.2+</td><td>columns live in the owner's table; no identity</td></tr>
+        <tr><td>Concurrency</td><td><code>@Version</code></td><td>Hibernate owns the field: no setter</td></tr>
+        <tr><td>Hibernate extras</td><td><code>@Formula</code>, <code>@DynamicUpdate</code>, <code>@Immutable</code>, <code>@SQLDelete</code>, <code>@SQLRestriction</code>, <code>@BatchSize</code>, <code>@Fetch(SUBSELECT)</code></td><td>portable only between Hibernate versions</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Id strategies and what they cost <span class="lm-badge">§2 §9</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Identifier generation strategies compared</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Id known at</th><th scope="col">Insert runs at</th><th scope="col">Batching</th><th scope="col">Round trips for 100 rows</th></tr></thead>
+      <tbody>
+        <tr><td><code>SEQUENCE</code>, allocationSize 50 (default)</td><td><code>persist</code></td><td>flush</td><td>yes</td><td>2 sequence calls + 100 inserts, or 5 batches of 20</td></tr>
+        <tr><td><code>SEQUENCE</code>, allocationSize 1</td><td><code>persist</code></td><td>flush</td><td>yes</td><td>100 sequence calls + the inserts</td></tr>
+        <tr><td><code>IDENTITY</code></td><td>after insert</td><td><strong><code>persist</code></strong> — and it flushes earlier queued inserts first</td><td><strong>no</strong></td><td>100, always</td></tr>
+        <tr><td><code>TABLE</code></td><td><code>persist</code></td><td>flush</td><td>yes</td><td>select + update on the generator table per block; slow, portable, avoid</td></tr>
+        <tr><td><code>UUID</code></td><td><code>persist</code> (in the JVM)</td><td>flush</td><td>yes</td><td>no database call; random v4 scatters the primary-key index — prefer time-ordered at scale</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">MySQL has no sequences: <code>SEQUENCE</code> silently becomes a table generator there — read the DDL.</p>
+
+  <h3 class="mt-8 mb-3">Entity states × operations <span class="lm-badge">§3</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">What each EntityManager operation does to an entity's state</caption>
+      <thead><tr><th scope="col">Operation</th><th scope="col">From → to</th><th scope="col">SQL at call time</th><th scope="col">SQL at flush</th><th scope="col">Gotcha</th></tr></thead>
+      <tbody>
+        <tr><td><code>persist(e)</code></td><td>transient → managed</td><td><code>select next value</code> (SEQUENCE) / the <code>insert</code> (IDENTITY)</td><td><code>insert</code></td><td>detached argument → <code>PersistentObjectException</code></td></tr>
+        <tr><td><code>find(C, id)</code></td><td>row → managed, or identity-map hit</td><td><code>select</code> unless already in the context</td><td>—</td><td>second <code>find</code> in one context never re-reads: repeatable read, stale if another transaction wrote</td></tr>
+        <tr><td><code>getReference(C, id)</code></td><td>→ managed proxy</td><td>none</td><td>—</td><td>first non-id getter loads; <code>getClass()</code> is a subclass</td></tr>
+        <tr><td>a setter on a managed entity</td><td>managed → managed (dirty)</td><td>none</td><td><code>update</code> of <strong>every</strong> column (unless <code>@DynamicUpdate</code>)</td><td>no "save" call exists or is needed</td></tr>
+        <tr><td><code>merge(e)</code></td><td>argument stays detached; <strong>returns</strong> a managed copy</td><td><code>select</code> if not in the context</td><td><code>update</code> (or <code>insert</code> for a transient argument)</td><td>copies <em>all</em> fields: a half-filled form overwrites the rest</td></tr>
+        <tr><td><code>detach(e)</code> / <code>clear()</code></td><td>managed → detached</td><td>none</td><td>nothing for that entity</td><td><code>clear()</code> also discards un-flushed changes</td></tr>
+        <tr><td><code>refresh(e)</code></td><td>managed → managed, memory overwritten</td><td><code>select</code></td><td>—</td><td>the opposite of flush</td></tr>
+        <tr><td><code>remove(e)</code></td><td>managed → removed (leaves the context now)</td><td>none</td><td><code>delete</code></td><td>cascades <code>REMOVE</code>; a later <code>find</code> goes to the database</td></tr>
+        <tr><td><code>flush()</code></td><td>—</td><td>the whole queue: inserts, updates, collection changes, deletes — in that order, not call order</td><td>—</td><td>remove + persist of the same unique key fails: the insert runs first</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>FlushModeType.AUTO</code> (default) flushes before a JPQL/Criteria query over a table with pending changes and before every native query; <code>COMMIT</code> flushes only at commit. Rollback evicts every managed entity: after <code>rollback()</code> they are detached.</p>
+
+  <h3 class="mt-8 mb-3">Associations: owning side, fetch default, collection type <span class="lm-badge">§4</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Association types and their defaults</caption>
+      <thead><tr><th scope="col">Association</th><th scope="col">Owning side (what is written)</th><th scope="col">Default fetch</th><th scope="col">Collection</th></tr></thead>
+      <tbody>
+        <tr><td><code>@ManyToOne</code></td><td>this side: the foreign-key column (<code>@JoinColumn(name = …)</code> — name it)</td><td>EAGER — <strong>set LAZY</strong></td><td>—</td></tr>
+        <tr><td><code>@OneToMany(mappedBy = "…")</code></td><td>the <em>many</em> side; this side is inverse and ignored for writes</td><td>LAZY</td><td><code>List</code> = bag (remove re-inserts), <code>Set</code> needs a correct <code>equals</code>, <code>@OrderColumn</code> for a real list</td></tr>
+        <tr><td><code>@OneToMany</code> unidirectional, no <code>mappedBy</code></td><td>this side, via a <strong>join table</strong> you did not ask for (unless <code>@JoinColumn</code>)</td><td>LAZY</td><td>as above</td></tr>
+        <tr><td><code>@ManyToMany</code></td><td>the side declaring <code>@JoinTable</code>; the other says <code>mappedBy</code></td><td>LAZY</td><td><code>Set</code>; never cascade <code>REMOVE</code></td></tr>
+        <tr><td><code>@OneToOne</code></td><td>the side with <code>@JoinColumn</code>, or <code>@MapsId</code> to share the parent's key</td><td>EAGER; <strong>the inverse (<code>mappedBy</code>) side cannot be lazy</strong> — Hibernate must query to know if it is null</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Cascade and orphan removal <span class="lm-badge">§4</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">When to cascade and when not to</caption>
+      <thead><tr><th scope="col">Situation</th><th scope="col">Use</th><th scope="col">Never</th></tr></thead>
+      <tbody>
+        <tr><td>Parent owns children that cannot exist alone (order → lines)</td><td><code>cascade = ALL, orphanRemoval = true</code> on the parent's collection</td><td>—</td></tr>
+        <tr><td>Reference to a shared entity (line → product, product ↔ supplier)</td><td>no cascade; persist the target yourself or <code>getReference</code> it</td><td><code>REMOVE</code> on <code>@ManyToOne</code> or <code>@ManyToMany</code> — deletes the shared row</td></tr>
+        <tr><td>Remove a child from the parent's collection and delete its row</td><td><code>orphanRemoval = true</code></td><td>relying on <code>cascade = REMOVE</code> (that only fires when the <em>parent</em> is removed)</td></tr>
+        <tr><td>Keep both sides of a bidirectional pair consistent</td><td>a sync helper: <code>lines.add(l); l.order = this;</code></td><td>setting only the inverse side — the FK is written as <code>null</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <pre data-code data-lang="java" data-nobar>
+// Bidirectional one-to-many, done the way that writes the foreign key
+@Entity(name = "Order") @Table(name = "orders")
+public class Order {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<OrderLine> lines = new ArrayList<>();
+
+    public void addLine(OrderLine line)    { lines.add(line);    line.setOrder(this); }   // both sides, always
+    public void removeLine(OrderLine line) { lines.remove(line); line.setOrder(null); }   // orphanRemoval deletes the row
+}
+
+@Entity(name = "OrderLine") @Table(name = "order_line")
+public class OrderLine {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) private Long id;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)      // LAZY: never let a line drag its order in
+    @JoinColumn(name = "order_id")                            // name the column; the default follows the field name
+    private Order order;
+    void setOrder(Order order) { this.order = order; }
+}
+  </pre>
+
+  <h3 class="mt-8 mb-3">Fetch strategies and statement counts <span class="lm-badge">§5</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Fetch strategies with the number of statements each costs</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Statements for N parents, one collection</th><th scope="col">Declared in</th><th scope="col">Trap</th></tr></thead>
+      <tbody>
+        <tr><td>Lazy (default), touched in a loop</td><td>1 + N</td><td>the mapping</td><td>the N+1 problem; invisible locally, ruinous over a network</td></tr>
+        <tr><td><code>fetch = EAGER</code> on the mapping</td><td>1 + N for JPQL (one join only for <code>find</code>)</td><td>the mapping — for every load, forever</td><td>does not fix N+1 for queries; mark everything LAZY instead</td></tr>
+        <tr><td><code>join fetch</code> (inner) / <code>left join fetch</code></td><td>1</td><td>the query</td><td>two <code>List</code>s → <code>MultipleBagFetchException</code>; two <code>Set</code>s → cartesian product; with <code>setMaxResults</code> → in-memory paging, warning HHH90003004</td></tr>
+        <tr><td>Entity graph (<code>jakarta.persistence.fetchgraph</code> / <code>loadgraph</code>)</td><td>1 (a <code>left join</code>)</td><td>a hint or <code>@NamedEntityGraph</code></td><td><code>fetchgraph</code> makes everything not listed lazy</td></tr>
+        <tr><td><code>@BatchSize(size = k)</code> / <code>session.setFetchBatchSize(k)</code></td><td>1 + ⌈N / k⌉</td><td>mapping, class or session</td><td><code>in (?, …)</code> lists are padded to the batch size</td></tr>
+        <tr><td><code>@Fetch(SUBSELECT)</code></td><td>2</td><td>the mapping (Hibernate)</td><td>loads every collection of the original result at the first touch</td></tr>
+        <tr><td>DTO projection (<code>select new</code>)</td><td>1</td><td>the query</td><td>none — no entities, no lazy anything; the right default for read screens</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted"><code>LazyInitializationException: could not initialize proxy / collection of role … (no session)</code> = the entity outlived its context. Fix the fetch plan or return a DTO; open-session-in-view only hides it.</p>
+
+  <h3 class="mt-8 mb-3">JPQL clauses and the SQL they become <span class="lm-badge">§6</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">JPQL constructs and the SQL Hibernate generates for them</caption>
+      <thead><tr><th scope="col">JPQL</th><th scope="col">Becomes</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        <tr><td><code>select p from Product p where p.sku = :sku</code></td><td><code>select p1_0.id, … from product p1_0 where p1_0.sku=?</code></td><td>entities and attributes, never tables; always bind parameters</td></tr>
+        <tr><td><code>join l.product p</code> (path)</td><td>an inner join on the foreign key</td><td>a path in <code>where</code> (<code>l.product.sku</code>) joins implicitly</td></tr>
+        <tr><td><code>left join OrderLine l on l.product = p</code></td><td>a left join with an explicit condition</td><td>unrelated-entity joins allowed since JPA 2.1 / Hibernate 5.1</td></tr>
+        <tr><td><code>join fetch o.lines</code></td><td>the join plus the lines' columns in the select list</td><td>§5; Hibernate 6+ de-duplicates roots, no <code>distinct</code> needed</td></tr>
+        <tr><td><code>o.lines is empty</code></td><td><code>not exists (select 1 from order_line …)</code></td><td></td></tr>
+        <tr><td><code>size(o.lines) = 2</code></td><td><code>(select count(*) from order_line …) = 2</code></td><td></td></tr>
+        <tr><td><code>select new pkg.Dto(p.sku, sum(l.qty * p.priceInCents))</code></td><td>scalar select list; the constructor is called per row</td><td>no entity is hydrated; a nested record needs its binary name, <code>Outer$Dto</code></td></tr>
+        <tr><td><code>group by p.sku having sum(l.qty) &gt;= :n</code></td><td>the same SQL clauses</td><td></td></tr>
+        <tr><td><code>setFirstResult(2).setMaxResults(2)</code></td><td><code>offset ? rows fetch first ? rows only</code> (dialect-specific)</td><td>not with a fetched collection</td></tr>
+        <tr><td><code>where p.sku in :skus</code></td><td><code>in (?,?)</code></td><td>bind a <code>List</code></td></tr>
+        <tr><td><code>update Product p set p.priceInCents = … where …</code></td><td>one <code>update</code>; bypasses the context</td><td>managed copies stay stale → <code>refresh</code> or <code>clear</code></td></tr>
+        <tr><td><code>type(d) = PercentOff</code>, <code>treat(d as PercentOff).percent</code></td><td>discriminator / subclass-table predicates</td><td>§8</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <pre data-code data-lang="java" data-nobar>
+// Criteria API skeleton: predicates added only for the filters that were supplied
+CriteriaBuilder cb = em.getCriteriaBuilder();
+CriteriaQuery<Product> cq = cb.createQuery(Product.class);
+Root<Product> p = cq.from(Product.class);
+List<Predicate> where = new ArrayList<>();
+if (category != null) where.add(cb.equal(p.get("category"), category));
+if (minPrice != null) where.add(cb.ge(p.get("priceInCents"), minPrice));
+cq.select(p).where(where.toArray(new Predicate[0])).orderBy(cb.asc(p.get("sku")));
+List<Product> result = em.createQuery(cq).getResultList();
+// projection: cb.construct(SkuRevenue.class, p.get("sku"), cb.sum(...)) with .groupBy(...)
+  </pre>
+
+  <h3 class="mt-8 mb-3">Flush modes and lock modes <span class="lm-badge">§7</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Flush modes, lock modes and the SQL each produces</caption>
+      <thead><tr><th scope="col">Setting</th><th scope="col">Effect</th><th scope="col">SQL you will see</th></tr></thead>
+      <tbody>
+        <tr><td><code>FlushModeType.AUTO</code></td><td>flush before a query that could see pending changes, and at commit</td><td>an <code>insert</code>/<code>update</code> just before your <code>select</code></td></tr>
+        <tr><td><code>FlushModeType.COMMIT</code></td><td>flush only at commit; queries may contradict pending writes</td><td>the query first, the writes at <code>commit()</code></td></tr>
+        <tr><td><code>@Version</code> (optimistic)</td><td>every update carries the version it read; 0 rows updated → <code>OptimisticLockException</code> (wrapped in <code>RollbackException</code> at commit)</td><td><code>update … set …, version=? where id=? and version=?</code></td></tr>
+        <tr><td><code>LockModeType.OPTIMISTIC</code></td><td>re-check the version at commit even without changes</td><td>a <code>select version</code> at commit</td></tr>
+        <tr><td><code>OPTIMISTIC_FORCE_INCREMENT</code></td><td>bump the version on a read — version the aggregate through its parent</td><td><code>update … set version=? where id=? and version=?</code></td></tr>
+        <tr><td><code>PESSIMISTIC_WRITE</code></td><td>exclusive row lock until commit; waiters block, then <code>PessimisticLockException</code> / <code>LockTimeoutException</code> after <code>jakarta.persistence.lock.timeout</code></td><td><code>select … for update</code></td></tr>
+        <tr><td><code>PESSIMISTIC_READ</code></td><td>shared lock: others may read, none may write</td><td><code>for share</code> where the dialect has it</td></tr>
+        <tr><td><code>setRollbackOnly()</code></td><td>commit rolls back instead; <strong>no exception with Hibernate's defaults</strong></td><td>nothing — unless <code>hibernate.jpa.compliance.transaction=true</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Isolation is the connection's default (READ_COMMITTED on PostgreSQL, Oracle, SQL Server, H2; REPEATABLE_READ on MySQL/InnoDB); JPA sets none. Inside one context you have repeatable reads anyway, via the identity map.</p>
+
+  <pre data-code data-lang="java" data-nobar>
+// Optimistic retry: re-read and re-apply, never reuse the failed EntityManager
+int attempts = 0;
+while (true) {
+    attempts++;
+    try (EntityManager em = emf.createEntityManager()) {
+        em.getTransaction().begin();
+        StockLevel s = em.find(StockLevel.class, id);     // fresh copy, current version
+        s.pick(qty);                                      // the business change
+        em.getTransaction().commit();                     // update … where id=? and version=?
+        return attempts;
+    } catch (RollbackException e) {
+        if (!(e.getCause() instanceof OptimisticLockException) || attempts >= 3) throw e;
+        // someone else committed first: loop, with a fresh context
+    }
+}
+  </pre>
+
+  <h3 class="mt-8 mb-3">Inheritance strategies <span class="lm-badge">§8</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Inheritance strategies, their DDL and their query shapes</caption>
+      <thead><tr><th scope="col">Strategy</th><th scope="col">Tables</th><th scope="col">Polymorphic query</th><th scope="col">Subclass NOT NULL?</th><th scope="col">Ids</th><th scope="col">Default choice</th></tr></thead>
+      <tbody>
+        <tr><td><code>SINGLE_TABLE</code></td><td>one, with a discriminator column (and a check constraint on its values)</td><td>one select filtered by the discriminator</td><td>no — subclass columns must be nullable</td><td>any</td><td><strong>yes</strong>, unless subclass fields are many and mandatory</td></tr>
+        <tr><td><code>JOINED</code></td><td>parent + one per subclass sharing the primary key</td><td>parent <code>left join</code> every subclass table, with a <code>case</code> to decide the type</td><td>yes</td><td>any</td><td>when constraints and normalisation matter</td></tr>
+        <tr><td><code>TABLE_PER_CLASS</code></td><td>one complete table per concrete class</td><td><code>union all</code> over every table</td><td>yes</td><td><strong>SEQUENCE/TABLE only</strong> — ids must be unique across tables</td><td>almost never</td></tr>
+        <tr><td><code>@MappedSuperclass</code></td><td>none of its own; columns copied into each subclass table</td><td>impossible — it is not an entity</td><td>yes</td><td>any</td><td>for shared columns (audit fields), not for polymorphism</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Writes and reads that scale <span class="lm-badge">§9</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Performance levers and what each changes</caption>
+      <thead><tr><th scope="col">Lever</th><th scope="col">Setting / API</th><th scope="col">Measured effect in the worked example</th></tr></thead>
+      <tbody>
+        <tr><td>JDBC batching</td><td><code>hibernate.jdbc.batch_size=20</code> + <code>order_inserts</code> + <code>order_updates</code>, SEQUENCE ids</td><td>100 inserts: 100 statements with IDENTITY → <strong>8</strong> with SEQUENCE and batching (3 sequence calls + 5 batches)</td></tr>
+        <tr><td>Bounded context in loops</td><td><code>em.flush(); em.clear();</code> every batch, or a <code>StatelessSession</code></td><td>memory stays flat; dirty checking stays cheap</td></tr>
+        <tr><td>Read without hydrating</td><td><code>select new Dto(…)</code>, <code>Tuple</code>, <code>select count(p)</code></td><td>entities hydrated: 3 → <strong>0</strong></td></tr>
+        <tr><td>Read without dirty checking</td><td><code>session.setDefaultReadOnly(true)</code> / hint <code>org.hibernate.readOnly</code></td><td>entity updates after a change: <strong>0</strong></td></tr>
+        <tr><td>Change many rows</td><td>bulk JPQL <code>update</code> / <code>delete</code></td><td>one statement; clear the context afterwards</td></tr>
+        <tr><td>Narrow updates</td><td><code>@DynamicUpdate</code></td><td>only changed columns, at the cost of statement-cache misses</td></tr>
+        <tr><td>Second-level cache</td><td><code>@Cacheable</code> + a JCache/Infinispan provider (not on this class path)</td><td>caches <em>entities by id</em> (and natural ids, collections if asked); not queries</td></tr>
+        <tr><td>Query cache</td><td><code>hibernate.cache.use_query_cache</code> + the hint per query</td><td>caches id lists; invalidated by any write to the tables involved — rarely a win</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Measure with <code>Statistics</code> (<code>getPrepareStatementCount</code>, <code>getEntityLoadCount</code>, <code>getFlushCount</code>), never with <code>show_sql</code> alone: it prints one line per logical statement whether or not it was batched.</p>
+
+  <h3 class="mt-8 mb-3">Schema settings per environment <span class="lm-badge">§10</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Which schema setting is acceptable where</caption>
+      <thead><tr><th scope="col">Setting</th><th scope="col">Does</th><th scope="col">Local dev</th><th scope="col">CI tests</th><th scope="col">Staging / production</th></tr></thead>
+      <tbody>
+        <tr><td><code>drop-and-create</code> / <code>create-drop</code></td><td>drops everything mapped, recreates it</td><td>fine</td><td>fine</td><td><strong>never</strong></td></tr>
+        <tr><td><code>create</code></td><td>drops and creates, keeps the schema at exit</td><td>fine</td><td>fine</td><td><strong>never</strong></td></tr>
+        <tr><td><code>update</code></td><td>adds missing tables/columns; cannot rename, narrow, drop or move data; no review</td><td>tolerable</td><td>risky</td><td><strong>never</strong> — it is not a migration</td></tr>
+        <tr><td><code>validate</code> (<code>hibernate.hbm2ddl.auto</code> only)</td><td>compares mapping to tables and columns; refuses to start on a mismatch; ignores indexes, sequences and FK names</td><td>—</td><td>yes</td><td><strong>yes</strong>, with a migration tool owning the DDL</td></tr>
+        <tr><td><code>none</code></td><td>nothing — and it <strong>disables</strong> <code>validate</code> if both are set</td><td>—</td><td>—</td><td>with Flyway/Liquibase and without <code>validate</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Workflow: generate DDL from the entities once (<code>jakarta.persistence.schema-generation.scripts.action=create</code>) as a <em>starting point</em>, hand-edit it into <code>V1__init.sql</code>, let Flyway or Liquibase apply it, run <code>validate</code> at startup. Rolling deploys need backward-compatible migrations: add, write both, backfill, switch reads, drop.</p>
+
+  <h3 class="mt-8 mb-3">Entity identity and equality <span class="lm-badge">§11</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">equals/hashCode options for entities</caption>
+      <thead><tr><th scope="col">Option</th><th scope="col">Behaviour in a HashSet across persist</th><th scope="col">Use when</th></tr></thead>
+      <tbody>
+        <tr><td><code>equals</code>/<code>hashCode</code> on the generated id</td><td><strong>breaks</strong>: hash changes when the id is assigned; <code>contains</code> returns false after <code>persist</code></td><td>never with generated ids</td></tr>
+        <tr><td>Immutable business key (<code>sku</code>)</td><td>correct</td><td>a natural key exists and never changes</td></tr>
+        <tr><td><code>equals</code> on id (null-safe), <code>hashCode</code> returns a constant</td><td>correct; all entities share one bucket per set — fine for the small sets entities live in</td><td>no business key; the usual recommendation</td></tr>
+        <tr><td>No override (identity)</td><td>correct within one context, wrong across contexts</td><td>entities never compared across contexts</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-ink-muted">Never put a lazy <code>@ManyToOne</code> in <code>equals</code> or <code>toString</code>. Lombok <code>@Data</code> on an entity generates all of the above wrongly at once. Callbacks: <code>@PrePersist</code>/<code>@PreUpdate</code> (and <code>@EntityListeners</code>) for audit fields; <code>@SQLDelete</code> + <code>@SQLRestriction</code> for soft delete — JPQL and <code>find</code> no longer see the row, native SQL still does; <code>@Immutable</code> for reference data (changes are silently ignored).</p>
+
+  <h3 class="mt-8 mb-3">Exceptions → cause → fix <span class="lm-badge">§12</span></h3>
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common persistence exceptions with cause and fix</caption>
+      <thead><tr><th scope="col">Exception (as thrown by Hibernate 7.4)</th><th scope="col">Cause</th><th scope="col">Fix</th></tr></thead>
+      <tbody>
+        <tr><td><code>LazyInitializationException</code></td><td>lazy proxy or collection touched after the context closed</td><td>fetch in the query, entity graph, batch size, or return a DTO</td></tr>
+        <tr><td><code>RollbackException</code> ← <code>IllegalStateException</code> ← <code>TransientPropertyValueException</code></td><td>flushed an entity referencing an unsaved one, no cascade</td><td>persist the target first, or cascade <code>PERSIST</code></td></tr>
+        <tr><td><code>EntityExistsException</code> ← <code>PersistentObjectException</code> "detached entity passed to persist"</td><td><code>persist</code> on an object that has an id</td><td><code>merge</code>, or load and modify the managed instance</td></tr>
+        <tr><td><code>NonUniqueObjectException</code></td><td>two instances with the same id in one context</td><td>use the instance the context already holds</td></tr>
+        <tr><td><code>NonUniqueResultException</code> / <code>NoResultException</code></td><td><code>getSingleResult</code> on 2+ rows / 0 rows</td><td><code>getResultList</code>, <code>getSingleResultOrNull</code>, or a unique predicate</td></tr>
+        <tr><td><code>RollbackException</code> ← <code>OptimisticLockException</code> ← <code>StaleObjectStateException</code></td><td>update with a stale <code>@Version</code></td><td>new context, re-read, retry or report</td></tr>
+        <tr><td><code>RollbackException</code> ← <code>ConstraintViolationException</code> ← the driver's integrity exception</td><td>unique / FK / not-null / check violated at flush</td><td>validate before the write; read the constraint name</td></tr>
+        <tr><td><code>IllegalArgumentException</code> ← <code>UnknownPathException</code></td><td>a JPQL attribute that does not exist</td><td>JPQL names fields, not columns; use the metamodel</td></tr>
+        <tr><td><code>MultipleBagFetchException</code></td><td><code>join fetch</code> of two <code>List</code> collections</td><td><code>Set</code>, batch fetching, or two queries</td></tr>
+        <tr><td><code>SchemaManagementException</code></td><td><code>validate</code> found a missing table or column</td><td>run the migration; never <code>update</code></td></tr>
+        <tr><td><code>QueryTimeoutException</code> / <code>LockTimeoutException</code></td><td>statement or lock wait exceeded its timeout</td><td>fix the plan or the lock order; <code>LockTimeoutException</code> leaves the transaction active</td></tr>
+        <tr><td><code>PessimisticLockException</code></td><td>could not obtain the row lock</td><td>transaction is rolled back; retry with ordering</td></tr>
+        <tr><td><code>JDBCConnectionException</code></td><td>database unreachable or dead pooled connection</td><td>pool validation query, timeouts, retries at the edge</td></tr>
+        <tr><td>no exception after <code>setRollbackOnly()</code> + <code>commit()</code></td><td>Hibernate's default rolls back silently</td><td>check <code>getRollbackOnly()</code> or enable <code>hibernate.jpa.compliance.transaction</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">Commands</h3>
+  <pre data-code data-lang="bash" data-nobar>
+# fetch the pinned stack used by this module's verified programs
+node tools/fetch-deps.mjs java-jpa                 # → build/lib/java-jpa/*.jar (Hibernate 7.4.1, JPA 3.2, H2)
+
+# compile and run a program against it (Windows: ';' separates class-path entries; use ':' elsewhere)
+javac -d out -cp "build/lib/java-jpa/*" FirstEntity.java
+java  -cp "out;build/lib/java-jpa/*" -Djava.util.logging.config.file=tools/deps/logging.properties FirstEntity
+
+# the same with Maven coordinates
+#   org.hibernate.orm:hibernate-core:7.4.1.Final   jakarta.persistence:jakarta.persistence-api:3.2.0   com.h2database:h2:2.4.240
+
+# what to turn on while debugging (properties, not code)
+#   hibernate.show_sql=true  hibernate.format_sql=true  hibernate.highlight_sql=true
+#   hibernate.generate_statistics=true
+#   logging: org.hibernate.SQL=DEBUG  org.hibernate.orm.jdbc.bind=TRACE  org.hibernate.stat=DEBUG
+  </pre>
+</section>

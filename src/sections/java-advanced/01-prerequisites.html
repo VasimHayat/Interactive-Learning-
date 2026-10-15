@@ -1,0 +1,50 @@
+<section class="lm-section" id="prerequisites" data-title="Prerequisites" data-num="ii">
+  <p class="lm-eyebrow">Before you begin</p>
+  <h2 class="mb-4">Prerequisites</h2>
+
+  <p>This module assumes <em>Java Fundamentals</em> and <em>Java Intermediate</em>, or the equivalent: you write idiomatic modern Java without thinking about the syntax, and you are here to learn what the runtime does with it. Each item below is leaned on directly, with the section that taught it:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Prerequisite skills, where they were taught, and what depends on them here</caption>
+      <thead>
+        <tr><th scope="col">You should already be able to…</th><th scope="col">Taught in</th><th scope="col">Because this module…</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Implement <code>equals</code> and <code>hashCode</code> as a matched pair</td><td>Fundamentals §10</td><td>puts those objects into <code>ConcurrentHashMap</code>, where a broken contract becomes a lost reservation</td></tr>
+        <tr><td>Make a class immutable with <code>final</code> fields and defensive copies</td><td>Intermediate §10</td><td>treats immutability as the first and cheapest answer to every visibility problem in §2</td></tr>
+        <tr><td>Write a lambda and name its functional interface</td><td>Intermediate §4</td><td>submits <code>Runnable</code>s and <code>Callable</code>s to executors and chains <code>Function</code>s through <code>CompletableFuture</code></td></tr>
+        <tr><td>Trace a stream pipeline and say where it is lazy</td><td>Intermediate §5</td><td>contrasts it with a parallel stream and a work-stealing pool in §5 and §13</td></tr>
+        <tr><td>Declare a record and consume a sealed type with a pattern <code>switch</code></td><td>Intermediate §8, §9</td><td>models reservation outcomes as a sealed result type and serializes records in §14</td></tr>
+        <tr><td>Return an <code>Optional</code> and unwrap it without <code>get()</code></td><td>Intermediate §7</td><td>uses the same discipline for <code>Future.get()</code>, which blocks, and <code>CompletableFuture.join()</code>, which may throw</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">What you need installed</div>
+      <p class="mb-2">A JDK <strong>21 or newer</strong> — virtual threads (§7) and the <code>Thread.ofPlatform()</code> builder are final only from 21. Every diagnostic tool this module uses ships inside the JDK: <code>jcmd</code>, <code>jstack</code>, <code>jfr</code>, <code>jconsole</code> and <code>javap</code> live next to <code>javac</code> in its <code>bin</code> directory. No IDE, no profiler licence, nothing to download.</p>
+      <pre data-code data-lang="bash" data-nobar>
+java -version       # expect: openjdk version "21.x" or newer
+jcmd -l             # lists the JVMs you can attach to; an empty list is fine for now
+jfr --version       # the Flight Recorder command-line tool (§13)
+      </pre>
+      <p class="mb-0 text-sm">A machine with at least two cores makes the races in §1 reproducible. On a single core they are rarer, not absent — which is the whole point of §2.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Three habits to unlearn</div>
+      <p class="mb-2">Everything you wrote in the first two modules ran on one thread, and one thread lets you get away with assumptions that are simply false once there are two. Each of these is a bug you will write unless you consciously stop:</p>
+      <ul class="mb-0">
+        <li><strong>"<code>count++</code> is one operation."</strong> It is three — load, add, store — and another thread can run between any two of them. §1 shows the increment vanish; §4 shows the one-instruction replacement.</li>
+        <li><strong>"If I wrote it, the other thread can read it."</strong> Not unless something <em>orders</em> the write before the read. Without that, the reader is allowed to see the old value forever. §2 names the rules that create the ordering, and there are only a handful.</li>
+        <li><strong>"One thread per task."</strong> A platform thread costs a megabyte of stack and a kernel object; ten thousand of them do not fit. §5 pools them, §7 replaces them with something a thousand times cheaper, and both come with new failure modes.</li>
+      </ul>
+    </div>
+  </div>
+</section>

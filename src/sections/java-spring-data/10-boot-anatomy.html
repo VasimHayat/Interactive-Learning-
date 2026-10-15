@@ -1,0 +1,370 @@
+<section class="lm-section" id="boot-anatomy" data-title="A Spring Boot data application, dissected" data-num="1">
+  <p class="lm-eyebrow">Section 1</p>
+  <h2 class="mb-4">A Spring Boot data application, dissected</h2>
+
+  <p>The JPA module ended with a program that built a <code>PersistenceConfiguration</code>, opened an <code>EntityManagerFactory</code>, began a transaction, persisted a product and committed. Fifteen lines of plumbing around three lines of intent. Spring Boot's promise is that the plumbing is <em>inferred</em>: put <code>spring-boot-starter-data-jpa</code> and a JDBC driver on the class path, and the pool, the <code>EntityManagerFactory</code>, the transaction manager and a working repository all exist before your first line of code runs. The promise is kept, and the cost is that the plumbing is now invisible — which is fine right up to the moment it does something you did not expect. This section makes it visible once, so that every later section can refer back to a specific piece.</p>
+
+  <p>The mechanism is <strong>autoconfiguration</strong>. A starter is an empty jar whose only purpose is to bring other jars in; <code>spring-boot-starter-data-jpa</code> pulls Spring Data JPA, Hibernate, Spring's JDBC and transaction support and HikariCP. Spring Boot then evaluates a long list of <code>@AutoConfiguration</code> classes, each guarded by conditions — <code>@ConditionalOnClass</code> (is Hibernate on the class path?), <code>@ConditionalOnMissingBean</code> (did the user already declare a <code>DataSource</code>?), <code>@ConditionalOnProperty</code> — and registers beans for the ones whose conditions hold. Your own <code>@Bean</code> always wins over an autoconfigured one of the same type, because the autoconfiguration runs <em>after</em> your configuration and checks for a missing bean first.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: ask the context what it built</h3>
+
+  <p>This is the shape every program in this module follows: one <code>@SpringBootApplication</code> class, nested entities and repository interfaces, a <code>CommandLineRunner</code> bean for the demonstration, and the property map explained in "How to use this module". The runner here injects the infrastructure beans and prints facts about them, then performs one save and one query so the SQL can be read.</p>
+
+  <pre data-code data-lang="java" data-file="BootAnatomy.java" data-verify="BootAnatomy" data-package="lm.anatomy" data-hi="21,44,45,46,51,53,54">
+package lm.anatomy;
+
+import jakarta.persistence.*;
+import jakarta.persistence.metamodel.EntityType;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.Environment;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.transaction.PlatformTransactionManager;
+import javax.sql.DataSource;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)   // the repositories below are nested interfaces
+public class BootAnatomy {
+
+    @Entity(name = "Product")                                // nested entities need an explicit JPQL name
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        int priceInCents;                                    // becomes price_in_cents — read on
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        @Override public String toString() { return "Product[" + id + ", " + sku + ", " + priceInCents + "c]"; }
+    }
+
+    public interface ProductRepository extends JpaRepository<Product, Long> {
+        List<Product> findBySkuStartingWithOrderBySku(String prefix);   // no body: derived from the name (§3)
+    }
+
+    @Bean
+    CommandLineRunner demo(DataSource dataSource, PlatformTransactionManager txManager,
+                           EntityManagerFactory emf, ProductRepository repo, Environment env) {
+        return args -> {
+            System.out.println("-- what the starter configured --");
+            System.out.println("DataSource          = " + dataSource.getClass().getSimpleName());
+            System.out.println("TransactionManager  = " + txManager.getClass().getSimpleName());
+            System.out.println("repository is proxy = " + AopUtils.isAopProxy(repo));
+            System.out.println("proxy interfaces    = " + Arrays.stream(repo.getClass().getInterfaces())
+                    .map(Class::getSimpleName).filter(n -> n.contains("Repository")).sorted().toList());
+            System.out.println("entities            = " + emf.getMetamodel().getEntities().stream()
+                    .map(EntityType::getName).sorted().toList());
+            System.out.println("naming strategy     = " + String.valueOf(emf.getProperties().get("hibernate.physical_naming_strategy"))
+                    .replaceAll(".*\\.", ""));
+            System.out.println("ddl-auto            = " + env.getProperty("spring.jpa.hibernate.ddl-auto"));
+            System.out.println("open-in-view        = " + env.getProperty("spring.jpa.open-in-view"));
+
+            System.out.println("-- one save, one derived query --");
+            repo.save(new Product("BOLT-7", 80));
+            repo.save(new Product("NUT-3", 25));
+            repo.save(new Product("BOLT-9", 95));
+            System.out.println("count = " + repo.count());
+            System.out.println("bolts = " + repo.findBySkuStartingWithOrderBySku("BOLT"));
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(BootAnatomy.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:anatomy;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="BootAnatomy">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade 
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table product (price_in_cents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+-- what the starter configured --
+DataSource          = HikariDataSource
+TransactionManager  = JpaTransactionManager
+repository is proxy = true
+proxy interfaces    = [ProductRepository, Repository]
+entities            = [Product]
+naming strategy     = PhysicalNamingStrategySnakeCaseImpl
+ddl-auto            = create-drop
+open-in-view        = false
+-- one save, one derived query --
+Hibernate: select next value for product_seq
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: select next value for product_seq
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: insert into product (price_in_cents,sku,id) values (?,?,?)
+Hibernate: select count(*) from product p1_0
+count = 3
+Hibernate: select p1_0.id,p1_0.price_in_cents,p1_0.sku from product p1_0 where p1_0.sku like ? escape '\' order by p1_0.sku
+bolts = [Product[1, BOLT-7, 80c], Product[3, BOLT-9, 95c]]
+Hibernate: drop table if exists product cascade 
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>Read it top to bottom; every line is evidence of a decision Spring Boot made without being asked:</p>
+  <ul class="max-w-prose">
+    <li><strong>The DDL ran before the runner.</strong> Five <code>Hibernate:</code> lines precede the first <code>--</code> heading: the schema is generated while the <code>EntityManagerFactory</code> is being built, which happens during context refresh, before any runner. The <code>HTE_product</code> temporary table is Hibernate 7's scratch table for bulk HQL on H2 (JPA §1); it will appear in every output here.</li>
+    <li><strong><code>price_in_cents</code>, not <code>priceInCents</code>.</strong> Plain Hibernate kept the Java name. Spring Boot sets Hibernate's <code>hibernate.physical_naming_strategy</code> to the snake-case strategy — the program read the resolved property back from the factory and printed its class, <code>PhysicalNamingStrategySnakeCaseImpl</code>. The sequence is <code>product_seq</code> for the same reason. If you ever port an application from plain Hibernate to Boot, this is the first thing that breaks against an existing schema.</li>
+    <li><strong><code>HikariDataSource</code>.</strong> Hibernate's built-in pool (the one JPA §1 warned about) is never used: Boot's <code>DataSourceAutoConfiguration</code> saw HikariCP on the class path and built a pooled data source from <code>spring.datasource.*</code>. The embedded H2 URL was supplied explicitly; without it, Boot would have invented a random in-memory database name.</li>
+    <li><strong><code>JpaTransactionManager</code>.</strong> The <code>@Transactional</code> machinery of §5 is already wired to the <code>EntityManagerFactory</code>. Nothing in the program mentioned transactions, and yet each <code>repo.save</code> ran in one.</li>
+    <li><strong>The repository is a proxy</strong> implementing <code>ProductRepository</code> and Spring Data's marker <code>Repository</code>. There is no class called <code>ProductRepositoryImpl</code> anywhere; §2 opens the proxy up.</li>
+    <li><strong><code>ddl-auto = create-drop</code> and <code>open-in-view = false</code></strong> are the values from the property map. Leave both unset and Boot would choose <code>create-drop</code> here too — because H2 is an <em>embedded</em> database — but <code>none</code> against PostgreSQL, and it would leave open-in-view <em>on</em> and print a warning about it. Those three defaults (naming, <code>ddl-auto</code>, open-in-view) are the whole difference between "plain Hibernate" and "Hibernate inside Boot".</li>
+    <li><strong>Two sequence calls for three inserts.</strong> <code>product_seq</code> increments by 50, so one call should cover fifty ids. The pooled optimiser makes an extra call the first time to establish the low end of its block; after that it is one call per fifty rows (JPA §2, §9).</li>
+    <li><strong>The derived query.</strong> <code>findBySkuStartingWithOrderBySku</code> has no body. Spring Data parsed the method name into <code>sku like ? escape '\' order by sku</code> — the <code>escape</code> clause is there because a prefix containing <code>%</code> or <code>_</code> must not become a wildcard. Section 3 is about that grammar.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Watch autoconfiguration decide</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of what spring-boot-starter-data-jpa configures and in which order">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">From class path to running repository</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">What is being evaluated</div>
+        <div data-stepper-code data-for="autoconfig"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Condition and outcome</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Beans so far</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="autoconfig">
+    {
+      "lang": "java",
+      "code": "@SpringBootApplication                 // = @Configuration + @ComponentScan + @EnableAutoConfiguration\npublic class BootAnatomy { ... }\n\n// class path: spring-boot-starter-data-jpa, h2\nDataSourceAutoConfiguration            // spring.datasource.*\n  -> HikariDataSource                   // pool\nHibernateJpaAutoConfiguration          // spring.jpa.*\n  -> EntityManagerFactory               // Hibernate SessionFactory underneath\n  -> JpaTransactionManager\nJpaRepositoriesAutoConfiguration       // @EnableJpaRepositories for you\n  -> ProductRepository (proxy)\nCommandLineRunner demo(...)            // your code, last",
+      "steps": [
+        { "line": 1, "vars": { "phase": "refresh begins", "user config": "BootAnatomy scanned (package lm.anatomy)", "found": "ProductRepository interface, demo() @Bean method" }, "out": "(none yet)",
+          "note": "Component scanning runs first and only over the application class's package. That is why every program here names a package: scanning the default package would find every other program's classes too." },
+        { "line": 4, "vars": { "phase": "autoconfiguration candidates", "listed in": "META-INF/spring/…AutoConfiguration.imports", "candidates": "≈150, most rejected by a condition" }, "out": "(none yet)",
+          "note": "Autoconfiguration classes are listed in the starters' jars and evaluated after user configuration, so that @ConditionalOnMissingBean can see what you declared." },
+        { "line": 5, "vars": { "condition": "@ConditionalOnClass(DataSource, EmbeddedDatabaseType)", "holds": "yes — spring-jdbc is on the class path", "reads": "spring.datasource.url = jdbc:h2:mem:anatomy" }, "out": "(none yet)",
+          "note": "DataSourceAutoConfiguration is enabled by the class path and configured by properties. With no URL set it would have looked for an embedded driver and generated a random database name." },
+        { "line": 6, "vars": { "condition": "@ConditionalOnClass(HikariDataSource) + @ConditionalOnMissingBean(DataSource)", "holds": "yes — no user DataSource bean", "bean": "HikariDataSource" }, "out": "dataSource: HikariDataSource",
+          "note": "Hikari is preferred because it is on the class path; declare your own @Bean DataSource and this step is skipped entirely." },
+        { "line": 7, "vars": { "condition": "@ConditionalOnClass(EntityManager, SessionImplementor) + a DataSource bean", "holds": "yes", "reads": "spring.jpa.* and spring.jpa.properties.*" }, "out": "dataSource: HikariDataSource",
+          "note": "HibernateJpaAutoConfiguration is where Boot's three opinions are applied: snake-case naming, ddl-auto chosen from the database type, and show-sql if asked." },
+        { "line": 8, "vars": { "bean": "LocalContainerEntityManagerFactoryBean → EntityManagerFactory", "packages scanned for @Entity": "lm.anatomy (the app's package)", "schema": "create-drop runs here" }, "out": "dataSource: HikariDataSource\nentityManagerFactory",
+          "note": "Entities are found by scanning the same package as the application class (override with @EntityScan). Building the factory is the slow step — it is also when the five DDL lines were printed." },
+        { "line": 9, "vars": { "condition": "@ConditionalOnMissingBean(PlatformTransactionManager)", "holds": "yes", "bean": "JpaTransactionManager bound to the factory" }, "out": "dataSource: HikariDataSource\nentityManagerFactory\ntransactionManager",
+          "note": "This is the bean @Transactional will use in §5. @EnableTransactionManagement is also applied for you by TransactionAutoConfiguration." },
+        { "line": 10, "vars": { "condition": "@ConditionalOnClass(JpaRepository) + @ConditionalOnMissingBean(JpaRepositoryFactoryBean)", "holds": "yes", "effect": "@EnableJpaRepositories on the app package" }, "out": "dataSource: HikariDataSource\nentityManagerFactory\ntransactionManager",
+          "note": "You never wrote @EnableJpaRepositories — Boot adds it. The program writes it anyway, only to pass considerNestedRepositories = true, because its repositories are nested interfaces." },
+        { "line": 11, "vars": { "found": "interface ProductRepository extends JpaRepository", "bean": "a JDK proxy over SimpleJpaRepository", "derived queries parsed": "findBySkuStartingWithOrderBySku → validated now, not on first call" }, "out": "dataSource: HikariDataSource\nentityManagerFactory\ntransactionManager\nproductRepository (proxy)",
+          "note": "Method names are parsed at startup against the entity metamodel: a typo such as findBySkuu fails the application, which is the right time to find out." },
+        { "line": 12, "vars": { "phase": "refresh complete", "then": "every CommandLineRunner / ApplicationRunner, in @Order", "transaction": "none — the runner is plain code" }, "out": "dataSource: HikariDataSource\nentityManagerFactory\ntransactionManager\nproductRepository (proxy)\n→ demo() runs",
+          "note": "Runners execute after the context is ready. Each repository call opens and commits its own transaction, which is why the output shows SQL between the runner's println lines." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Where does a property come from?</h3>
+
+  <p>Every program here calls <code>setDefaultProperties</code>, which is the <em>lowest</em>-priority source Spring Boot has: anything else that sets the same key wins. That is deliberate — a reader who runs these programs with <code>--spring.jpa.show-sql=false</code> gets what they asked for. The order itself is long and worth having internalised, because "why is this setting not taking effect?" is the most common configuration question there is.</p>
+
+  <div class="lm-card" data-sandbox="property-precedence">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/></svg>
+      Which source of <code>spring.jpa.show-sql</code> wins?
+    </div>
+    <p class="text-sm text-ink-muted">Tick the places where the property is set. Each source sets the value shown beside it; the readout names the winner and shows the full precedence order.</p>
+    <div class="lm-controls" style="flex-wrap:wrap">
+      <label class="lm-check"><input type="checkbox" data-sb-src="defaults" checked> <code>setDefaultProperties</code> → <code>true</code></label>
+      <label class="lm-check"><input type="checkbox" data-sb-src="appprops"> <code>application.properties</code> → <code>false</code></label>
+      <label class="lm-check"><input type="checkbox" data-sb-src="profile"> <code>application-dev.properties</code> → <code>true</code></label>
+      <label class="lm-check"><input type="checkbox" data-sb-src="env"> env var <code>SPRING_JPA_SHOW_SQL</code> → <code>false</code></label>
+      <label class="lm-check"><input type="checkbox" data-sb-src="cli"> <code>--spring.jpa.show-sql=true</code> on the command line</label>
+      <label class="lm-check"><input type="checkbox" data-sb-src="test"> <code>@TestPropertySource</code> → <code>false</code></label>
+      <label class="lm-check"><input type="checkbox" data-sb-profile checked> profile <code>dev</code> is active</label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The pieces, named</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="The parts of a Spring Boot data application">
+      <button type="button" class="lm-tab" role="tab" id="tab-boot-anatomy-app" aria-controls="panel-boot-anatomy-app" aria-selected="true" tabindex="0">@SpringBootApplication</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-boot-anatomy-beans" aria-controls="panel-boot-anatomy-beans" aria-selected="false" tabindex="-1">Beans: @Bean vs scanning</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-boot-anatomy-props" aria-controls="panel-boot-anatomy-props" aria-selected="false" tabindex="-1">spring.jpa.* properties</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-boot-anatomy-debug" aria-controls="panel-boot-anatomy-debug" aria-selected="false" tabindex="-1">The --debug report</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-boot-anatomy-app" aria-labelledby="tab-boot-anatomy-app" tabindex="0">
+      <p><code>@SpringBootApplication</code> is three annotations: <code>@SpringBootConfiguration</code> (a <code>@Configuration</code>), <code>@ComponentScan</code> rooted at the class's package, and <code>@EnableAutoConfiguration</code>. It implies nothing about JPA — <code>@EnableJpaRepositories</code> and <code>@EnableTransactionManagement</code> arrive through autoconfiguration, conditionally, and only because the starter is present. Put the class at the <em>top</em> of your package tree; everything below it is scanned, everything beside it is not.</p>
+      <p class="mb-0">The programs here add <code>@EnableJpaRepositories(considerNestedRepositories = true)</code> explicitly. Repositories are normally top-level interfaces and Spring Data skips nested ones by default; one file per program forces them to be nested. Writing the annotation yourself replaces Boot's — the attributes you omit (base packages) fall back to the application package, as before.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-boot-anatomy-beans" aria-labelledby="tab-boot-anatomy-beans" tabindex="0" hidden>
+      <p>Two ways to make a bean. <strong>Stereotype scanning</strong>: annotate a class <code>@Component</code>, <code>@Service</code> or <code>@Repository</code> and let the scan find it — the usual choice for your own classes, and the only way <code>@Transactional</code> proxies (§5) get created. <strong><code>@Bean</code> methods</strong> in a configuration class: you construct the object; the usual choice for third-party types and for small runners like <code>demo()</code> above. Both end up as singletons in the same container; both can inject anything by constructor or method parameter.</p>
+      <pre data-code data-lang="java" data-nobar>
+@Service                                       // found by scanning; proxied if it has @Transactional methods
+public class InventoryService {
+    private final ProductRepository products;  // constructor injection: final, testable, no @Autowired needed
+    InventoryService(ProductRepository products) { this.products = products; }
+}
+
+@Bean CommandLineRunner demo(ProductRepository repo) { return args -> { ... }; }   // runs once, after refresh
+      </pre>
+      <p class="mb-0"><code>CommandLineRunner</code> receives the raw <code>String[]</code>; <code>ApplicationRunner</code> receives parsed <code>ApplicationArguments</code>. Several runners execute in <code>@Order</code>. A runner is ordinary code: no transaction, no persistence context — every repository call it makes is its own unit of work, which is the behaviour the SQL above shows.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-boot-anatomy-props" aria-labelledby="tab-boot-anatomy-props" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">The spring.jpa properties that matter and their defaults</caption>
+          <thead><tr><th scope="col">Property</th><th scope="col">Default</th><th scope="col">Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>spring.jpa.hibernate.ddl-auto</code></td><td><code>create-drop</code> for an embedded DB, else <code>none</code></td><td>Maps to <code>hibernate.hbm2ddl.auto</code>. The embedded detection is what makes "works on H2, no tables on Postgres" happen.</td></tr>
+            <tr><td><code>spring.jpa.hibernate.naming.physical-strategy</code></td><td>snake-case</td><td><code>priceInCents</code> → <code>price_in_cents</code>. Set it to <code>org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl</code> to keep Java names, as plain Hibernate does.</td></tr>
+            <tr><td><code>spring.jpa.open-in-view</code></td><td><code>true</code> (with a warning)</td><td>Keeps a persistence context open for the whole web request. §6 argues for <code>false</code>.</td></tr>
+            <tr><td><code>spring.jpa.show-sql</code></td><td><code>false</code></td><td>Echo SQL to standard output via <code>hibernate.show_sql</code>. For real logging use the <code>org.hibernate.SQL</code> logger instead (JPA §12).</td></tr>
+            <tr><td><code>spring.jpa.properties.*</code></td><td>—</td><td>Passthrough: anything after <code>properties.</code> reaches Hibernate untouched — <code>spring.jpa.properties.hibernate.jdbc.batch_size=50</code>, <code>…hibernate.generate_statistics=true</code>.</td></tr>
+            <tr><td><code>spring.datasource.url / username / password</code></td><td>embedded if a driver is found</td><td>Feeds the pool. <code>spring.datasource.hikari.*</code> tunes HikariCP (§12).</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-boot-anatomy-debug" aria-labelledby="tab-boot-anatomy-debug" tabindex="0" hidden>
+      <p>Run any Boot application with <code>--debug</code> and it prints the <em>condition evaluation report</em>: every autoconfiguration that matched, with the condition that let it in, and every one that did not, with the condition that kept it out. Reading it answers "why is there no <code>DataSource</code>?" in seconds. The shape (abbreviated; the real report is hundreds of lines and is not part of the verified output):</p>
+      <pre data-output data-label="Shape of the --debug condition report">
+Positive matches:
+-----------------
+   DataSourceAutoConfiguration matched:
+      - @ConditionalOnClass found required classes 'javax.sql.DataSource', 'EmbeddedDatabaseType'
+   HibernateJpaAutoConfiguration matched:
+      - @ConditionalOnClass found required classes 'LocalContainerEntityManagerFactoryBean', 'EntityManager', 'SessionImplementor'
+   JpaRepositoriesAutoConfiguration matched:
+      - @ConditionalOnMissingBean (types: JpaRepositoryFactoryBean, JpaRepositoryConfigExtension) did not find any beans
+
+Negative matches:
+-----------------
+   DataSourceTransactionManagerAutoConfiguration:
+      - @ConditionalOnMissingBean found bean 'transactionManager' (JpaTransactionManager)   -- JPA's won
+   FlywayAutoConfiguration:
+      - @ConditionalOnClass did not find required class 'org.flywaydb.core.Flyway'
+      </pre>
+      <p class="mb-0">The second negative match is the one to remember: Flyway is not configured because it is not on the class path. Add the dependency and the same report flips to a positive match, with no other change (§12).</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Spring Data JDBC, briefly</h3>
+
+  <p>Spring Data JPA is not the only Spring Data module that talks to a relational database. <strong>Spring Data JDBC</strong> offers the same repository interfaces over plain JDBC with no persistence context, no lazy loading, no dirty checking and no caching: an aggregate is loaded whole and saved whole. It is simpler to reason about and has none of the N+1 and <code>LazyInitializationException</code> failure modes of §6 — and, by the same token, none of the first-level cache, the automatic update-on-commit or the mapping flexibility of JPA. If your domain is a set of small aggregates and you are tired of ORM surprises, it is worth a look. This module stays with JPA because the warehouse's associations, locking and batching are exactly the territory where JPA earns its complexity.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Autoconfiguration gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The application class's package is the scan root.</strong> Entities and repositories in a sibling package are invisible — the symptom is "Not a managed type" for an entity, or a <code>NoSuchBeanDefinitionException</code> for a repository. Fix with <code>@EntityScan</code> / <code>@EnableJpaRepositories(basePackages)</code>, or move the class.</li>
+        <li><strong><code>ddl-auto</code> changes meaning with the database.</strong> The embedded-database default silently becomes <code>none</code> the day you point at PostgreSQL. Set it explicitly in every profile (§12).</li>
+        <li><strong>Declaring a bean replaces the autoconfigured one — entirely.</strong> A hand-written <code>DataSource</code> bean means <code>spring.datasource.*</code> is now ignored, including the Hikari tuning you set in properties.</li>
+        <li><strong>Runners run with no transaction.</strong> Each repository call commits on its own. A <code>LazyInitializationException</code> in a runner is this, not a mapping bug.</li>
+        <li><strong>Boot's naming strategy is not Hibernate's default.</strong> Against an existing schema with camel-case columns, either set the standard physical strategy or add <code>@Column(name)</code> everywhere.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-boot-anatomy-1" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>An entity field <code>int priceInCents</code> produced the column <code>price_in_cents</code> above, while the same entity in the JPA module produced <code>priceInCents</code>. What changed?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-boot-anatomy-1"><span>Hibernate 7.4.5 (used here) changed its default naming strategy from 7.4.1 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-boot-anatomy-1"><span>Spring Boot's JPA autoconfiguration sets Hibernate's physical naming strategy to a snake-case implementation <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-boot-anatomy-1"><span>H2 lower-cases and underscores identifiers unless they are quoted <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-boot-anatomy-1"><span>Spring Data derives column names from the repository's method names <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> The program printed the resolved property: <code>hibernate.physical_naming_strategy</code> is <code>PhysicalNamingStrategySnakeCaseImpl</code>, set by <code>HibernateJpaAutoConfiguration</code>. Hibernate on its own uses the standard strategy, which keeps the Java name.</p>
+        <p class="mb-0"><strong>A</strong> is wrong: Hibernate's default has not changed between patch releases, and the JPA module's 7.4.1 output is the proof that the default keeps camel case. <strong>C</strong> describes H2's case folding of unquoted identifiers, which would give <code>PRICEINCENTS</code>, not add underscores. <strong>D</strong> confuses two unrelated mechanisms: method-name derivation (§3) reads entity <em>property</em> names and never influences the schema.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-boot-anatomy-2" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>You remove <code>spring.jpa.hibernate.ddl-auto</code> from a project that works against H2 and point <code>spring.datasource.url</code> at PostgreSQL. The first query fails with "relation product does not exist". Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-boot-anatomy-2"><span>PostgreSQL requires <code>hibernate.hbm2ddl.auto</code> to be set through <code>spring.jpa.properties</code>, not the <code>spring.jpa.hibernate</code> prefix <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-boot-anatomy-2"><span>Spring Boot only generates schema for databases it can detect as embedded, and it detects PostgreSQL as H2 in compatibility mode <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-boot-anatomy-2"><span>The default for <code>ddl-auto</code> is <code>create-drop</code> only for an embedded database; for anything else it is <code>none</code>, so no tables were created <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-boot-anatomy-2"><span>The snake-case naming strategy created <code>PRODUCT</code> in upper case, which PostgreSQL treats as a different relation <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The default is computed from the data source: embedded (H2, HSQLDB, Derby in memory) gets <code>create-drop</code>, everything else gets <code>none</code>. It is the single most common "works locally, fails in staging" cause, and the fix is to set the property explicitly per profile — <code>validate</code> in production with a migration tool owning the schema.</p>
+        <p class="mb-0"><strong>A</strong> is wrong: both spellings reach Hibernate; <code>spring.jpa.hibernate.ddl-auto</code> is the documented one. <strong>B</strong> is invented — there is no such misdetection. <strong>D</strong> is wrong: the snake-case strategy emits lower case, and the error says the relation does not exist at all, which is a missing table rather than a case mismatch.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-boot-anatomy-3" data-answer="a,b,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these does <code>@SpringBootApplication</code> itself imply, without any starter on the class path? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>@Configuration</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>@ComponentScan</code> of the class's package <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>@EnableJpaRepositories</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>@EnableAutoConfiguration</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, B and D.</strong> Those three are the annotation's definition. Everything JPA-specific — repositories, transaction management, the entity manager — is added <em>by</em> autoconfiguration, conditionally, when the starter's classes are present.</p>
+        <p class="mb-0"><strong>C</strong> is the trap: <code>@EnableJpaRepositories</code> is applied for you by <code>JpaRepositoriesAutoConfiguration</code>, which is why removing the starter silently removes your repositories rather than failing to compile. The programs here write it explicitly only to set <code>considerNestedRepositories</code>.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-boot-anatomy-4" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>Every program in this module calls <code>setDefaultProperties</code> rather than shipping an <code>application.properties</code>. A reader runs one with <code>--spring.jpa.show-sql=false</code>. What happens?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-boot-anatomy-4"><span>The default properties win because they were set programmatically, which is the most specific source <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-boot-anatomy-4"><span>Spring Boot refuses to start: the same key is bound twice <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-boot-anatomy-4"><span>Both apply: SQL is echoed during schema generation but not afterwards <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-boot-anatomy-4"><span>The command-line argument wins; default properties are the lowest-priority source there is <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> Command-line arguments sit near the top of the precedence order; <code>setDefaultProperties</code> sits at the very bottom, below <code>application.properties</code> and even below <code>@PropertySource</code>. That is why the programs use it: anything the reader sets, anywhere, overrides it.</p>
+        <p class="mb-0"><strong>A</strong> inverts the order — "programmatic" is not "specific"; the method's name says what it is. <strong>B</strong> is wrong: multiple sources for one key are the normal case, resolved by precedence, never an error. <strong>C</strong> is wrong because a property has exactly one effective value for the lifetime of the environment.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="boot-anatomy"> Mark this section complete
+  </label>
+</section>

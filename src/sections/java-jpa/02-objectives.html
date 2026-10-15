@@ -1,0 +1,29 @@
+<section class="lm-section" id="objectives" data-title="Learning objectives" data-num="iii">
+  <p class="lm-eyebrow">The contract</p>
+  <h2 class="mb-4">Learning objectives</h2>
+
+  <p>By the end of this module you will be able to do each of the following without reaching for a reference. The final quiz tests exactly these twelve.</p>
+
+  <ol class="max-w-prose">
+    <li><strong>Explain</strong> the object–relational impedance mismatch, what JPA standardises and what Hibernate adds, and read the SQL Hibernate emits for a simple persist and load.</li>
+    <li><strong>Map</strong> an entity with <code>@Id</code>, a generation strategy chosen for the database, <code>@Column</code> constraints, enums as strings, <code>java.time</code> columns and <code>@Embeddable</code> value objects, and say what each generation strategy costs.</li>
+    <li><strong>Trace</strong> an entity through transient, managed, detached and removed states, predict when the first-level cache serves a load, and explain dirty checking and flush timing.</li>
+    <li><strong>Model</strong> many-to-one, one-to-many, many-to-many and one-to-one associations, identify the owning side, and keep both sides in sync with cascade and orphan removal chosen deliberately.</li>
+    <li><strong>Diagnose</strong> the N+1 problem from statement counts and fix it with <code>join fetch</code>, an entity graph or batch fetching; explain <code>LazyInitializationException</code> and why open-session-in-view hides rather than solves it.</li>
+    <li><strong>Write</strong> JPQL with joins, parameters, aggregates, constructor projections and pagination; build the same query with the Criteria API; know when native SQL is the right choice.</li>
+    <li><strong>Control</strong> transaction boundaries and flushing, and implement optimistic locking with <code>@Version</code> and pessimistic locking with <code>LockModeType</code>, naming the failure each prevents.</li>
+    <li><strong>Choose</strong> an inheritance strategy (single table, joined, table per class, mapped superclass) from the DDL and query shape each produces.</li>
+    <li><strong>Tune</strong> writes with JDBC batching and ordered inserts, reads with DTO projections and read-only sessions, and explain what the second-level and query caches can and cannot do.</li>
+    <li><strong>Manage</strong> schema with generation modes for development, <code>validate</code> for safety, and a migration tool for production; explain why <code>update</code> is never a deployment strategy.</li>
+    <li><strong>Design</strong> entities that behave in collections (identity, <code>equals</code>/<code>hashCode</code> on a business key or a stable id), use lifecycle callbacks and entity listeners for auditing, and model soft deletes.</li>
+    <li><strong>Read</strong> <code>show_sql</code> output and statistics to explain a slow page, and map the common exceptions to their causes and fixes.</li>
+  </ol>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">Deliberately out of scope</div>
+      <p class="mb-0"><strong>Spring Data JPA</strong> and Spring Boot get one paragraph, in §12, on how they wrap what this module teaches — a <code>JpaRepository</code> is an <code>EntityManager</code> with the boilerplate generated, and every problem here surfaces there with a Spring stack trace on top. Hibernate <strong>Envers</strong> (audit history), <strong>multi-tenancy</strong>, <strong>Hibernate Reactive</strong> and <strong>jOOQ</strong> are each mentioned once where they fit. Connection pools are used (Hibernate's built-in one, which is not for production) but not tuned; HikariCP is named as the one to use.</p>
+    </div>
+  </div>
+</section>

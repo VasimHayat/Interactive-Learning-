@@ -1,0 +1,409 @@
+<section class="lm-section" id="persistence-context" data-title="The persistence context and the entity lifecycle" data-num="3">
+  <p class="lm-eyebrow">Section 3</p>
+  <h2 class="mb-4">The persistence context and the entity lifecycle</h2>
+
+  <p>Everything surprising about JPA — the update you never wrote, the second <code>find</code> that hits no database, the change that silently vanished — comes from one object: the <strong>persistence context</strong>. An <code>EntityManager</code> owns one. It is two things at once: an <strong>identity map</strong> (for each primary key, at most one Java instance) and a <strong>snapshot store</strong> (a copy of every managed entity's state as it was loaded). Hibernate uses the first to answer loads from memory and the second to work out, at flush time, which rows changed and what SQL to emit for them. That second mechanism is called <strong>dirty checking</strong>, and it is why you never call an <code>update</code> method: there is none.</p>
+
+  <p>An entity instance is always in exactly one of four states relative to a context. <strong>Transient</strong>: a plain Java object the context has never seen, no row behind it. <strong>Managed</strong>: tracked by a context; changes to it will be written at flush. <strong>Detached</strong>: it has a row, but no context is watching it any more — the context was closed or the instance was evicted. <strong>Removed</strong>: scheduled for deletion at flush. Every <code>EntityManager</code> method you call is a transition between those states, and the worked example walks all of them.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: one entity, nine transitions</h3>
+
+  <p>Read the <code>Hibernate:</code> lines as closely as the prose. Where SQL appears, and where it does not, is the lesson.</p>
+
+  <pre data-code data-lang="java" data-file="Lifecycle.java" data-verify="Lifecycle" data-hi="43,60,69,83,103,121">
+import jakarta.persistence.*;
+
+public class Lifecycle {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        private int priceInCents;
+
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        Long id() { return id; }
+        String sku() { return sku; }
+        int priceInCents() { return priceInCents; }
+        void setPriceInCents(int p) { this.priceInCents = p; }
+        @Override public String toString() { return "Product[" + id + ", " + sku + ", " + priceInCents + "c]"; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Lifecycle;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "true")
+            .createEntityManagerFactory();
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+
+            System.out.println("-- 1. persist: transient -> managed, insert deferred to commit --");
+            Long id;
+            try (EntityManager em = emf.createEntityManager()) {
+                Product bolt = new Product("BOLT-7", 80);
+                System.out.println("managed before persist: " + em.contains(bolt));
+                em.getTransaction().begin();
+                em.persist(bolt);
+                System.out.println("managed after persist:  " + em.contains(bolt) + ", id already assigned: " + (bolt.id() != null));
+                em.getTransaction().commit();
+                id = bolt.id();
+            }
+
+            System.out.println("-- 2. find twice in one context: one select, one instance --");
+            try (EntityManager em = emf.createEntityManager()) {
+                Product a = em.find(Product.class, id);
+                Product b = em.find(Product.class, id);
+                System.out.println("same instance: " + (a == b));
+            }
+
+            System.out.println("-- 3. dirty checking: a plain setter becomes an update at commit --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product p = em.find(Product.class, id);
+                p.setPriceInCents(85);
+                System.out.println("no SQL yet; committing...");
+                em.getTransaction().commit();
+            }
+
+            System.out.println("-- 4. detach, then modify: nothing is written --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product p = em.find(Product.class, id);
+                em.detach(p);
+                p.setPriceInCents(999);
+                em.getTransaction().commit();
+                System.out.println("managed after detach: " + em.contains(p));
+            }
+
+            System.out.println("-- 5. merge a detached copy: select, then update; a different instance comes back --");
+            Product detached;
+            try (EntityManager em = emf.createEntityManager()) {
+                detached = em.find(Product.class, id);     // loaded, then the context closes
+            }
+            detached.setPriceInCents(90);                       // modified outside any context
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product merged = em.merge(detached);
+                System.out.println("merged == detached: " + (merged == detached)
+                        + ", detached managed: " + em.contains(detached) + ", merged managed: " + em.contains(merged));
+                em.getTransaction().commit();
+            }
+
+            System.out.println("-- 6. refresh discards an in-memory change --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product p = em.find(Product.class, id);
+                p.setPriceInCents(1);
+                em.refresh(p);
+                System.out.println("after refresh: " + p.priceInCents() + "c");
+                em.getTransaction().commit();
+            }
+
+            System.out.println("-- 7. flush: SQL now, visible inside the same transaction --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                em.persist(new Product("NUT-3", 25));
+                em.flush();
+                Number rows = (Number) em.createNativeQuery("select count(*) from product").getSingleResult();
+                System.out.println("rows visible after flush: " + rows);
+                em.getTransaction().commit();
+            }
+
+            System.out.println("-- 8. getReference: a proxy, no select until a field is read --");
+            try (EntityManager em = emf.createEntityManager()) {
+                Product ref = em.getReference(Product.class, id);
+                System.out.println("is a proxy subclass: " + (ref.getClass() != Product.class));
+                System.out.println("reading sku forces the load...");
+                System.out.println("sku = " + ref.sku());
+            }
+
+            System.out.println("-- 9. remove: delete at commit --");
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product p = em.find(Product.class, id);
+                em.remove(p);
+                System.out.println("still managed? " + em.contains(p));
+                em.getTransaction().commit();
+                System.out.println("find after remove: " + em.find(Product.class, id));
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Lifecycle">
+Hibernate: create global temporary table HTE_product(priceInCents integer, rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists product_SEQ
+Hibernate: create sequence product_SEQ start with 1 increment by 50
+Hibernate: create table product (priceInCents integer not null, id bigint not null, sku varchar(16) not null unique, primary key (id))
+-- 1. persist: transient -> managed, insert deferred to commit --
+managed before persist: false
+Hibernate: select next value for product_SEQ
+managed after persist:  true, id already assigned: true
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+-- 2. find twice in one context: one select, one instance --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+same instance: true
+-- 3. dirty checking: a plain setter becomes an update at commit --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+no SQL yet; committing...
+Hibernate: update product set priceInCents=?,sku=? where id=?
+-- 4. detach, then modify: nothing is written --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+managed after detach: false
+-- 5. merge a detached copy: select, then update; a different instance comes back --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+merged == detached: false, detached managed: false, merged managed: true
+Hibernate: update product set priceInCents=?,sku=? where id=?
+-- 6. refresh discards an in-memory change --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+after refresh: 90c
+-- 7. flush: SQL now, visible inside the same transaction --
+Hibernate: select next value for product_SEQ
+Hibernate: insert into product (priceInCents,sku,id) values (?,?,?)
+Hibernate: select count(*) from product
+rows visible after flush: 2
+-- 8. getReference: a proxy, no select until a field is read --
+is a proxy subclass: true
+reading sku forces the load...
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+sku = BOLT-7
+-- 9. remove: delete at commit --
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+still managed? false
+Hibernate: delete from product where id=?
+Hibernate: select p1_0.id,p1_0.priceInCents,p1_0.sku from product p1_0 where p1_0.id=?
+find after remove: null
+  </pre>
+
+  <p>Nine blocks, nine lessons:</p>
+  <ol class="max-w-prose">
+    <li><strong><code>persist</code> is not <code>insert</code>.</strong> The only SQL at <code>persist</code> time is <code>select next value for product_SEQ</code> — Hibernate must know the id to register the instance in the identity map, and a <code>SEQUENCE</code> strategy lets it get one without inserting. The <code>insert</code> itself waits for the flush at commit. (With <code>IDENTITY</code> the insert would have to happen immediately — §2 explains why that disables batching.)</li>
+    <li><strong>The identity map answers the second <code>find</code>.</strong> One <code>select</code>, two calls, <code>a == b</code>. Inside one context an entity is loaded at most once; this is the <em>first-level cache</em>, and it is scoped to the <code>EntityManager</code>, not the application.</li>
+    <li><strong>Dirty checking.</strong> A plain setter on a managed instance, no further API call, and an <code>update</code> appears at commit. Hibernate compared the instance against the snapshot it took at load time. Note that the <code>update</code> sets <em>every</em> column (<code>priceInCents=?,sku=?</code>), not just the changed one — §9 shows <code>@DynamicUpdate</code> for the cases where that matters.</li>
+    <li><strong>Detached means invisible.</strong> After <code>detach</code>, the setter runs on a plain object as far as the context is concerned. Commit writes nothing. This is the state every entity is in once its <code>EntityManager</code> closes — which is most of the time in a web application.</li>
+    <li><strong><code>merge</code> copies, it does not adopt.</strong> Hibernate loads the current row (the first <code>select</code>; the second comes from <code>find</code> inside the previous block), copies the detached object's state onto the <em>managed</em> instance, and returns that managed instance. The object you passed in is still detached: <code>merged == detached: false</code>. Keep using the return value, never the argument.</li>
+    <li><strong><code>refresh</code> is the opposite of flush.</strong> It overwrites the in-memory state from the database; the <code>1c</code> is gone and <code>90c</code> is back.</li>
+    <li><strong><code>flush</code> forces the SQL now, but not the commit.</strong> The native <code>count(*)</code> runs in the same transaction and sees the new row. Hibernate would in fact have flushed automatically before that query: in <code>FlushModeType.AUTO</code> any JPQL or native query triggers a flush first, so queries never miss pending writes. The explicit call just makes the order visible.</li>
+    <li><strong><code>getReference</code> returns a proxy.</strong> No <code>select</code> runs until <code>sku()</code> is called. Use it to set an association (<code>line.setOrder(em.getReference(Order.class, id))</code>) without loading the target. The class is a runtime subclass generated by ByteBuddy — which is why entity classes and their accessors must not be <code>final</code>.</li>
+    <li><strong><code>remove</code> is deferred too.</strong> The instance leaves the context immediately (<code>still managed? false</code>) but the <code>delete</code> runs at commit. The <code>find</code> afterwards goes to the database — the context no longer holds the instance — and returns <code>null</code>.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Watch the context</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of an entity moving between lifecycle states">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">Identity map, snapshot and action queue</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="lifecycle"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Persistence context</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">SQL sent to the database</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="lifecycle">
+    {
+      "lang": "java",
+      "code": "Product bolt = new Product(\"BOLT-7\", 80);   // transient\nem.getTransaction().begin();\nem.persist(bolt);                            // managed\nbolt.setPriceInCents(85);                    // still managed, now dirty\nProduct again = em.find(Product.class, 1L);  // identity map hit\nem.flush();                                  // SQL runs\nem.detach(bolt);                             // detached\nbolt.setPriceInCents(999);                   // nobody is watching\nProduct managed = em.merge(bolt);            // copy onto a managed instance\nem.remove(managed);                          // removed\nem.getTransaction().commit();                // flush + commit",
+      "steps": [
+        { "line": 1, "vars": { "bolt state": "transient", "identity map": "{}", "snapshots": "{}", "action queue": "(empty)" }, "out": "",
+          "note": "A constructor call creates a plain object. The context has never heard of it; there is no row and no id." },
+        { "line": 3, "vars": { "bolt state": "managed", "identity map": "{ Product#1 → bolt }", "snapshots": "{ #1: [BOLT-7, 80] }", "action queue": "INSERT bolt" }, "out": "select next value for product_SEQ",
+          "note": "persist asks the sequence for an id, registers the instance under that key, takes a snapshot of its state and queues an insert. No insert has run." },
+        { "line": 4, "vars": { "bolt state": "managed (dirty)", "identity map": "{ Product#1 → bolt }", "snapshots": "{ #1: [BOLT-7, 80] }", "action queue": "INSERT bolt" }, "out": "select next value for product_SEQ",
+          "note": "A setter changes the object, not the snapshot. The difference between them is what dirty checking will find at flush time. Nothing was called on the EntityManager." },
+        { "line": 5, "vars": { "again == bolt": "true", "identity map": "{ Product#1 → bolt }", "snapshots": "{ #1: [BOLT-7, 80] }", "action queue": "INSERT bolt" }, "out": "select next value for product_SEQ",
+          "note": "find looks in the identity map first. Key 1 is there, so the same instance comes back and no select runs — even though the row does not exist in the database yet." },
+        { "line": 6, "vars": { "bolt state": "managed (clean)", "identity map": "{ Product#1 → bolt }", "snapshots": "{ #1: [BOLT-7, 85] }", "action queue": "(empty)" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)",
+          "note": "flush runs the queue. Hibernate compares bolt to its snapshot, sees priceInCents changed, and folds the new value into the pending insert — one statement, not insert then update. The snapshot is refreshed." },
+        { "line": 7, "vars": { "bolt state": "detached", "identity map": "{}", "snapshots": "{}", "action queue": "(empty)" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)",
+          "note": "detach removes the entry and its snapshot. The object is unchanged in memory, but the context has forgotten it." },
+        { "line": 8, "vars": { "bolt state": "detached", "bolt.priceInCents": "999", "identity map": "{}", "snapshots": "{}" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)",
+          "note": "This change can never reach the database through this context. There is no snapshot to compare against and no entry to flush." },
+        { "line": 9, "vars": { "bolt state": "detached (still)", "managed state": "managed (dirty)", "managed == bolt": "false", "identity map": "{ Product#1 → managed }", "snapshots": "{ #1: [BOLT-7, 85] }" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)\nselect ... from product where id=1",
+          "note": "merge loads the current row into a NEW managed instance, copies bolt's fields onto it (999 overwrites 85), and returns that instance. bolt itself stays detached." },
+        { "line": 10, "vars": { "managed state": "removed", "identity map": "{}", "snapshots": "{}", "action queue": "DELETE #1" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)\nselect ... from product where id=1",
+          "note": "remove schedules a delete and drops the instance from the map. The pending 999 update is now moot — a removed entity is not dirty-checked." },
+        { "line": 11, "vars": { "identity map": "{}", "snapshots": "{}", "action queue": "(empty)", "transaction": "committed" }, "out": "select next value for product_SEQ\ninsert into product (priceInCents,sku,id) values (85,'BOLT-7',1)\nselect ... from product where id=1\ndelete from product where id=1",
+          "note": "commit flushes the queue (the delete) and then commits the JDBC transaction. Flush order is fixed: inserts, updates, collection changes, deletes — not the order you called the methods in." }
+      ]
+    }
+    </script>
+  </div>
+
+  <h3 class="mt-8 mb-3">Which call moves an entity where?</h3>
+
+  <div class="lm-card" data-match>
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Drag an operation onto the transition it causes, or click one then the other
+    </div>
+    <div class="lm-match">
+      <div class="lm-match-pool" role="group" aria-label="EntityManager operations to place">
+        <button type="button" class="lm-chip" data-chip="persist"><code>persist(e)</code></button>
+        <button type="button" class="lm-chip" data-chip="detach"><code>detach(e)</code> / <code>clear()</code></button>
+        <button type="button" class="lm-chip" data-chip="merge"><code>merge(e)</code></button>
+        <button type="button" class="lm-chip" data-chip="remove"><code>remove(e)</code></button>
+        <button type="button" class="lm-chip" data-chip="find"><code>find(E.class, id)</code></button>
+        <button type="button" class="lm-chip" data-chip="refresh"><code>refresh(e)</code></button>
+      </div>
+      <div class="lm-match-targets" role="group" aria-label="Transitions">
+        <button type="button" class="lm-slot" data-slot="persist" data-label="transient to managed, insert queued"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">transient → managed, insert queued</span></button>
+        <button type="button" class="lm-slot" data-slot="detach" data-label="managed to detached, nothing queued"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">managed → detached, nothing queued</span></button>
+        <button type="button" class="lm-slot" data-slot="merge" data-label="detached stays detached, a managed copy is returned"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">detached stays detached; a managed copy is returned</span></button>
+        <button type="button" class="lm-slot" data-slot="remove" data-label="managed to removed, delete queued"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">managed → removed, delete queued</span></button>
+        <button type="button" class="lm-slot" data-slot="find" data-label="database row (or identity map entry) to managed"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">row (or identity-map entry) → managed</span></button>
+        <button type="button" class="lm-slot" data-slot="refresh" data-label="managed stays managed, memory overwritten from the row"><span class="lm-slot-answer"></span><span class="text-caption text-ink-subtle">managed stays managed; memory overwritten from the row</span></button>
+      </div>
+    </div>
+    <button type="button" class="lm-btn" data-match-check>Check pairings</button>
+    <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+    <div class="lm-explain" hidden data-explain>
+      <p class="mb-0">All six correct. The two that trip people up are <code>merge</code>, which never changes the state of its argument, and <code>remove</code>, which takes the instance out of the context immediately even though the <code>delete</code> waits for the flush. <code>clear()</code> is <code>detach</code> for every managed instance at once — and it also discards the action queue, so un-flushed changes are lost.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Flushing: when the SQL actually runs</h3>
+
+  <p>The context is <em>write-behind</em>: operations are queued and run together at <strong>flush</strong>. A flush happens at commit, when you call <code>flush()</code>, and — in the default <code>FlushModeType.AUTO</code> — just before any JPQL, Criteria or native query that might otherwise read stale data. (Hibernate is clever about JPQL: it flushes only if the query touches a table with pending changes. For native SQL it cannot know, so it flushes every time.) <code>FlushModeType.COMMIT</code> switches the automatic pre-query flush off; a query can then return rows that your own pending writes contradict, which is occasionally what a bulk job wants and usually a bug.</p>
+
+  <p>At flush, Hibernate does not replay your calls in order. It sorts the queue: all inserts, then updates, then collection removals and additions, then deletes. That order keeps foreign keys satisfied in the common cases, and it is why "I removed the old row and persisted a new one with the same unique key" fails with a constraint violation — the insert runs first. The fix is <code>flush()</code> between the two, or a different key design.</p>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="persist versus merge, and the exceptions around them">
+      <button type="button" class="lm-tab" role="tab" id="tab-persistence-context-persist" aria-controls="panel-persistence-context-persist" aria-selected="true" tabindex="0">persist</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-persistence-context-merge" aria-controls="panel-persistence-context-merge" aria-selected="false" tabindex="-1">merge</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-persistence-context-errors" aria-controls="panel-persistence-context-errors" aria-selected="false" tabindex="-1">The exceptions</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-persistence-context-persist" aria-labelledby="tab-persistence-context-persist" tabindex="0">
+      <ul class="mb-0">
+        <li>Takes a <strong>transient</strong> instance and makes <em>that instance</em> managed. Returns <code>void</code>; keep using your reference.</li>
+        <li>Passing a <strong>detached</strong> instance throws: <code>PersistentObjectException: detached entity passed to persist</code>. Hibernate knows it is detached because the id is already set (or, with <code>@Version</code>, the version is).</li>
+        <li>Passing an instance whose id already exists in the context throws <code>EntityExistsException</code>; if the row exists only in the database, the duplicate surfaces at flush as a constraint violation.</li>
+        <li>Cascades along <code>CascadeType.PERSIST</code> associations (§4).</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-persistence-context-merge" aria-labelledby="tab-persistence-context-merge" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li>Takes a <strong>detached</strong> (or transient) instance, loads the current row if it is not already in the context, copies the state across, and <strong>returns the managed copy</strong>. Your argument is untouched.</li>
+        <li>Because it copies <em>every</em> field, a detached object with a stale or missing field overwrites the database with that stale value. A form that binds only three columns of a ten-column entity and merges it is the classic data-loss bug. Load, then set the three fields, instead.</li>
+        <li>With a transient instance (no id) it behaves like <code>persist</code> but still returns a copy.</li>
+        <li>Cascades along <code>CascadeType.MERGE</code>.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-persistence-context-errors" aria-labelledby="tab-persistence-context-errors" tabindex="0" hidden>
+      <div class="lm-table-wrap">
+        <table>
+          <caption class="lm-visually-hidden">Lifecycle exceptions, their cause and the fix</caption>
+          <thead><tr><th scope="col">Exception</th><th scope="col">You did</th><th scope="col">Do instead</th></tr></thead>
+          <tbody>
+            <tr><td><code>PersistentObjectException</code> "detached entity passed to persist"</td><td><code>persist</code> on an object that already has an id</td><td><code>merge</code>, or load it and modify the managed instance</td></tr>
+            <tr><td><code>NonUniqueObjectException</code></td><td>Tried to make a second instance with the same id managed (often via <code>merge</code> after a <code>find</code> of the same row)</td><td>Use the instance the context already holds</td></tr>
+            <tr><td><code>TransientPropertyValueException</code></td><td>Flushed an entity that references a transient one with no cascade</td><td><code>persist</code> the referenced object first, or add <code>CascadeType.PERSIST</code></td></tr>
+            <tr><td><code>LazyInitializationException</code></td><td>Touched a lazy association on a detached instance</td><td>§5: fetch it while the context is open, or project a DTO</td></tr>
+            <tr><td><code>IllegalStateException</code> "EntityManager is closed"</td><td>Used an <code>EntityManager</code> after its <code>close()</code> (or from another thread after it was closed there)</td><td>One <code>EntityManager</code> per unit of work, per thread</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Persistence-context gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The context grows until you clear it.</strong> A loop that persists a million rows keeps a million managed instances and a million snapshots in memory, and every auto-flush dirty-checks all of them. Batch jobs <code>flush()</code> then <code>clear()</code> every few hundred rows (§9).</li>
+        <li><strong>An <code>EntityManager</code> is not thread-safe.</strong> It is a unit-of-work object, not a connection pool. Share the <code>EntityManagerFactory</code>; create an <code>EntityManager</code> per request or job and close it.</li>
+        <li><strong>The first-level cache can lie to you — within a transaction.</strong> If another transaction updates a row after you loaded it, your <code>find</code> keeps returning the old state. That is correct repeatable-read behaviour, and <code>refresh</code> is the way out when you need the latest.</li>
+        <li><strong>"No SQL ran" is not "nothing happened".</strong> Changes sit in the queue. A test that asserts on a native query without flushing first reads stale data — or, with native SQL, triggers a flush you did not expect.</li>
+        <li><strong>Modifying an entity outside a transaction</strong> on a managed instance in an open context queues an update that may never run (no commit) — or runs at the next transaction's flush, long after the line that caused it. Keep modifications inside transaction boundaries.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-persistence-context-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>Inside one transaction you call <code>em.find(Product.class, 1L)</code>, then <code>em.find(Product.class, 1L)</code> again. Meanwhile another transaction committed a price change to that row. What does the second <code>find</code> return?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-persistence-context-1"><span>A new instance with the updated price, after a second <code>select</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-persistence-context-1"><span>The same instance, updated in place with the new price <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-persistence-context-1"><span>The same instance with the old price, and no SQL runs <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-persistence-context-1"><span>An <code>OptimisticLockException</code>, because the row changed <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The identity map already holds key 1, so <code>find</code> returns that instance without touching the database. The context gives you repeatable reads for free, and it has no idea the row changed.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>B</strong> would both need a <code>select</code>, which the first-level cache exists to avoid; <code>refresh</code> is how you ask for it. <strong>D</strong> only happens at <em>write</em> time, and only with a <code>@Version</code> column (§7) — a read never checks versions.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-persistence-context-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A controller receives a detached <code>Product</code> from a form, calls <code>Product m = em.merge(product);</code>, then <code>product.setPriceInCents(200);</code> and commits. What is in the database?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-persistence-context-2"><span>200 — <code>merge</code> made <code>product</code> managed, so the setter is dirty-checked <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-persistence-context-2"><span>Whatever price the form carried — the setter ran on the still-detached argument, not on the managed copy <code>m</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-persistence-context-2"><span>The old price — <code>merge</code> only reads, the update needs an explicit <code>persist</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-persistence-context-2"><span>Nothing changes and <code>PersistentObjectException</code> is thrown <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>merge</code> copies state onto a managed instance and returns <em>it</em>; the argument stays detached (<code>merged == detached: false</code> in the worked example). The setter on <code>product</code> is invisible to the context, so the merged state — the form's price — is what gets flushed.</p>
+        <p class="mb-0"><strong>A</strong> is the mistake the question is about: use <code>m</code>. <strong>C</strong> is backwards — <code>merge</code> does queue an update of the copied state. <strong>D</strong> is what <code>persist</code> would throw for a detached instance; <code>merge</code> accepts them by design.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-persistence-context-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these cause SQL to be sent <em>before</em> <code>commit()</code>, in the default <code>FlushModeType.AUTO</code>? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>em.flush()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span><code>em.persist(p)</code> on an entity with <code>GenerationType.SEQUENCE</code> — the insert itself <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>p.setPriceInCents(5)</code> on a managed entity <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>em.createQuery("select p from Product p").getResultList()</code> while a <code>Product</code> change is pending <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> <code>flush()</code> runs the queue on demand, and a JPQL query over a table with pending changes triggers an automatic flush so the query cannot miss them.</p>
+        <p class="mb-0"><strong>B</strong>: with <code>SEQUENCE</code> only <code>select next value</code> runs at <code>persist</code>; the insert waits (it would run immediately with <code>IDENTITY</code>, which is one reason to avoid that strategy). <strong>C</strong>: a setter changes a Java field; the context notices at flush, not at the call.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="persistence-context"> Mark this section complete
+  </label>
+</section>

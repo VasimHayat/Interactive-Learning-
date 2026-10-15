@@ -1,0 +1,57 @@
+<section class="lm-section" id="prerequisites" data-title="Prerequisites" data-num="ii">
+  <p class="lm-eyebrow">Before you begin</p>
+  <h2 class="mb-4">Prerequisites</h2>
+
+  <p>This module assumes <em>Java Fundamentals</em> and <em>Java Intermediate</em>, or the equivalent. <em>Java Advanced</em> is not required, though §7 on locking reads more easily if you have met the lost-update problem there. Each item below is leaned on directly, with the section that taught it:</p>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Prerequisite skills, where they were taught, and what depends on them here</caption>
+      <thead>
+        <tr><th scope="col">You should already be able to…</th><th scope="col">Taught in</th><th scope="col">Because this module…</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Implement <code>equals</code> and <code>hashCode</code> as a matched pair, and say what breaks a <code>HashSet</code></td><td>Fundamentals §10</td><td>puts entities whose id is assigned <em>after</em> they enter a <code>Set</code> into exactly that trap (§11)</td></tr>
+        <tr><td>Choose a collection for an access pattern and explain the cost</td><td>Fundamentals §12, Intermediate §11</td><td>maps a <code>Set</code> and a <code>List</code> to the same table and shows why Hibernate treats them differently (§4)</td></tr>
+        <tr><td>Read a generic signature such as <code>TypedQuery&lt;Product&gt;</code> or <code>CriteriaQuery&lt;Long&gt;</code></td><td>Intermediate §1</td><td>uses the typed query APIs throughout, and the Criteria API is generics all the way down (§6)</td></tr>
+        <tr><td>Write a lambda and trace a stream pipeline</td><td>Intermediate §4, §5</td><td>projects query results into records and streams them, and streams a <code>Query</code> result lazily (§6, §9)</td></tr>
+        <tr><td>Say when a record is the wrong choice</td><td>Intermediate §8</td><td>needs mutable, identity-bearing, non-final classes for entities — and records for everything that is not one (§2, §11)</td></tr>
+        <tr><td>Use try-with-resources and distinguish checked from unchecked exceptions</td><td>Fundamentals §11</td><td>opens and closes an <code>EntityManager</code> per unit of work and treats every <code>PersistenceException</code> as unchecked (§3, §12)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>You also need <strong>basic SQL</strong>, stated plainly: you can read a <code>select</code> with a <code>join</code> and a <code>where</code>, you know what a primary key, a foreign key and an index are, and you know that a transaction either commits or rolls back. This module reads a great deal of SQL; it does not teach it.</p>
+
+  <div class="lm-callout lm-callout--note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>
+    <div>
+      <div class="lm-callout-title">What you need installed</div>
+      <p class="mb-2">A JDK <strong>21 or newer</strong>, plus the library jars — this is the first module whose programs do not run on the JDK alone. If you are working from the course repository, one command resolves the exact versions the pages were built with into <code>build/lib/java-jpa/</code>:</p>
+      <pre data-code data-lang="bash" data-nobar>
+node tools/fetch-deps.mjs java-jpa          # Hibernate 7.4.1, Jakarta Persistence 3.2, H2 2.4 and their runtime deps
+javac -cp "build/lib/java-jpa/*" FirstEntity.java
+java  -cp ".;build/lib/java-jpa/*" FirstEntity      # on Linux/macOS the separator is : not ;
+      </pre>
+      <p class="mb-2">With Maven or Gradle you need two coordinates; everything else arrives transitively:</p>
+      <pre data-code data-lang="xml" data-nobar>
+&lt;dependency&gt;&lt;groupId&gt;org.hibernate.orm&lt;/groupId&gt;&lt;artifactId&gt;hibernate-core&lt;/artifactId&gt;&lt;version&gt;7.4.1.Final&lt;/version&gt;&lt;/dependency&gt;
+&lt;dependency&gt;&lt;groupId&gt;com.h2database&lt;/groupId&gt;&lt;artifactId&gt;h2&lt;/artifactId&gt;&lt;version&gt;2.4.240&lt;/version&gt;&lt;/dependency&gt;
+      </pre>
+      <p class="mb-0 text-sm">H2 is used because it needs no installation and starts in milliseconds. Every mapping here works unchanged on PostgreSQL or MySQL; where the generated SQL would differ, the text says so.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Three habits to unlearn</div>
+      <p class="mb-2">An ORM is convenient enough that it invites three assumptions, each of which works in a demo and fails in production:</p>
+      <ul class="mb-0">
+        <li><strong>"An entity is just a data holder."</strong> It is not. A managed entity is <em>watched</em>: change a field and the change is written at commit whether you meant it or not, and hand it to a view layer and the view can trigger queries. Entities are a persistence tool; records are for carrying data around (§3, §11).</li>
+        <li><strong>"A collection on an entity is a collection."</strong> It is a <em>promise</em> to load one later, valid only while the session that made the promise is open. Touch it afterwards and you get <code>LazyInitializationException</code>; touch it in a loop and you get the N+1 problem (§5).</li>
+        <li><strong>"<code>hbm2ddl.auto=update</code> keeps the schema in sync."</strong> It adds what is missing and never removes, renames or narrows anything, and it has no idea what your data means. It is a development convenience; a deployment is a migration script (§10).</li>
+      </ul>
+    </div>
+  </div>
+</section>

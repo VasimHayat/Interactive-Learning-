@@ -1,0 +1,292 @@
+<section class="lm-section" id="completable-future" data-title="CompletableFuture: composing asynchronous work" data-num="6">
+  <p class="lm-eyebrow">Section 6</p>
+  <h2 class="mb-4"><code>CompletableFuture</code>: composing asynchronous work</h2>
+
+  <p>§5 ended with a <code>Future</code>, and a <code>Future</code> can do exactly two things: block until the value arrives, or tell you whether it has arrived yet. There is no way to say "and when it does, do <em>this</em> with it". A quote that needs a price <em>and</em> a stock level <em>and then</em> a supplier lookup becomes a thread that blocks three times in a row, which is the thread-per-wait design that pools were meant to avoid.</p>
+
+  <p><code>CompletableFuture</code> is a <code>Future</code> that is also a <strong>completion stage</strong>: a cell that will hold either a value or a failure, to which you attach the next step <em>before</em> the value exists. When the cell completes, the attached steps run, each producing a new cell. A pipeline of lookups becomes a description of what to do, written once on the calling thread, and executed by whichever threads happen to finish the work. The two questions that explain everything in this section are <strong>which thread runs a stage</strong> and <strong>what happens to a failure</strong>.</p>
+
+  <h3 class="mt-8 mb-3">Worked example</h3>
+
+  <p>Every lookup here is a stand-in for a remote call. The pool is explicit, every future is joined before anything is printed, and the fan-out results are sorted, so the output is the same on every machine even though the work is genuinely parallel.</p>
+
+  <pre data-code data-lang="java" data-file="Composing.java" data-verify="Composing" data-hi="38,42,48,67">
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+public class Composing {
+
+    record Quote(String sku, int priceInCents, int onHand) {
+        String line() { return sku + " @ " + priceInCents + "c, " + onHand + " on hand"; }
+    }
+
+    static final Map<String, Integer> PRICES = Map.of(
+            "BOLT-7", 80, "NUT-3", 25, "CAM-9", 2300, "GIRD-1", 120_000, "ROD-4", 4500);
+    static final Map<String, Integer> STOCK = Map.of(
+            "BOLT-7", 400, "NUT-3", 1200, "CAM-9", 2, "GIRD-1", 3, "ROD-4", 40);
+    static final Map<String, String> SUPPLIER = Map.of("BOLT-7", "ACME", "NUT-3", "ACME", "CAM-9", "KINETIC");
+
+    // Each "lookup" stands in for a remote call: slow, independent, may fail.
+    static int price(String sku) {
+        Integer p = PRICES.get(sku);
+        if (p == null) throw new IllegalArgumentException("unknown sku " + sku);
+        return p;
+    }
+    static int stock(String sku) { return STOCK.getOrDefault(sku, 0); }
+    static String supplier(String sku) { return SUPPLIER.getOrDefault(sku, "none"); }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+
+        // 1. Two independent lookups, combined when BOTH are done.
+        CompletableFuture<Integer> price = CompletableFuture.supplyAsync(() -> price("BOLT-7"), pool);
+        CompletableFuture<Integer> stock = CompletableFuture.supplyAsync(() -> stock("BOLT-7"), pool);
+        CompletableFuture<Quote> quote = price.thenCombine(stock, (p, s) -> new Quote("BOLT-7", p, s));
+        System.out.println("thenCombine  = " + quote.join().line());
+
+        // 2. A dependent lookup: thenCompose flattens a stage that itself returns a future.
+        CompletableFuture<String> supplier = quote.thenCompose(q ->
+                CompletableFuture.supplyAsync(() -> supplier(q.sku()), pool));
+        System.out.println("thenCompose  = " + supplier.thenApply(s -> "supplied by " + s).join());
+
+        // 3. A failing lookup. Nothing is thrown here: the failure is stored in the future.
+        CompletableFuture<Integer> bad = CompletableFuture.supplyAsync(() -> price("NOPE"), pool);
+        System.out.println("recovered    = " + bad.exceptionally(ex -> -1).join());
+        System.out.println("handle       = " + bad.handle((v, ex) ->
+                ex == null ? "value " + v : "failed: " + ex.getCause().getMessage()).join());
+        String wrapping = bad.handle((v, ex) ->
+                ex.getClass().getSimpleName() + " wrapping " + ex.getCause().getClass().getSimpleName()).join();
+        System.out.println("stage saw    = " + wrapping);
+        try { bad.join(); }
+        catch (CompletionException e) { System.out.println("join threw   = CompletionException -> " + e.getCause().getMessage()); }
+        try { bad.get(); }
+        catch (ExecutionException e) { System.out.println("get threw    = ExecutionException -> " + e.getCause().getMessage()); }
+
+        // 4. Fan out five quotes, wait for all, read them back in a stable order.
+        List<String> skus = List.of("ROD-4", "BOLT-7", "GIRD-1", "NUT-3", "CAM-9");
+        List<CompletableFuture<Quote>> quotes = new ArrayList<>();
+        for (String sku : skus) {
+            quotes.add(CompletableFuture.supplyAsync(() -> price(sku), pool)
+                    .thenCombine(CompletableFuture.supplyAsync(() -> stock(sku), pool),
+                                 (p, s) -> new Quote(sku, p, s)));
+        }
+        CompletableFuture<Void> all = CompletableFuture.allOf(quotes.toArray(new CompletableFuture[0]));
+        all.join();                                              // Void: it only says "every one is done"
+        List<String> lines = quotes.stream().map(CompletableFuture::join).map(Quote::line).sorted().toList();
+        System.out.println("allOf        = done " + all.isDone() + ", " + lines.size() + " quotes");
+        lines.forEach(l -> System.out.println("    " + l));
+
+        // 5. A stage that never completes, bounded by a timeout (Java 9+).
+        CompletableFuture<String> never = new CompletableFuture<>();
+        System.out.println("onTimeout    = " + never.completeOnTimeout("cached quote", 50, TimeUnit.MILLISECONDS).join());
+        CompletableFuture<String> never2 = new CompletableFuture<>();
+        try { never2.orTimeout(50, TimeUnit.MILLISECONDS).join(); }
+        catch (CompletionException e) { System.out.println("orTimeout    = " + e.getCause().getClass().getSimpleName()); }
+
+        // 6. A value already in hand enters the same pipeline without touching a thread.
+        System.out.println("completed    = " + CompletableFuture.completedFuture(21).thenApply(x -> x * 2).join());
+
+        pool.shutdown();
+        System.out.println("pool stopped = " + pool.awaitTermination(5, TimeUnit.SECONDS));
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Composing">
+thenCombine  = BOLT-7 @ 80c, 400 on hand
+thenCompose  = supplied by ACME
+recovered    = -1
+handle       = failed: unknown sku NOPE
+stage saw    = CompletionException wrapping IllegalArgumentException
+join threw   = CompletionException -> unknown sku NOPE
+get threw    = ExecutionException -> unknown sku NOPE
+allOf        = done true, 5 quotes
+    BOLT-7 @ 80c, 400 on hand
+    CAM-9 @ 2300c, 2 on hand
+    GIRD-1 @ 120000c, 3 on hand
+    NUT-3 @ 25c, 1200 on hand
+    ROD-4 @ 4500c, 40 on hand
+onTimeout    = cached quote
+orTimeout    = TimeoutException
+completed    = 42
+pool stopped = true
+  </pre>
+
+  <p>Six things to take from it, in order:</p>
+  <ul class="max-w-prose">
+    <li><strong><code>thenCombine</code> joins two independent stages.</strong> Price and stock were submitted together and ran in parallel; the combining function ran once, after the <em>later</em> of the two finished, on whichever thread finished it.</li>
+    <li><strong><code>thenCompose</code> is for a step that returns a future.</strong> With <code>thenApply</code> you would have got a <code>CompletableFuture&lt;CompletableFuture&lt;String&gt;&gt;</code>. <code>thenCompose</code> unwraps it, exactly as <code>flatMap</code> does for <code>Optional</code> and streams (Intermediate §5, §7).</li>
+    <li><strong>A failure is a value in the cell, not a thrown exception.</strong> <code>price("NOPE")</code> threw on a pool thread and nobody saw a stack trace. The future <em>completed exceptionally</em>, and every dependent stage sees that state wrapped in a <code>CompletionException</code>. <code>exceptionally</code> substitutes a value; <code>handle</code> sees both outcomes; <code>join</code> rethrows the wrapper and <code>get</code> rethrows an <code>ExecutionException</code> instead. Either way the real cause is one <code>getCause()</code> away.</li>
+    <li><strong><code>allOf</code> gives you <code>Void</code>.</strong> It signals that every input is done and nothing else; you read the values back from the inputs you kept. Sorting them is what makes the printed order stable.</li>
+    <li><strong>Timeouts are a property of the stage.</strong> <code>completeOnTimeout</code> supplies a fallback, <code>orTimeout</code> fails the stage with a <code>TimeoutException</code>. Both exist since Java 9; before that, every timeout meant a blocking <code>get(n, unit)</code>.</li>
+    <li><strong><code>completedFuture</code> is the unit.</strong> A value you already hold joins the pipeline without a thread, which is how caches and fast paths plug into the same code as the slow path.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Which thread runs what</h3>
+
+  <div class="lm-stepper" data-stepper tabindex="0" aria-label="Step-through of a CompletableFuture chain">
+    <div class="lm-stepper-head">
+      <span class="lm-stepper-title">A chain, two runs: one succeeds, one fails</span>
+      <span class="lm-badge lm-badge--sim">Simulated</span>
+      <span class="grow"></span>
+      <span class="text-caption text-ink-subtle">← → to step</span>
+    </div>
+    <div class="lm-stepper-grid">
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Source</div>
+        <div data-stepper-code data-for="cf-chain"></div>
+      </div>
+      <div class="lm-stepper-pane">
+        <div class="lm-stepper-label">Stages</div>
+        <table class="lm-vartable"><tbody data-stepper-vars></tbody></table>
+        <div class="lm-stepper-label mt-4">Standard output</div>
+        <div class="lm-console" data-stepper-out></div>
+      </div>
+    </div>
+    <div class="lm-stepper-foot">
+      <button type="button" class="lm-btn" data-step-prev>Prev</button>
+      <button type="button" class="lm-btn lm-btn--primary" data-step-next>Next</button>
+      <button type="button" class="lm-btn" data-step-reset>Reset</button>
+      <span class="lm-stepper-narr" data-step-note></span>
+      <span class="lm-stepper-count" data-step-count></span>
+    </div>
+    <script type="application/json" data-stepper-data data-id="cf-chain">
+    {
+      "lang": "java",
+      "code": "CompletableFuture<Integer> stock =\n    CompletableFuture.supplyAsync(() -> stock(\"CAM-9\"), pool);   // stage A\n\nCompletableFuture<Void> done = stock\n    .thenApply(s -> new Quote(\"CAM-9\", 2300, s))                 // stage B\n    .thenCompose(q -> enrichAsync(q))                            // stage C: returns a future\n    .exceptionally(ex -> Quote.unavailable(\"CAM-9\"))             // stage D\n    .thenAccept(q -> report(q));                                 // stage E\n\ndone.join();",
+      "steps": [
+        { "line": [1, 2], "vars": { "A supplyAsync": "pending — task queued on pool", "main thread": "returns at once" }, "out": "",
+          "note": "Run 1. supplyAsync hands the supplier to the pool and returns an empty cell immediately. Nothing has run yet; main keeps going." },
+        { "line": 5, "vars": { "A supplyAsync": "pending", "B thenApply": "attached, waiting for A" }, "out": "",
+          "note": "Attaching a stage runs nothing. B is recorded as a dependent of A and will run on whichever thread completes A." },
+        { "line": [6, 7, 8, 10], "vars": { "A supplyAsync": "pending", "B thenApply": "attached", "C thenCompose": "attached", "D exceptionally": "attached", "E thenAccept": "attached", "main thread": "blocked in join()" }, "out": "",
+          "note": "The whole pipeline is now described. main calls done.join() and parks until stage E completes. Everything from here on happens on pool threads." },
+        { "line": 2, "vars": { "A supplyAsync": "completed: 2", "B thenApply": "triggered", "pool thread 1": "completing A" }, "out": "",
+          "note": "A pool thread finishes stock(\"CAM-9\") and completes A with 2. Completing a cell triggers its dependents: the SAME thread goes straight on to run B." },
+        { "line": 5, "vars": { "A supplyAsync": "completed: 2", "B thenApply": "completed: Quote[CAM-9, 2300, 2]", "pool thread 1": "ran B (non-async: completing thread)" }, "out": "",
+          "note": "thenApply is a non-async stage, so it runs on the thread that completed its input. thenApplyAsync would have handed it back to the pool instead." },
+        { "line": 6, "vars": { "B thenApply": "completed", "C thenCompose": "pending — waiting on the inner future", "pool thread 2": "running enrichAsync(q)" }, "out": "",
+          "note": "C's function returns a CompletableFuture of its own. C does not complete when the function returns; it completes when that inner future does. This is the flatMap." },
+        { "line": 6, "vars": { "C thenCompose": "completed: Quote[CAM-9, 2300, 2, KINETIC]", "D exceptionally": "triggered" }, "out": "",
+          "note": "The inner lookup finishes, C completes with its value, and D is triggered on the thread that completed C." },
+        { "line": 7, "vars": { "C thenCompose": "completed", "D exceptionally": "completed: Quote[CAM-9, 2300, 2, KINETIC] (passed through)" }, "out": "",
+          "note": "No failure arrived, so exceptionally never calls its function: the value flows through unchanged. exceptionally is a bypass, not a filter." },
+        { "line": 8, "vars": { "D exceptionally": "completed", "E thenAccept": "completed: null" }, "out": "CAM-9 @ 2300c, 2 on hand, KINETIC",
+          "note": "thenAccept consumes the value and completes with Void. Its completion is what main was waiting for." },
+        { "line": 10, "vars": { "E thenAccept": "completed", "main thread": "join() returned" }, "out": "CAM-9 @ 2300c, 2 on hand, KINETIC",
+          "note": "Run 1 complete. Note which thread ran each stage: none of them was main." },
+        { "line": 6, "vars": { "A supplyAsync": "completed: 2", "B thenApply": "completed: Quote[…]", "C thenCompose": "completed EXCEPTIONALLY: CompletionException(IllegalStateException: supplier offline)" }, "out": "",
+          "note": "Run 2. This time enrichAsync's inner future fails. C completes exceptionally; the exception is wrapped in a CompletionException and handed to D." },
+        { "line": 7, "vars": { "C thenCompose": "completed exceptionally", "D exceptionally": "function ran → completed: Quote[CAM-9, unavailable]" }, "out": "",
+          "note": "Now exceptionally's function runs and its return value becomes D's normal result. From D onward the pipeline is healthy again." },
+        { "line": [8, 10], "vars": { "D exceptionally": "completed normally", "E thenAccept": "completed: null", "main thread": "join() returned normally" }, "out": "CAM-9 unavailable",
+          "note": "E prints the fallback and main's join returns without throwing: the failure was absorbed at D. Had D been attached BEFORE C, C's failure would have reached E and join() would have thrown. Where you put exceptionally decides what it covers." }
+      ]
+    }
+    </script>
+  </div>
+
+  <p>The rule the stepper shows: a <strong>non-async</strong> stage (<code>thenApply</code>, <code>thenCompose</code>, <code>thenAccept</code>…) runs on the thread that completes its input, or on the <em>calling</em> thread if the input was already complete when you attached it. An <strong><code>*Async</code></strong> stage is always handed to an executor: the one you pass, or <code>ForkJoinPool.commonPool()</code> if you pass none. Two consequences: a cheap stage should stay non-async to avoid a hand-off, and a stage that does real work after a fast input may run on your caller's thread unless you say <code>Async</code>.</p>
+
+  <h3 class="mt-8 mb-3">The API by question</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">CompletableFuture methods grouped by the question they answer</caption>
+      <thead><tr><th scope="col">You want to…</th><th scope="col">Use</th><th scope="col">Notes</th></tr></thead>
+      <tbody>
+        <tr><td>start work on a thread</td><td><code>supplyAsync(supplier, executor)</code> / <code>runAsync</code></td><td>always pass the executor; the common pool is sized for CPU work and shared with parallel streams</td></tr>
+        <tr><td>transform the value</td><td><code>thenApply</code></td><td>the <code>map</code>; function returns a plain value</td></tr>
+        <tr><td>chain a step that returns a future</td><td><code>thenCompose</code></td><td>the <code>flatMap</code>; avoids a nested future</td></tr>
+        <tr><td>combine two independent futures</td><td><code>thenCombine(other, fn)</code></td><td>runs when the later one completes</td></tr>
+        <tr><td>consume the value / just run after</td><td><code>thenAccept</code> / <code>thenRun</code></td><td>result type is <code>Void</code></td></tr>
+        <tr><td>wait for many</td><td><code>allOf(cf…)</code> / <code>anyOf(cf…)</code></td><td><code>allOf</code> → <code>Void</code>; <code>anyOf</code> → <code>Object</code>, first to complete, including a failure</td></tr>
+        <tr><td>recover from failure</td><td><code>exceptionally(fn)</code></td><td>runs only on failure; return value replaces it</td></tr>
+        <tr><td>see both outcomes and produce a value</td><td><code>handle((v, ex) -> …)</code></td><td>exactly one of <code>v</code>, <code>ex</code> is non-null</td></tr>
+        <tr><td>observe both outcomes, change nothing</td><td><code>whenComplete((v, ex) -> …)</code></td><td>logging/metrics; the result passes through, failure included</td></tr>
+        <tr><td>bound the wait</td><td><code>orTimeout</code> / <code>completeOnTimeout</code></td><td>Java 9+; uses a shared scheduler thread</td></tr>
+        <tr><td>get the value on this thread</td><td><code>join()</code> / <code>get()</code></td><td><code>join</code> is unchecked (<code>CompletionException</code>); <code>get</code> is checked (<code>ExecutionException</code>, <code>InterruptedException</code>)</td></tr>
+        <tr><td>wrap a value you already have</td><td><code>completedFuture(v)</code> / <code>failedFuture(ex)</code></td><td>no thread involved</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Five ways this goes wrong in production</div>
+      <ul class="mb-0">
+        <li><strong>Blocking inside a stage.</strong> <code>thenApply(x -> other.join())</code> ties up a pool thread doing nothing. With the common pool, which has <em>cores − 1</em> threads, a handful of these deadlocks the whole JVM's async work. Compose instead of joining.</li>
+        <li><strong>Forgetting the executor.</strong> <code>supplyAsync(s)</code> without an executor uses the common pool. Put I/O there and every parallel stream in the process slows down with you. Give I/O its own bounded pool (§5) or, in Java 21, a virtual-thread executor (§7).</li>
+        <li><strong>A dropped failure.</strong> A future nobody joins or attaches a handler to fails silently. If you fire and forget, at least <code>whenComplete</code> a log line.</li>
+        <li><strong><code>cancel()</code> does not interrupt.</strong> It completes the cell with a <code>CancellationException</code>; the supplier keeps running to its end on the pool thread. If the work must stop, the task has to check a flag of its own.</li>
+        <li><strong>Wrapping, twice.</strong> A failure inside <code>exceptionally</code>'s own function, or a <code>CompletionException</code> rethrown from a stage, gets wrapped again. When unwrapping, loop on <code>getCause()</code> while the throwable is a <code>CompletionException</code> rather than calling it once.</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>One last thing. A pipeline of a dozen stages across three pools is powerful and very hard to read six months later: the structure of the computation is spread across callbacks, a failure in the middle produces a stack trace that names none of your methods, and cancelling a sub-task means nothing. §7 shows the other direction Java 21 is taking: give each concurrent task a cheap thread of its own and write the waiting as ordinary, sequential code.</p>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-completable-future-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span><code>CompletableFuture&lt;Integer&gt; a = CompletableFuture.completedFuture(1); a.thenApply(x -> heavyWork(x));</code> — which thread runs <code>heavyWork</code>?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-completable-future-1"><span>A thread from <code>ForkJoinPool.commonPool()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-completable-future-1"><span>A new thread created for the stage <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-completable-future-1"><span>The calling thread, synchronously, before <code>thenApply</code> returns <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-completable-future-1"><span>No thread until someone calls <code>join()</code> on the result <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> <code>thenApply</code> is a non-async stage. Its input is already complete, so there is no completing thread to inherit; the stage runs immediately on the thread that attached it. If <code>heavyWork</code> takes a second, the caller is stuck for a second.</p>
+        <p class="mb-0"><strong>A</strong> is what <code>thenApplyAsync</code> would do. <strong>B</strong>: nothing in <code>CompletableFuture</code> creates threads; it only submits to executors. <strong>D</strong>: stages are eager, not lazy — a future is not a stream, and <code>join</code> only waits.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-completable-future-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A stage's function is <code>q -> fetchSupplierAsync(q)</code>, where <code>fetchSupplierAsync</code> returns <code>CompletableFuture&lt;Supplier&gt;</code>. You attach it with <code>thenApply</code>. What is the type of the result, and what should you have used?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-completable-future-2"><span><code>CompletableFuture&lt;Supplier&gt;</code>; <code>thenApply</code> is correct <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-completable-future-2"><span><code>CompletableFuture&lt;CompletableFuture&lt;Supplier&gt;&gt;</code>; use <code>thenCompose</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-completable-future-2"><span>Compile error: <code>thenApply</code> rejects a function returning a future <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-completable-future-2"><span><code>CompletableFuture&lt;Supplier&gt;</code>; use <code>thenCombine</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> <code>thenApply</code> wraps whatever the function returns, and the function returns a future, so you get a future of a future. <code>thenCompose</code> expects a function that returns a <code>CompletionStage</code> and flattens it: the outer stage completes when the inner one does.</p>
+        <p class="mb-0"><strong>A</strong> and <strong>C</strong>: it compiles, and the type is nested — the compiler is perfectly happy to infer <code>CompletableFuture&lt;CompletableFuture&lt;Supplier&gt;&gt;</code>, which is why this bug survives until someone tries to <code>join()</code> and gets a future back. <strong>D</strong>: <code>thenCombine</code> joins two <em>independent</em> futures with a two-argument function; here the second lookup depends on the first.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-completable-future-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span><code>cf = supplyAsync(() -> { throw new IllegalStateException("offline"); }, pool).thenApply(v -> v + 1);</code> Which statements are true? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>cf.join()</code> throws a <code>CompletionException</code> whose cause is the <code>IllegalStateException</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>The <code>thenApply</code> function runs with <code>v == null</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>The exception is printed to stderr by the pool thread when it occurs <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span><code>cf.exceptionally(ex -> 0).join()</code> returns <code>0</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> The failure is stored in the first cell, skips the <code>thenApply</code> stage (which completes exceptionally with the same wrapped cause), and surfaces from <code>join</code> as a <code>CompletionException</code>. Attaching <code>exceptionally</code> anywhere downstream substitutes a value, and the chain continues normally from there.</p>
+        <p class="mb-0"><strong>B</strong>: a normal-path stage is never run on a failed input; it is bypassed. <strong>C</strong>: nothing is printed anywhere — the whole point, and the whole danger, of a stored failure is that it is silent until someone looks. An uncaught exception in a plain <code>Thread</code> would print; inside a <code>CompletableFuture</code> it is captured.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="completable-future"> Mark this section complete
+  </label>
+</section>

@@ -1,0 +1,414 @@
+<section class="lm-section" id="fetching" data-title="Fetching and N+1 in a Spring application" data-num="6">
+  <p class="lm-eyebrow">Section 6</p>
+  <h2 class="mb-4">Fetching and N+1 in a Spring application</h2>
+
+  <p>JPA §5 showed the N+1 problem with a bare <code>EntityManager</code>: one query for the parents, one more per parent the moment a lazy collection is touched. Spring changes nothing about the mechanism and everything about <em>where</em> it bites, because Spring decides where the persistence context begins and ends. In a plain JPA program you open and close the <code>EntityManager</code> yourself. In a Spring application the context is opened by the <code>@Transactional</code> proxy when a service method starts and closed when it returns — unless <code>spring.jpa.open-in-view</code> is on, in which case it stays open for the whole web request, including view rendering, which is where the lazy loads then quietly run.</p>
+
+  <p>So the question "will this lazy collection load?" has a Spring-specific answer: <strong>only inside the transaction that loaded its owner</strong>. Touch it in the service and you get an N+1; touch it after the service returned and you get a <code>LazyInitializationException</code>; touch it in a template with open-in-view on and you get an N+1 you cannot see in any Java file. This section measures all of those with Hibernate's statistics, then shows the two tools Spring Data adds for fixing them at the repository: <code>@EntityGraph</code> and fetch queries in <code>@Query</code>.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: six ways to read the same report</h3>
+
+  <p>Five orders, two lines each, totalling 65 units. The <code>ReportService</code> is <code>@Transactional(readOnly = true)</code>, so every method runs inside one transaction and one persistence context. The runner clears the statistics before each phase and prints the prepared-statement count after it.</p>
+
+  <pre data-code data-lang="java" data-file="SpringFetching.java" data-verify="SpringFetching" data-package="lm.fetching" data-hi="43,67,69,70,72,73,88,89,91,93">
+package lm.fetching;
+
+import jakarta.persistence.*;
+import org.hibernate.Hibernate;
+import org.hibernate.LazyInitializationException;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.jpa.repository.EntityGraph;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableJpaRepositories(considerNestedRepositories = true)
+public class SpringFetching {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true, length = 16) String sku;
+        protected Product() {}
+        Product(String sku) { this.sku = sku; }
+        String getSku() { return sku; }
+    }
+
+    @Entity(name = "Order")
+    @Table(name = "orders")
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @Column(nullable = false, unique = true) String reference;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL)        // LAZY by default
+        List<OrderLine> lines = new ArrayList<>();
+        protected Order() {}
+        Order(String reference) { this.reference = reference; }
+        String getReference() { return reference; }
+        List<OrderLine> getLines() { return lines; }
+        void addLine(Product p, int qty) { OrderLine l = new OrderLine(p, qty); l.order = this; lines.add(l); }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE) Long id;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) Order order;
+        @ManyToOne(fetch = FetchType.LAZY, optional = false) Product product;
+        int qty;
+        protected OrderLine() {}
+        OrderLine(Product product, int qty) { this.product = product; this.qty = qty; }
+        int getQty() { return qty; }
+        Product getProduct() { return product; }
+    }
+
+    public interface ProductRepository extends JpaRepository<Product, Long> {}
+
+    public interface OrderRepository extends JpaRepository<Order, Long> {
+        List<Order> findAllByOrderByReference();                                  // lazy: the N+1 shape
+
+        @EntityGraph(attributePaths = {"lines", "lines.product"})
+        List<Order> findWithGraphByOrderByReference();                            // one statement
+
+        @Query("select distinct o from Order o join fetch o.lines l join fetch l.product order by o.reference")
+        List<Order> findAllFetched();                                             // one statement, explicit
+    }
+
+    public record OrderSummary(String reference, int lineCount, int totalQty) {}
+
+    @Service
+    @Transactional(readOnly = true)
+    public static class ReportService {
+        private final OrderRepository orders;
+        @PersistenceContext private EntityManager em;
+        ReportService(OrderRepository orders) { this.orders = orders; }
+
+        public int totalQtyLazy() { return sum(orders.findAllByOrderByReference()); }
+        public int totalQtyGraph() { return sum(orders.findWithGraphByOrderByReference()); }
+        public int totalQtyFetchQuery() { return sum(orders.findAllFetched()); }
+        public int totalQtyBatched() {
+            em.unwrap(Session.class).setFetchBatchSize(8);                        // what default_batch_fetch_size does globally
+            return sum(orders.findAllByOrderByReference());
+        }
+        public Order firstOrder() { return orders.findAllByOrderByReference().get(0); }           // entity escapes the transaction
+        public OrderSummary firstOrderSummary() {                                                // DTO: nothing lazy escapes
+            Order o = orders.findWithGraphByOrderByReference().get(0);
+            return new OrderSummary(o.getReference(), o.getLines().size(), sum(List.of(o)));
+        }
+        private static int sum(List<Order> os) {
+            int t = 0;
+            for (Order o : os) for (OrderLine l : o.getLines()) t += l.getQty();
+            return t;
+        }
+    }
+
+    @Bean CommandLineRunner demo(ProductRepository products, OrderRepository orders, ReportService report, EntityManagerFactory emf) {
+        return args -> {
+            Product bolt = products.save(new Product("BOLT-7"));
+            Product nut = products.save(new Product("NUT-3"));
+            for (int i = 1; i <= 5; i++) {
+                Order o = new Order("ORD-" + i);
+                o.addLine(bolt, i);
+                o.addLine(nut, 10);
+                orders.save(o);
+            }
+            Statistics stats = emf.unwrap(SessionFactory.class).getStatistics();
+
+            System.out.println("-- A: lazy collection in a loop --");
+            stats.clear();
+            System.out.println("total = " + report.totalQtyLazy() + ", statements = " + stats.getPrepareStatementCount());
+
+            System.out.println("-- B: @EntityGraph --");
+            stats.clear();
+            System.out.println("total = " + report.totalQtyGraph() + ", statements = " + stats.getPrepareStatementCount());
+
+            System.out.println("-- C: join fetch in @Query --");
+            stats.clear();
+            System.out.println("total = " + report.totalQtyFetchQuery() + ", statements = " + stats.getPrepareStatementCount());
+
+            System.out.println("-- D: batch fetching, size 8 --");
+            stats.clear();
+            System.out.println("total = " + report.totalQtyBatched() + ", statements = " + stats.getPrepareStatementCount());
+
+            System.out.println("-- E: an entity leaves the transaction (open-in-view=false) --");
+            Order escaped = report.firstOrder();
+            System.out.println("lines initialised = " + Hibernate.isInitialized(escaped.getLines()));
+            try {
+                System.out.println("line count = " + escaped.getLines().size());
+            } catch (LazyInitializationException e) {
+                System.out.println("caught " + e.getClass().getSimpleName());
+            }
+
+            System.out.println("-- F: a DTO leaves instead --");
+            System.out.println(report.firstOrderSummary());
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(SpringFetching.class);
+        app.setDefaultProperties(Map.of(
+            "spring.main.web-application-type", "none",
+            "spring.main.banner-mode", "off",
+            "spring.main.log-startup-info", "false",
+            "logging.level.root", "WARN",
+            "logging.pattern.console", "%level %logger{0}: %msg%n",
+            "spring.datasource.url", "jdbc:h2:mem:fetching;DB_CLOSE_DELAY=-1",
+            "spring.jpa.hibernate.ddl-auto", "create-drop",
+            "spring.jpa.show-sql", "true",
+            "spring.jpa.properties.hibernate.generate_statistics", "true",
+            "spring.jpa.open-in-view", "false"));
+        app.run(args).close();
+    }
+}
+  </pre>
+
+  <pre data-output data-for="SpringFetching">
+Hibernate: create global temporary table HTE_orders(rn_ integer not null, id bigint, reference varchar(255), primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_order_line(qty integer, rn_ integer not null, id bigint, order_id bigint, product_id bigint, primary key (rn_)) transactional
+Hibernate: create global temporary table HTE_product(rn_ integer not null, id bigint, sku varchar(16), primary key (rn_)) transactional
+Hibernate: drop table if exists order_line cascade
+Hibernate: drop table if exists orders cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists order_line_seq
+Hibernate: drop sequence if exists orders_seq
+Hibernate: drop sequence if exists product_seq
+Hibernate: create sequence order_line_seq start with 1 increment by 50
+Hibernate: create sequence orders_seq start with 1 increment by 50
+Hibernate: create sequence product_seq start with 1 increment by 50
+Hibernate: create table order_line (qty integer not null, id bigint not null, order_id bigint not null, product_id bigint not null, primary key (id))
+Hibernate: create table orders (id bigint not null, reference varchar(255) not null unique, primary key (id))
+Hibernate: create table product (id bigint not null, sku varchar(16) not null unique, primary key (id))
+Hibernate: alter table if exists order_line add constraint FKk9f9t1tmkbq5w27u8rrjbxxg6 foreign key (order_id) references orders
+Hibernate: alter table if exists order_line add constraint FKpf904tci8garypkvm32cqupye foreign key (product_id) references product
+Hibernate: select next value for product_seq
+Hibernate: insert into product (sku,id) values (?,?)
+Hibernate: select next value for product_seq
+Hibernate: insert into product (sku,id) values (?,?)
+Hibernate: select next value for orders_seq
+Hibernate: select next value for order_line_seq
+Hibernate: select next value for order_line_seq
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: select next value for orders_seq
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into orders (reference,id) values (?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+Hibernate: insert into order_line (order_id,product_id,qty,id) values (?,?,?,?)
+-- A: lazy collection in a loop --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 order by o1_0.reference
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id=?
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id=?
+total = 65, statements = 6
+-- B: @EntityGraph --
+Hibernate: select o1_0.id,l1_0.order_id,l1_0.id,l1_0.product_id,p1_0.id,p1_0.sku,l1_0.qty,o1_0.reference from orders o1_0 left join order_line l1_0 on o1_0.id=l1_0.order_id left join product p1_0 on p1_0.id=l1_0.product_id order by o1_0.reference
+total = 65, statements = 1
+-- C: join fetch in @Query --
+Hibernate: select distinct o1_0.id,l1_0.order_id,l1_0.id,l1_0.product_id,p1_0.id,p1_0.sku,l1_0.qty,o1_0.reference from orders o1_0 join order_line l1_0 on o1_0.id=l1_0.order_id join product p1_0 on p1_0.id=l1_0.product_id order by o1_0.reference
+total = 65, statements = 1
+-- D: batch fetching, size 8 --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 order by o1_0.reference
+Hibernate: select l1_0.order_id,l1_0.id,l1_0.product_id,l1_0.qty from order_line l1_0 where l1_0.order_id in (?,?,?,?,?,?,?,?)
+total = 65, statements = 2
+-- E: an entity leaves the transaction (open-in-view=false) --
+Hibernate: select o1_0.id,o1_0.reference from orders o1_0 order by o1_0.reference
+lines initialised = false
+caught LazyInitializationException
+-- F: a DTO leaves instead --
+Hibernate: select o1_0.id,l1_0.order_id,l1_0.id,l1_0.product_id,p1_0.id,p1_0.sku,l1_0.qty,o1_0.reference from orders o1_0 left join order_line l1_0 on o1_0.id=l1_0.order_id left join product p1_0 on p1_0.id=l1_0.product_id order by o1_0.reference
+OrderSummary[reference=ORD-1, lineCount=2, totalQty=11]
+Hibernate: drop table if exists order_line cascade
+Hibernate: drop table if exists orders cascade
+Hibernate: drop table if exists product cascade
+Hibernate: drop sequence if exists order_line_seq
+Hibernate: drop sequence if exists orders_seq
+Hibernate: drop sequence if exists product_seq
+  </pre>
+
+  <p>Read the phases against the statement counts; the SQL between them is the evidence.</p>
+  <ul class="max-w-prose">
+    <li><strong>A, six statements.</strong> One for the orders, then <code>where l1_0.order_id=?</code> five times as <code>getLines()</code> initialises each proxy collection. This is N+1 at N = 5, inside a transaction that was opened for exactly this method. At N = 500 it is 501 round trips, and nothing in <code>totalQtyLazy()</code> looks wrong.</li>
+    <li><strong>B, one statement.</strong> <code>@EntityGraph(attributePaths = {"lines", "lines.product"})</code> on the repository method turns the derived query into a <code>left join</code> over lines <em>and</em> products. The method name still drives the <code>where</code> and <code>order by</code>; the graph only says what to fetch. Note the <code>left join</code>: a graph keeps orders that have no lines.</li>
+    <li><strong>C, one statement, by hand.</strong> The <code>@Query</code> with <code>join fetch</code> produces the same shape with an inner join and a <code>distinct</code> (Hibernate 6+ deduplicates the parent entities without passing <code>distinct</code> to SQL, so it is harmless to write). Prefer B when the fetch plan is the only thing you need to say; prefer C when the query itself is custom.</li>
+    <li><strong>D, two statements.</strong> With a fetch batch size of 8 the first touched collection loads the lines for up to eight orders in one <code>in (?,?,?,?,?,?,?,?)</code>. Set globally as <code>spring.jpa.properties.hibernate.default_batch_fetch_size</code> it is the safety net that turns every forgotten N+1 into N/8+1; it does not replace B and C, it caps the damage when they are missing.</li>
+    <li><strong>E, the exception.</strong> <code>firstOrder()</code> returns a managed entity; the transaction commits on return and the persistence context closes. Back in the runner, <code>Hibernate.isInitialized(lines)</code> is <code>false</code> and <code>size()</code> throws <code>LazyInitializationException</code>. With <code>spring.jpa.open-in-view=true</code> (the default in a web application) the context would still be open here and the call would silently run the collection query — which is the whole open-in-view argument in one line.</li>
+    <li><strong>F, the right shape.</strong> <code>firstOrderSummary()</code> fetches what it needs inside the transaction and returns a record. Nothing lazy crosses the boundary, so nothing can throw later, and the caller cannot accidentally trigger a query from a template.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">Where will the lazy load run?</h3>
+
+  <div class="lm-card" data-sandbox="fetch-decision">
+    <div class="lm-card-title">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 20h16M4 4v16m4-6 3-4 3 3 5-7"/></svg>
+      What happens when the collection is touched
+    </div>
+    <div class="lm-controls">
+      <label class="lm-field">
+        <span>Touched in</span>
+        <select data-sb-where>
+          <option value="repo">the repository method itself (EntityGraph / fetch query)</option>
+          <option value="service" selected>a @Transactional service method</option>
+          <option value="runner">the caller after the service returned (controller, runner, template)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>spring.jpa.open-in-view</span>
+        <select data-sb-osiv>
+          <option value="off" selected>false</option>
+          <option value="on">true (the web default)</option>
+        </select>
+      </label>
+      <label class="lm-field">
+        <span>Fetch strategy</span>
+        <select data-sb-strategy>
+          <option value="lazy" selected>lazy mapping, nothing else</option>
+          <option value="batch">lazy + default_batch_fetch_size = 8</option>
+          <option value="graph">@EntityGraph on the method</option>
+          <option value="fetch">join fetch in @Query</option>
+          <option value="dto">DTO projection (no entity leaves)</option>
+        </select>
+      </label>
+      <label class="lm-field grow">
+        <span>Parents returned <span class="lm-readout" data-sb-nout>50</span></span>
+        <input type="range" data-sb-n min="1" max="500" value="50" step="1">
+      </label>
+    </div>
+    <div data-sb-out></div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Open-in-view: why it is on, and why you turn it off</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Open-in-view">
+      <button type="button" class="lm-tab" role="tab" id="tab-fetching-osiv" aria-controls="panel-fetching-osiv" aria-selected="true" tabindex="0">What it does</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-fetching-cost" aria-controls="panel-fetching-cost" aria-selected="false" tabindex="-1">What it costs</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-fetching-graph" aria-controls="panel-fetching-graph" aria-selected="false" tabindex="-1">@EntityGraph in detail</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-fetching-osiv" aria-labelledby="tab-fetching-osiv" tabindex="0">
+      <p>In a web application Spring Boot registers an <code>OpenEntityManagerInViewInterceptor</code>. It binds an <code>EntityManager</code> to the request thread before the controller runs and closes it after the view has rendered. Every <code>@Transactional</code> service call in between reuses that same persistence context, and after the last transaction commits the context stays open — detached entities are not detached, lazy collections still load, and a template can walk <code>order.lines[i].product.name</code> without anyone having planned a fetch.</p>
+      <p class="mb-0">That is why it is on by default: it makes naive code work. Spring Boot logs a warning at startup (<code>spring.jpa.open-in-view is enabled by default</code>) precisely because "works" and "scales" are different claims. Setting the property to <code>false</code>, as every program in this module does, makes E above throw instead of query — which is the behaviour you want to find in development, not in production under load.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-fetching-cost" aria-labelledby="tab-fetching-cost" tabindex="0" hidden>
+      <ul class="mb-0">
+        <li><strong>A connection for the whole request.</strong> The first lazy load after the service returns needs a JDBC connection; Hibernate takes one from the pool and, with the context still open, keeps it until the view is rendered. Slow templates and slow clients now hold pool connections. Under load the pool empties and unrelated requests queue on <code>HikariPool … connection is not available</code>.</li>
+        <li><strong>N+1 in places that are not Java.</strong> The loop in A at least sits in a method you can profile. The same loop in a template is invisible to statistics taken in the service, so the fix (B or C) is never applied where it is needed.</li>
+        <li><strong>Reads after the transaction are not transactional.</strong> Lazy loads outside the <code>@Transactional</code> method run in auto-commit mode on whatever the database shows now, so a page can show an order from one moment and its lines from another.</li>
+        <li><strong>The fix is a shape, not a flag.</strong> With open-in-view off, every read method must fetch what its caller needs (B, C) or return a DTO (F). That constraint is the design: it makes each query's cost visible at the method that runs it.</li>
+      </ul>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-fetching-graph" aria-labelledby="tab-fetching-graph" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+// attribute paths, nested with dots — the usual form
+@EntityGraph(attributePaths = {"lines", "lines.product"})
+List&lt;Order&gt; findWithGraphByOrderByReference();
+
+// a named graph declared on the entity, reused by several methods
+@NamedEntityGraph(name = "Order.full", attributeNodes = {
+    @NamedAttributeNode(value = "lines", subgraph = "lines"),
+    @NamedAttributeNode("customer") },
+    subgraphs = @NamedSubgraph(name = "lines", attributeNodes = @NamedAttributeNode("product")))
+@EntityGraph("Order.full")
+Optional&lt;Order&gt; findByReference(String reference);
+
+// FETCH (default): listed attributes eager, every other one LAZY regardless of mapping
+// LOAD: listed attributes eager, the rest as mapped
+@EntityGraph(attributePaths = "lines", type = EntityGraph.EntityGraphType.LOAD)
+List&lt;Order&gt; findByReferenceStartingWith(String prefix);
+      </pre>
+      <p class="mb-0">A graph applies to derived queries, <code>findById</code>, <code>findAll</code> and <code>@Query</code> methods alike. Two <code>List</code> collections in one graph throw <code>MultipleBagFetchException</code> exactly as two <code>join fetch</code>es would (JPA §5); use a <code>Set</code> for one of them or fetch in two queries. And a graph combined with a <code>Pageable</code> fetches the join in full and pages in memory with Hibernate's <code>HHH90003004</code> warning — §7 shows the shape that avoids it.</p>
+    </div>
+  </div>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Fetching gotchas specific to Spring</div>
+      <ul class="mb-0">
+        <li><strong>Returning entities from a service is the bug, not the symptom.</strong> E throws only because open-in-view is off; with it on, the same code runs an unplanned query from the caller. Return DTOs or fetch-complete entities; never let a lazy proxy cross the service boundary.</li>
+        <li><strong><code>@Transactional(readOnly = true)</code> is not optional on read services.</strong> It gives you one context per call (so B and C can dedupe and the identity map works), tells Hibernate to skip dirty-check snapshots, and lets a replica-aware data source route the read. Without it every repository call is its own transaction and its own context, and a loop over two repositories loads the same <code>Product</code> many times.</li>
+        <li><strong><code>default_batch_fetch_size</code> is a net, not a plan.</strong> Set it (8–32) in every application, then still fix the N+1s you find; a page that needs 500 collections still runs 500/16 + 1 statements.</li>
+        <li><strong>Statistics are the test.</strong> <code>hibernate.generate_statistics</code> costs little; a <code>@DataJpaTest</code> that asserts <code>getPrepareStatementCount() == 1</code> after calling the report method is how regressions are caught. §11 shows the harness.</li>
+        <li><strong>Turning open-in-view off is a migration, not a toggle.</strong> Every template and serializer that walked a lazy association will start throwing. Do it early in a project, or do it with statistics and a log of <code>LazyInitializationException</code>s to drive the fixes.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-fetching-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>In phase E the runner calls <code>escaped.getLines().size()</code> after <code>firstOrder()</code> returned and gets <code>LazyInitializationException</code>. Which single change makes that call <em>succeed</em> without changing the service?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-fetching-1"><span>Annotate the runner bean with <code>@Transactional</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-fetching-1"><span>Set <code>fetch = FetchType.EAGER</code> on <code>OrderLine.order</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-fetching-1"><span>Set <code>spring.jpa.open-in-view=true</code> — in a web request the context would stay open, so the collection would load with one more query <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-fetching-1"><span>Nothing: a detached collection can never be initialised <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C</strong> — and it is the wrong fix, which is the point. Open-in-view keeps the persistence context open past the service, so the lazy load runs in the caller with an extra query and a connection held for the rest of the request. It only applies to web requests (the interceptor is request-scoped), so in this command-line program even that would not help; in a controller it would.</p>
+        <p class="mb-0"><strong>A</strong>: a <code>@Bean</code> method's returned lambda is not a proxied bean, so <code>@Transactional</code> on it does nothing; and even a real transaction in the caller would be a <em>new</em> context that does not contain <code>escaped</code>. <strong>B</strong> is the wrong association: <code>lines</code> is the collection that is lazy, and making <code>OrderLine.order</code> eager changes how lines load their parent, not how orders load their lines. <strong>D</strong>: a detached collection can be reattached (<code>merge</code>) or initialised inside a new transaction with <code>Hibernate.initialize</code> after a reload — it is the <em>context</em> that is gone, not the data.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-fetching-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A service method is <code>@Transactional(readOnly = true)</code> and runs <code>orders.findAllByOrderByReference()</code> for 400 orders, then touches each <code>getLines()</code>. The application sets <code>spring.jpa.properties.hibernate.default_batch_fetch_size=16</code>. How many statements run?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-fetching-2"><span>401 — batch fetching only applies to <code>@BatchSize</code>-annotated collections <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-fetching-2"><span>26 — one for the orders, then 400 ÷ 16 = 25 <code>in (…)</code> loads of 16 collections each <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-fetching-2"><span>2 — the first touch loads every collection of every order in the context <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-fetching-2"><span>1 — a global batch size makes Hibernate join the collection into the query <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Phase D at scale: each time an uninitialised collection is touched, Hibernate loads it together with up to 15 other uninitialised collections of the same role that are already in the persistence context, keyed by the owners' ids. 400 orders, 16 per batch, 25 batches, plus the order query.</p>
+        <p class="mb-0"><strong>A</strong>: <code>default_batch_fetch_size</code> is exactly the global form of <code>@BatchSize</code>; the annotation overrides it per collection. <strong>C</strong> describes <code>@Fetch(FetchMode.SUBSELECT)</code>, which re-runs the original query as a subselect — a different, explicit annotation. <strong>D</strong>: a batch size never changes the shape of the original query; only a graph or a fetch join does that.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-fetching-3" data-answer="a,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of the following are true of <code>@EntityGraph(attributePaths = {"lines", "notes"})</code> on a repository method, where both <code>lines</code> and <code>notes</code> are <code>List</code>s? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span>It fails with <code>MultipleBagFetchException</code>, the same as two <code>join fetch</code>es on <code>List</code>s <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>It works and runs one query, because entity graphs fetch collections with separate selects <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span>It works only on <code>findById</code>, not on derived queries <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>Changing one of the two to a <code>Set</code> makes it run, at the cost of a <em>lines × notes</em> row multiplication per order <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A and D.</strong> A graph is translated into joins, so it inherits the join rules from JPA §5: two bags cannot be fetched in one result set, and one bag plus one set can but produces the cartesian product. The practical answers are two queries in one transaction, a batch size, or a DTO.</p>
+        <p class="mb-0"><strong>B</strong> is false — the generated SQL in phase B shows the joins. <strong>C</strong>: graphs apply to <code>findById</code>, <code>findAll</code>, derived and <code>@Query</code> methods alike.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="fetching"> Mark this section complete
+  </label>
+</section>

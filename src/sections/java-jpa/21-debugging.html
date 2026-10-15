@@ -1,0 +1,425 @@
+<section class="lm-section" id="debugging" data-title="Reading the SQL and the exceptions" data-num="12">
+  <p class="lm-eyebrow">Section 12</p>
+  <h2 class="mb-4">Reading the SQL and the exceptions</h2>
+
+  <p>An ORM fails in two ways: slowly, by issuing more SQL than you imagined, and loudly, with an exception whose name is three wrappers away from the thing that went wrong. Both are diagnosable in minutes once you know where Hibernate reports what it does. This section is the toolkit: what to switch on, how to read what comes out, and a map from each common exception to its cause and its fix.</p>
+
+  <p>The first rule applies to both kinds of failure: <strong>look at the SQL</strong>. Hibernate never does anything to the database that it cannot show you. If a page is slow, the statement count explains it; if a commit fails, the statement that failed is in the log one line above the stack trace.</p>
+
+  <h3 class="mt-8 mb-3">Worked example: nine failures, nine cause chains</h3>
+
+  <p>Every exception below is provoked on purpose, caught, and printed as its <em>cause chain</em> — outermost first, following <code>getCause()</code> to the end. Read the chains before the prose: the outermost type is what your <code>catch</code> sees, the innermost is what Hibernate actually detected.</p>
+
+  <pre data-code data-lang="java" data-file="Exceptions.java" data-verify="Exceptions" data-hi="66,67,68,69,70,71,72,73">
+import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Exceptions {
+
+    @Entity(name = "Product")
+    @Table(name = "product")
+    public static class Product {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @Column(nullable = false, unique = true, length = 16)
+        private String sku;
+        private int priceInCents;
+        @Version
+        private int version;
+        protected Product() {}
+        Product(String sku, int priceInCents) { this.sku = sku; this.priceInCents = priceInCents; }
+        Long id() { return id; }
+        void setPriceInCents(int p) { this.priceInCents = p; }
+        int priceInCents() { return priceInCents; }
+    }
+
+    @Entity(name = "Order")
+    @Table(name = "orders")                          // ORDER is a reserved word in SQL
+    public static class Order {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY)            // no cascade: the product must already be persistent
+        private Product product;
+        @OneToMany(mappedBy = "order", cascade = CascadeType.ALL)
+        private List<OrderLine> lines = new ArrayList<>();
+        protected Order() {}
+        Order(Product product) { this.product = product; }
+        Long id() { return id; }
+        List<OrderLine> lines() { return lines; }
+        void addLine(int qty) { OrderLine l = new OrderLine(this, qty); lines.add(l); }
+    }
+
+    @Entity(name = "OrderLine")
+    @Table(name = "order_line")
+    public static class OrderLine {
+        @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+        private Long id;
+        @ManyToOne(fetch = FetchType.LAZY)
+        private Order order;
+        private int qty;
+        protected OrderLine() {}
+        OrderLine(Order order, int qty) { this.order = order; this.qty = qty; }
+    }
+
+    static EntityManagerFactory emf() {
+        return new PersistenceConfiguration("warehouse")
+            .managedClass(Product.class).managedClass(Order.class).managedClass(OrderLine.class)
+            .property(PersistenceConfiguration.JDBC_URL, "jdbc:h2:mem:Exceptions;DB_CLOSE_DELAY=-1")
+            .property(PersistenceConfiguration.JDBC_USER, "sa")
+            .property(PersistenceConfiguration.JDBC_PASSWORD, "")
+            .property(PersistenceConfiguration.SCHEMAGEN_DATABASE_ACTION, "drop-and-create")
+            .property("hibernate.show_sql", "false")   // nine failure paths: the facts matter here, not the SQL
+            .createEntityManagerFactory();
+    }
+
+    /* The exception you catch is rarely the one that explains the problem:
+       JPA wraps Hibernate's, and commit wraps everything in RollbackException.
+       Walk the cause chain and print every link, outermost first. */
+    static String chain(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause() == c ? null : c.getCause()) {
+            if (sb.length() > 0) sb.append(" <- ");
+            sb.append(c.getClass().getSimpleName());
+        }
+        return sb.toString();
+    }
+
+    interface Case { void run(EntityManager em) throws Exception; }
+
+    static void attempt(EntityManagerFactory emf, String label, Case c) {
+        EntityManager em = emf.createEntityManager();
+        try {
+            em.getTransaction().begin();
+            c.run(em);
+            em.getTransaction().commit();
+            System.out.println(label + ": no exception");
+        } catch (Exception e) {
+            System.out.println(label + ": " + chain(e));
+        } finally {
+            if (em.isOpen()) {
+                if (em.getTransaction().isActive()) em.getTransaction().rollback();
+                em.close();
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try (EntityManagerFactory emf = emf()) {
+            long boltId, orderId;
+            try (EntityManager em = emf.createEntityManager()) {
+                em.getTransaction().begin();
+                Product bolt = new Product("BOLT-7", 80);
+                em.persist(bolt);
+                em.persist(new Product("NUT-3", 25));
+                Order o = new Order(bolt);
+                o.addLine(2);
+                o.addLine(5);
+                em.persist(o);
+                em.getTransaction().commit();
+                boltId = bolt.id();
+                orderId = o.id();
+            }
+
+            // 1. a lazy collection touched after the EntityManager is gone
+            Order detachedOrder;
+            try (EntityManager em = emf.createEntityManager()) {
+                detachedOrder = em.find(Order.class, orderId);
+            }
+            try {
+                System.out.println("1 lines on a closed context: " + detachedOrder.lines().size());
+            } catch (RuntimeException e) {
+                System.out.println("1 lines on a closed context: " + chain(e));
+            }
+
+            // 2. an association to an object that was never persisted
+            attempt(emf, "2 order -> unsaved product", em -> {
+                Order o = new Order(new Product("CAM-9", 2300));   // CAM-9 is transient
+                em.persist(o);
+            });
+
+            // 3. persist() on an entity that already has an identity
+            attempt(emf, "3 persist a detached entity", em -> {
+                Product bolt = em.find(Product.class, boltId);
+                em.detach(bolt);
+                em.persist(bolt);
+            });
+
+            // 4 & 5. getSingleResult expects exactly one row
+            attempt(emf, "4 single result, two rows", em ->
+                em.createQuery("select p from Product p", Product.class).getSingleResult());
+            attempt(emf, "5 single result, no rows", em ->
+                em.createQuery("select p from Product p where p.sku = 'NOPE'", Product.class).getSingleResult());
+
+            // 6. two contexts edit the same row; the second commit is stale
+            EntityManager em1 = emf.createEntityManager();
+            EntityManager em2 = emf.createEntityManager();
+            try {
+                em1.getTransaction().begin();
+                em2.getTransaction().begin();
+                Product first = em1.find(Product.class, boltId);
+                Product second = em2.find(Product.class, boltId);
+                first.setPriceInCents(81);
+                em1.getTransaction().commit();                  // version 0 -> 1
+                second.setPriceInCents(82);
+                try {
+                    em2.getTransaction().commit();              // expects version 0: refused
+                    System.out.println("6 stale update: no exception");
+                } catch (RuntimeException e) {
+                    System.out.println("6 stale update: " + chain(e));
+                }
+            } finally {
+                if (em2.getTransaction().isActive()) em2.getTransaction().rollback();
+                em1.close(); em2.close();
+            }
+
+            // 7. a unique constraint, discovered only at flush
+            attempt(emf, "7 duplicate sku", em -> em.persist(new Product("BOLT-7", 1)));
+
+            // 8. a JPQL path that does not exist, discovered at query creation
+            attempt(emf, "8 unknown attribute in JPQL", em ->
+                em.createQuery("select p from Product p where p.colour = 'red'", Product.class).getResultList());
+
+            // 9. a transaction marked rollback-only: commit() quietly becomes rollback()
+            attempt(emf, "9 commit after setRollbackOnly", em -> {
+                em.find(Product.class, boltId).setPriceInCents(999);
+                em.getTransaction().setRollbackOnly();
+            });
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("  price after that commit: " + em.find(Product.class, boltId).priceInCents());
+            }
+
+            // the context survived all of it: the data is intact
+            try (EntityManager em = emf.createEntityManager()) {
+                System.out.println("products still in the database: " +
+                    em.createQuery("select count(p) from Product p", Long.class).getSingleResult());
+            }
+        }
+    }
+}
+  </pre>
+
+  <pre data-output data-for="Exceptions">
+1 lines on a closed context: LazyInitializationException
+2 order -> unsaved product: RollbackException <- IllegalStateException <- TransientPropertyValueException
+3 persist a detached entity: EntityExistsException <- PersistentObjectException
+4 single result, two rows: NonUniqueResultException <- NonUniqueResultException
+5 single result, no rows: NoResultException
+6 stale update: RollbackException <- OptimisticLockException <- StaleObjectStateException <- StaleStateException
+7 duplicate sku: RollbackException <- ConstraintViolationException <- JdbcSQLIntegrityConstraintViolationException
+8 unknown attribute in JPQL: IllegalArgumentException <- UnknownPathException <- PathElementException
+9 commit after setRollbackOnly: no exception
+  price after that commit: 81
+products still in the database: 2
+  </pre>
+
+  <p>Nine lines, and each one teaches a rule about <em>when</em> Hibernate notices a problem:</p>
+  <ul class="max-w-prose">
+    <li><strong>1</strong> fails at <em>access time</em>, not at load time. The order loaded fine; the collection was left as a proxy, and the proxy's context was closed when it was first asked for its elements. Nothing in the stack trace points at the <code>em.close()</code> that caused it. §5 covers the fixes; the one that is not a fix is making the collection <code>EAGER</code>.</li>
+    <li><strong>2</strong>, <strong>6</strong> and <strong>7</strong> fail at <em>flush</em>, which happened inside <code>commit()</code>, which is why each chain starts with <code>RollbackException</code>. The real diagnosis is the innermost link: an unsaved reference, a stale version, a unique index. If you flushed explicitly you would see the inner exception directly and could still roll back on your own terms.</li>
+    <li><strong>3</strong> fails <em>immediately</em>: <code>persist</code> refuses an object that already has an identifier. The JPA type is <code>EntityExistsException</code>; Hibernate's own message, one link in, is the famous <q>detached entity passed to persist</q>. The method you wanted was <code>merge</code> — or, more often, you wanted to keep the entity managed and never detach it.</li>
+    <li><strong>4</strong> and <strong>5</strong> are query-contract failures. The doubled name in 4 is not a typo: Jakarta's <code>NonUniqueResultException</code> wraps Hibernate's class of the same simple name. Use <code>getSingleResultOrNull()</code> (JPA 3.2) or <code>getResultStream().findFirst()</code> when zero rows is a normal outcome.</li>
+    <li><strong>8</strong> fails when the query is <em>created</em>, before any SQL exists: Hibernate parses JPQL against the mapped model, so a wrong attribute is caught as early as a compile error would be. Native SQL gives up that check.</li>
+    <li><strong>9</strong> is the surprise: no exception at all. The JPA specification says <code>commit()</code> on a rollback-only transaction throws <code>RollbackException</code>; Hibernate, by default, silently rolls back instead and only throws if you set <code>hibernate.jpa.compliance.transaction=true</code>. The price check proves the write was discarded. If your code relies on commit <em>failing</em> to notice a problem, it never will.</li>
+  </ul>
+
+  <h3 class="mt-8 mb-3">What to switch on</h3>
+
+  <div class="lm-tabs">
+    <div class="lm-tablist" role="tablist" aria-label="Diagnostic settings">
+      <button type="button" class="lm-tab" role="tab" id="tab-debugging-sql" aria-controls="panel-debugging-sql" aria-selected="true" tabindex="0">Seeing the SQL</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-debugging-stats" aria-controls="panel-debugging-stats" aria-selected="false" tabindex="-1">Statistics</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-debugging-log" aria-controls="panel-debugging-log" aria-selected="false" tabindex="-1">Logging categories</button>
+      <button type="button" class="lm-tab" role="tab" id="tab-debugging-proxy" aria-controls="panel-debugging-proxy" aria-selected="false" tabindex="-1">Outside Hibernate</button>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-debugging-sql" aria-labelledby="tab-debugging-sql" tabindex="0">
+      <pre data-code data-lang="java" data-nobar>
+.property("hibernate.show_sql", "true")        // print every statement to System.out — what this module uses
+.property("hibernate.format_sql", "true")      // one clause per line; easier on a 40-join query, noisier on a page
+.property("hibernate.highlight_sql", "true")   // ANSI colours; terminals only
+      </pre>
+      <p><code>show_sql</code> writes to <strong>stdout</strong>, bypassing your logging framework entirely, which is why it is a development switch and not a production one. It also prints <code>?</code> for every parameter; the bound values are a separate logging category (next tab). What it shows is exactly the statement text handed to JDBC, including Hibernate's generated aliases (<code>p1_0</code>) and column order.</p>
+      <p class="mb-0">Read a statement from its <code>from</code> clause outwards: which tables, joined how, then which columns, then the <code>where</code>. The things that should make you stop are a <code>select</code> inside a loop (the N+1 shape, §5), a <code>select</code> you did not expect before an <code>update</code> (a <code>merge</code> or a lazy load you forgot you triggered), and an <code>update</code> that writes every column when one changed (the default; <code>@DynamicUpdate</code> changes it, §9).</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-debugging-stats" aria-labelledby="tab-debugging-stats" tabindex="0" hidden>
+      <pre data-code data-lang="java" data-nobar>
+.property("hibernate.generate_statistics", "true")
+
+Statistics st = emf.unwrap(SessionFactory.class).getStatistics();
+st.clear();
+// … the code you are measuring …
+st.getPrepareStatementCount();     // how many SQL statements were prepared
+st.getEntityLoadCount();           // entities materialised from rows
+st.getEntityFetchCount();          // of those, how many were lazy loads triggered by a proxy  ← the N+1 counter
+st.getCollectionFetchCount();      // lazy collections initialised
+st.getFlushCount();                // auto flushes forced by queries
+st.getSecondLevelCacheHitCount();  // zero until you configure a cache (§9)
+st.getQueryExecutionMaxTimeQueryString();   // the slowest JPQL since clear()
+      </pre>
+      <p class="mb-0">Statistics are the tool for a <em>test</em>: assert that listing twenty orders prepares one statement, and the N+1 regression can never come back silently. They are cheap enough to leave on in production behind a metrics endpoint; <code>logSummary()</code> prints the whole set on shutdown.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-debugging-log" aria-labelledby="tab-debugging-log" tabindex="0" hidden>
+      <pre data-code data-lang="plain" data-nobar>
+# logging.properties (java.util.logging; the same category names work in Log4j and Logback)
+org.hibernate.SQL.level = FINE                # every statement, through the logging framework (no show_sql needed)
+org.hibernate.orm.jdbc.bind.level = FINER     # the parameter values bound to each ?
+org.hibernate.orm.jdbc.extract.level = FINER  # the values read back from each ResultSet column
+org.hibernate.stat.level = FINE               # per-query timing and row counts as they happen
+org.hibernate.SQL_SLOW.level = INFO           # with hibernate.log_slow_query=250: statements slower than 250 ms
+      </pre>
+      <p class="mb-0">Prefer the logger to <code>show_sql</code> as soon as the application has a logging framework: it goes where every other log line goes, carries timestamps and thread names, and can be turned on for one category in a running JVM. The bind category is the one that answers <q>why did this query return nothing?</q> — it shows the actual value, and the actual <em>type</em>, that was sent.</p>
+    </div>
+    <div class="lm-tabpanel" role="tabpanel" id="panel-debugging-proxy" aria-labelledby="tab-debugging-proxy" tabindex="0" hidden>
+      <p>Two tools sit between Hibernate and the driver and see everything, including statements Hibernate did not issue (a migration tool, a second ORM, hand-written JDBC):</p>
+      <ul>
+        <li><strong>datasource-proxy</strong> wraps a <code>DataSource</code> and can log, count, or <em>assert</em> on statements — its <code>QueryCountHolder</code> is the basis of the test-time N+1 detectors in several libraries.</li>
+        <li><strong>p6spy</strong> is a JDBC driver wrapper that logs every statement with its parameters inlined, timings included, with no code change beyond the JDBC URL.</li>
+      </ul>
+      <p class="mb-0">For the database's own view, <code>EXPLAIN</code> (or <code>EXPLAIN ANALYZE</code>) the statement text you copied out of the log, with the real parameter values from the bind category. Hibernate chose the statement; only the database can tell you whether it used an index.</p>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">The exception map</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common persistence exceptions, their cause and fix</caption>
+      <thead><tr><th scope="col">Exception (innermost that matters)</th><th scope="col">What it means</th><th scope="col">Fix</th></tr></thead>
+      <tbody>
+        <tr><td><code>LazyInitializationException</code></td><td>A proxy or lazy collection was touched after its context closed</td><td>Fetch what the use case needs inside the transaction: <code>join fetch</code>, an entity graph, or a DTO projection (§5)</td></tr>
+        <tr><td><code>TransientPropertyValueException</code> / <code>TransientObjectException</code></td><td>A managed entity references an object that was never persisted</td><td>Persist the referenced entity first, or add <code>cascade = PERSIST</code> on that association deliberately</td></tr>
+        <tr><td><code>PersistentObjectException</code> (<q>detached entity passed to persist</q>)</td><td><code>persist</code> called on an object that already has an id</td><td>Use <code>merge</code>, or keep the entity managed instead of detaching it; check for an id set by hand</td></tr>
+        <tr><td><code>EntityExistsException</code></td><td>The JPA wrapper for the previous row, or a second <code>persist</code> of the same id in one context</td><td>Same as above</td></tr>
+        <tr><td><code>NonUniqueObjectException</code></td><td>Two instances with the same id in one context (typically a <code>merge</code> after a <code>find</code>)</td><td>Work with the instance the context already holds; <code>merge</code> returns it</td></tr>
+        <tr><td><code>OptimisticLockException</code> / <code>StaleObjectStateException</code></td><td>The row's <code>@Version</code> changed since this context read it</td><td>Catch at the use-case boundary, reload, reapply, retry — or tell the user (§7)</td></tr>
+        <tr><td><code>PessimisticLockException</code> / <code>LockTimeoutException</code></td><td>A <code>for update</code> lock could not be obtained in time</td><td>Shorter transactions, consistent lock order, a <code>jakarta.persistence.lock.timeout</code> hint</td></tr>
+        <tr><td><code>ConstraintViolationException</code></td><td>The database rejected a row: unique, foreign key, not-null, check</td><td>Validate before persisting where the rule is yours; treat the SQL state <code>23505</code> (unique) as a normal business outcome where it is not</td></tr>
+        <tr><td><code>NonUniqueResultException</code></td><td><code>getSingleResult</code> saw more than one row</td><td>Tighten the <code>where</code>, or use <code>getResultList</code> / <code>setMaxResults(1)</code></td></tr>
+        <tr><td><code>NoResultException</code></td><td><code>getSingleResult</code> saw no rows</td><td><code>getSingleResultOrNull()</code> (JPA 3.2) or <code>getResultStream().findFirst()</code></td></tr>
+        <tr><td><code>IllegalArgumentException</code> wrapping <code>UnknownPathException</code> / <code>SemanticException</code></td><td>JPQL refers to an attribute, entity or function that is not mapped</td><td>Read the message — it names the path; check the entity <em>name</em> (not the table name) and the attribute spelling</td></tr>
+        <tr><td><code>QueryTimeoutException</code></td><td>The statement exceeded <code>jakarta.persistence.query.timeout</code></td><td>Fix the query plan (<code>EXPLAIN</code>), add the index, or paginate</td></tr>
+        <tr><td><code>RollbackException</code></td><td><code>commit()</code> failed; the cause is one of the rows above</td><td>Always inspect <code>getCause()</code>; never catch this one on its own</td></tr>
+        <tr><td><code>SchemaManagementException</code></td><td><code>validate</code> found a table or column that does not match the mapping</td><td>Run the migration, or fix the mapping — never switch to <code>update</code> to make it go away (§10)</td></tr>
+        <tr><td><code>MappingException</code> / <code>AnnotationException</code> at startup</td><td>The mapping itself is inconsistent (a <code>mappedBy</code> naming nothing, two owning sides, a missing no-arg constructor)</td><td>The message names the entity and attribute; fix the annotation</td></tr>
+        <tr><td><code>JDBCConnectionException</code></td><td>The driver could not reach the database, or the pool handed out a dead connection</td><td>Infrastructure: pool validation query, timeouts, and retry at the use-case boundary</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="mt-8 mb-3">A slow page: the six-step diagnosis</h3>
+
+  <ol class="max-w-prose">
+    <li><strong>Count the statements.</strong> Statistics or the proxy counter around the one request. A page that needs one query and runs sixty is not slow because of the database.</li>
+    <li><strong>Find the loop.</strong> Sixty near-identical <code>select … where id=?</code> lines are an N+1 (§5); <code>getEntityFetchCount()</code> names the entity being lazily loaded.</li>
+    <li><strong>Check the fetch plan.</strong> For each association the page touches: is it fetched by the query (<code>join fetch</code>, entity graph), batched (<code>@BatchSize</code>), or loaded one proxy at a time? Fix at the query, not the mapping.</li>
+    <li><strong>Check the flush count.</strong> A high <code>getFlushCount()</code> means queries kept forcing auto-flush of a dirty context — usually a long transaction that reads and writes alternately. Split it, or flush once at the end.</li>
+    <li><strong>Check the pool.</strong> If statements are few and fast but the request is slow, time is spent <em>waiting for a connection</em>: pool exhausted by long transactions, or a transaction held open across a remote call.</li>
+    <li><strong><code>EXPLAIN</code> the worst statement.</strong> Only now is the database the suspect: a missing index, a cast that defeats an index (the bind category shows the type), or a <code>select *</code> of a table with a 4 MB blob column that a DTO projection would skip.</li>
+  </ol>
+
+  <h3 class="mt-8 mb-3">Mapping mistakes that cause most of the above</h3>
+
+  <div class="lm-table-wrap">
+    <table>
+      <caption class="lm-visually-hidden">Common mapping mistakes and their consequences</caption>
+      <thead><tr><th scope="col">Mistake</th><th scope="col">What it causes</th><th scope="col">Instead</th></tr></thead>
+      <tbody>
+        <tr><td><code>FetchType.EAGER</code> everywhere <q>to avoid LazyInitializationException</q></td><td>Every load drags the object graph along; a <code>find</code> of one order joins five tables; collections become Cartesian products</td><td><code>LAZY</code> on every association (the default is already <code>EAGER</code> for <code>@ManyToOne</code> — override it), fetch per use case</td></tr>
+        <tr><td><code>List</code> on both sides of a <code>@ManyToMany</code></td><td>Removing one element deletes every join row and reinserts the rest</td><td><code>Set</code> on the owning side</td></tr>
+        <tr><td>Lombok <code>@Data</code> (or any generated <code>equals</code>/<code>hashCode</code>/<code>toString</code> over all fields) on an entity</td><td><code>hashCode</code> changes when the id is assigned; <code>toString</code> walks lazy associations and throws; bidirectional links recurse</td><td>Business-key or stable-id equality (§11), hand-written <code>toString</code> without associations</td></tr>
+        <tr><td><code>hashCode</code> from the generated id</td><td>An entity put in a <code>Set</code> before <code>persist</code> is lost after it, because its hash moved buckets</td><td>Natural key, or a constant hash with id-based <code>equals</code> (§11)</td></tr>
+        <tr><td><code>cascade = ALL</code> on <code>@ManyToOne</code></td><td>Deleting an order line deletes the product it pointed at — and fails on the foreign key from every other line</td><td>Cascade only from parent to child, along the <code>@OneToMany</code> side</td></tr>
+        <tr><td>No transaction boundary around a use case (in Spring: a missing <code>@Transactional</code>, or one on a private method)</td><td>Every statement auto-commits; dirty checking never runs; lazy loads fail outside the one statement's context</td><td>One transaction per use case at the service boundary</td></tr>
+        <tr><td><code>spring.jpa.open-in-view=true</code> left at its default</td><td>Lazy loads work in the view layer, so nobody notices the N+1 until production load; connections are held for the whole request</td><td>Turn it off and fetch what the view needs in the service</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>A word on <strong>Spring Data JPA</strong>, since most readers will meet Hibernate through it. It changes none of the above. <code>@Transactional</code> opens the transaction and the persistence context for you, and closes both when the method returns; <code>JpaRepository</code> methods such as <code>findById</code> and <code>save</code> are thin calls to <code>find</code> and <code>persist</code>-or-<code>merge</code> on an injected <code>EntityManager</code>; derived query methods are JPQL generated from the method name; <code>@EntityGraph</code> and <code>@Query("… join fetch …")</code> are how you fix N+1 there. The convenience hides the context's lifetime, which is exactly the thing this module has spent twelve sections making visible. When a Spring application misbehaves, the diagnosis is still the SQL and the statistics — and the exception map above is the same.</p>
+
+  <div class="lm-callout lm-callout--gotcha">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <div class="lm-callout-title">Debugging gotchas</div>
+      <ul class="mb-0">
+        <li><strong>The stack trace points at the commit, not the cause.</strong> A flush-time failure surfaces wherever the transaction ends. Flush explicitly in tests so the failing statement is next to the code that produced it.</li>
+        <li><strong>An exception leaves the context unusable.</strong> After any <code>PersistenceException</code> the <code>EntityManager</code> may be inconsistent; roll back and discard it. Catching and carrying on inside the same context is how <q>it fails only the second time</q> bugs are born.</li>
+        <li><strong><code>show_sql</code> does not show parameter values.</strong> A query that <q>returns nothing</q> usually bound the wrong value or the wrong type; the bind log category shows both.</li>
+        <li><strong>H2 is not your production database.</strong> It is excellent for this module and for fast tests, but it differs in locking, sequences, <code>upsert</code> syntax and type coercion. Run the integration suite against the real engine (Testcontainers makes that a one-line annotation).</li>
+        <li><strong>Silence is not success.</strong> Case 9 above: Hibernate's default rollback-only behaviour never throws. A use case that ends without an exception has not necessarily written anything; read the outcome back when it matters.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="mt-8 mb-3">Check yourself</h3>
+
+  <div class="lm-quiz">
+    <div class="lm-q" data-q id="q-debugging-1" data-answer="c">
+      <p class="lm-q-stem"><span class="lm-q-num">1.</span><span>A commit throws <code>RollbackException</code>. Where is the information that tells you what actually went wrong?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-debugging-1"><span>In the <code>RollbackException</code> message <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-debugging-1"><span>Nowhere — the transaction is gone and the error with it <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-debugging-1"><span>Down the <code>getCause()</code> chain, in the innermost Hibernate or JDBC exception <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-debugging-1"><span>Only in the database server's log <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>C.</strong> The worked example shows the shape: <code>RollbackException &lt;- ConstraintViolationException &lt;- JdbcSQLIntegrityConstraintViolationException</code>. The outer type only says <q>commit failed</q>; the inner ones say why.</p>
+        <p class="mb-0"><strong>A</strong> gives you a generic message. <strong>B</strong> is wrong — the chain is retained precisely so you can diagnose after rollback. <strong>D</strong> may also have it, but the JVM has it first and with the Java context.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-debugging-2" data-answer="b">
+      <p class="lm-q-stem"><span class="lm-q-num">2.</span><span>A listing page runs 41 statements for 40 rows. Which statistic confirms the N+1 diagnosis most directly?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-debugging-2"><span><code>getFlushCount()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-debugging-2"><span><code>getEntityFetchCount()</code> or <code>getCollectionFetchCount()</code> close to 40 <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-debugging-2"><span><code>getSecondLevelCacheMissCount()</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-debugging-2"><span><code>getQueryExecutionMaxTime()</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>B.</strong> Fetch counts measure loads <em>triggered by proxies</em> — exactly the one-per-row pattern. Forty of them after one query is the fingerprint.</p>
+        <p class="mb-0"><strong>A</strong> measures auto-flushes forced by queries, a different problem. <strong>C</strong> is zero unless a cache is configured. <strong>D</strong> finds the slowest single query; an N+1 is forty <em>fast</em> queries.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-debugging-3" data-answer="a,c,d">
+      <p class="lm-q-stem"><span class="lm-q-num">3.</span><span>Which of these are real consequences of putting Lombok's <code>@Data</code> on an entity with a bidirectional association? <em>Select all that apply.</em></span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="checkbox"><span><code>toString()</code> can recurse until a <code>StackOverflowError</code> <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="checkbox"><span>Hibernate refuses to map the class <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="checkbox"><span><code>toString()</code> or <code>hashCode()</code> can trigger a lazy load and throw <code>LazyInitializationException</code> outside a context <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="checkbox"><span>An instance stored in a <code>HashSet</code> before <code>persist</code> is not found in it afterwards <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>A, C and D.</strong> All-fields <code>toString</code> on both sides of a link is mutual recursion (A); walking an association to print or hash it initialises the proxy (C); and a hash that includes the generated id changes value when the id is assigned, so the <code>Set</code> looks in the wrong bucket (D, §11).</p>
+        <p class="mb-0"><strong>B</strong> is false: Hibernate maps the class happily, which is why the problems show up at runtime instead of at startup.</p>
+      </div>
+    </div>
+
+    <div class="lm-q" data-q id="q-debugging-4" data-answer="d">
+      <p class="lm-q-stem"><span class="lm-q-num">4.</span><span>In the worked example, case 9 marks the transaction rollback-only and then calls <code>commit()</code>. Nothing is thrown. Why?</span></p>
+      <ul class="lm-opts">
+        <li><label class="lm-opt" data-opt="a"><input type="radio" name="q-debugging-4"><span>Because the price change was never flushed, so there was nothing to roll back <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="b"><input type="radio" name="q-debugging-4"><span>Because <code>attempt()</code> swallows the exception <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="c"><input type="radio" name="q-debugging-4"><span>Because H2 does not support rollback-only transactions <span class="lm-opt-mark"></span></span></label></li>
+        <li><label class="lm-opt" data-opt="d"><input type="radio" name="q-debugging-4"><span>Because Hibernate's default is to roll back silently; strict JPA behaviour needs <code>hibernate.jpa.compliance.transaction=true</code> <span class="lm-opt-mark"></span></span></label></li>
+      </ul>
+      <button type="button" class="lm-btn" data-check>Check answer</button>
+      <p class="lm-visually-hidden" data-live aria-live="polite"></p>
+      <div class="lm-explain" hidden data-explain>
+        <p><strong>D.</strong> The specification mandates <code>RollbackException</code>; Hibernate chose leniency by default and gates the strict behaviour behind a compliance flag. The line <code>price after that commit: 81</code> shows the work was indeed discarded.</p>
+        <p class="mb-0"><strong>A</strong> confuses the mechanism: a rollback discards the change whether or not it was flushed. <strong>B</strong> is wrong — <code>attempt()</code> prints any exception's chain, and would have. <strong>C</strong> is invented; rollback-only is a JPA-level flag, not a database feature.</p>
+      </div>
+    </div>
+  </div>
+
+  <label class="lm-check mt-6" data-print="hide">
+    <input type="checkbox" data-done-for="debugging"> Mark this section complete
+  </label>
+</section>
